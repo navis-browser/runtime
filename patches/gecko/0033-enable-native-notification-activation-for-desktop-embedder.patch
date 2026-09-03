@@ -1,0 +1,25 @@
+diff --git a/build/moz.configure/update-programs.configure b/build/moz.configure/update-programs.configure
+index 5a4f2fbd7fd8..a3dce16547c8 100644
+--- a/build/moz.configure/update-programs.configure
++++ b/build/moz.configure/update-programs.configure
+@@ -250,11 +250,15 @@ set_config("MOZ_DEFAULT_BROWSER_AGENT", default_agent_flag)
+ # notifications to persist when the application is not running and relaunch as
+ # necessary.
+ # ==============================================================================
+-@depends(target, build_project)
+-def notification_server_default(target, build_project):
+-    return target.os == "WINNT" and build_project in (
+-        "browser",
+-        "comm/mail",
++@depends(target, build_project, "--enable-desktop-embedder")
++def notification_server_default(target, build_project, desktop_embedder):
++    return target.os == "WINNT" and (
++        desktop_embedder
++        or build_project
++        in (
++            "browser",
++            "comm/mail",
++        )
+     )
+ 
+ 

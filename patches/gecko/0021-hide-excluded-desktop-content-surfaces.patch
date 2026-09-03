@@ -1,0 +1,38 @@
+From cf70fa173783b7963a9321aaad38491104fa8c8f Mon Sep 17 00:00:00 2001
+From: willvar <0@willvar.tw>
+Date: Sat, 29 Aug 2026 19:50:34 +0800
+Subject: [PATCH] Hide excluded desktop content surfaces
+
+---
+ dom/webidl/Window.webidl | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dom/webidl/Window.webidl b/dom/webidl/Window.webidl
+index d6f02a5de369..26db72537dd5 100644
+--- a/dom/webidl/Window.webidl
++++ b/dom/webidl/Window.webidl
+@@ -225,8 +225,10 @@ interface nsIPrintSettings;
+   [Throws, NeedsSubjectPrincipal] undefined alert(DOMString message);
+   [Throws, NeedsSubjectPrincipal] boolean confirm(optional DOMString message = "");
+   [Throws, NeedsSubjectPrincipal] DOMString? prompt(optional DOMString message = "", optional DOMString default = "");
++#ifdef NS_PRINTING
+   [Throws]
+   undefined print();
++#endif
+ 
+   // Returns a window that you can use for a print preview.
+   //
+@@ -585,8 +587,10 @@ partial interface Window {
+    * We maintain this stub to avoid breaking websites that do
+    * "typeof InstallTrigger !== 'undefined" to detect Firefox
+    */
++#ifndef MOZ_DESKTOP_EMBEDDER
+   [Replaceable, Deprecated="InstallTriggerDeprecated", Pref="extensions.InstallTrigger.enabled"]
+   readonly attribute object? InstallTrigger;
++#endif
+ 
+   /**
+    * Get the nsIDOMWindowUtils for this window.
+-- 
+2.55.0
+

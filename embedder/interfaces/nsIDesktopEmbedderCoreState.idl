@@ -1,0 +1,106 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsISupports.idl"
+
+[scriptable, uuid(9ced61d7-ebdb-4d50-82a8-8b3e876586e4)]
+interface nsIDesktopEmbedderNavigationState : nsISupports {
+  readonly attribute unsigned long long revision;
+  readonly attribute unsigned long long navigationId;
+  readonly attribute AUTF8String url;
+  readonly attribute AUTF8String title;
+  readonly attribute boolean loading;
+  readonly attribute unsigned long loadingActivity;
+  readonly attribute unsigned long security;
+  readonly attribute unsigned long identity;
+  readonly attribute AUTF8String identityKey;
+  readonly attribute boolean canGoBack;
+  readonly attribute boolean canGoForward;
+  readonly attribute boolean hasFailure;
+  readonly attribute unsigned long failureCode;
+};
+
+/**
+ * Core-private bridge to the platform-neutral Navis lifecycle state machine.
+ *
+ * Product code must use EngineRuntime, EngineSession, and EngineView instead
+ * of acquiring this component directly.
+ */
+[scriptable, uuid(2f1581f8-ce61-4599-8328-45c3dbf4abb5)]
+interface nsIDesktopEmbedderCoreState : nsISupports {
+  readonly attribute boolean closed;
+  readonly attribute unsigned long long windowCount;
+  readonly attribute unsigned long long sessionCount;
+
+  unsigned long long registerWindow();
+  void closeWindow(in unsigned long long windowId);
+  unsigned long long registerView(in unsigned long long windowId);
+  unsigned long long createSession(in unsigned long long viewId);
+  unsigned long long createSessionWithMode(in unsigned long long viewId,
+                                           in boolean privateMode);
+  boolean isSessionPrivate(in unsigned long long sessionId);
+  boolean activateSession(in unsigned long long sessionId);
+  void closeSession(in unsigned long long sessionId);
+  boolean canAttach(in unsigned long long sessionId,
+                    in unsigned long long viewId);
+  void attach(in unsigned long long sessionId,
+              in unsigned long long viewId);
+  void detach(in unsigned long long sessionId,
+              in unsigned long long viewId);
+  void setCrashed(in unsigned long long sessionId, in boolean crashed);
+  unsigned long long beginNavigation(
+    in unsigned long long sessionId,
+    in unsigned long command,
+    in AUTF8String requestedUrl,
+    in boolean hasRequestedUrl
+  );
+  unsigned long long observeNavigationStart(
+    in unsigned long long sessionId,
+    in AUTF8String requestedUrl,
+    in boolean hasRequestedUrl,
+    in unsigned long startKind
+  );
+  boolean setNavigationLocation(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId,
+    in AUTF8String url
+  );
+  boolean setNavigationTitle(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId,
+    in AUTF8String title
+  );
+  boolean setNavigationSecurity(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId,
+    in unsigned long security
+  );
+  boolean setNavigationIdentity(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId,
+    in unsigned long identity,
+    in AUTF8String identityKey
+  );
+  boolean setNavigationHistory(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId,
+    in boolean canGoBack,
+    in boolean canGoForward
+  );
+  boolean finishNavigation(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId,
+    in boolean hasFailure,
+    in unsigned long failureCode
+  );
+  boolean stopNavigation(
+    in unsigned long long sessionId,
+    in unsigned long long navigationId
+  );
+  nsIDesktopEmbedderNavigationState navigationState(
+    in unsigned long long sessionId
+  );
+  void assertConsistent();
+  boolean shutdown();
+};

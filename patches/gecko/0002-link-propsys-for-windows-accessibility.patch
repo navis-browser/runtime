@@ -1,0 +1,11 @@
+diff --git a/toolkit/library/moz.build b/toolkit/library/moz.build
+--- a/toolkit/library/moz.build
++++ b/toolkit/library/moz.build
+@@ -377,6 +377,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
+     if CONFIG["ACCESSIBILITY"]:
+         OS_LIBS += [
+             "oleacc",
++            "propsys",
+             "uiautomationcore",
+         ]
+ 

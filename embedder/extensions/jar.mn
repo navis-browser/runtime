@@ -1,0 +1,37 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+navis-extensions.jar:
+% content navis-extensions %content/
+    content/ext-navis.js
+    content/ext-navis.json
+    content/ext-browserAction.js
+    content/ext-pageAction.js
+    content/ext-commands.js
+    content/ext-menus.js
+    content/ext-omnibox.js
+    content/ext-c-navis.js
+    content/ext-c-menus.js (/browser/components/extensions/child/ext-menus.js)
+    content/ext-c-omnibox.js (/browser/components/extensions/child/ext-omnibox.js)
+    content/ext-c-tabs.js
+    content/ext-tabs.js
+    content/ext-windows.js
+    content/ext-find.js (/browser/components/extensions/parent/ext-find.js)
+    content/ext-history.js
+    content/ext-bookmarks.js
+    content/ext-topSites.js
+    content/ext-search.js
+    content/ext-sessions.js
+    content/schemas/tabs.json (schemas/tabs.json)
+    content/schemas/page_action.json (/toolkit/components/extensions/schemas/page_action.json)
+    content/schemas/commands.json (/browser/components/extensions/schemas/commands.json)
+    content/schemas/menus.json (/browser/components/extensions/schemas/menus.json)
+    content/schemas/omnibox.json (/browser/components/extensions/schemas/omnibox.json)
+    content/schemas/windows.json (/browser/components/extensions/schemas/windows.json)
+    content/schemas/find.json (/browser/components/extensions/schemas/find.json)
+    content/schemas/history.json (/browser/components/extensions/schemas/history.json)
+    content/schemas/bookmarks.json (/browser/components/extensions/schemas/bookmarks.json)
+    content/schemas/top_sites.json (/browser/components/extensions/schemas/top_sites.json)
+    content/schemas/search.json (/browser/components/extensions/schemas/search.json)
+    content/schemas/sessions.json (/browser/components/extensions/schemas/sessions.json)

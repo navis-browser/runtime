@@ -1,0 +1,10 @@
+[package]
+name = "navis-core"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+rust-version = "1.85"
+description = "Platform-neutral lifecycle state machine for Navis Core"
+
+[lib]
+path = "src/lib.rs"

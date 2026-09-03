@@ -1,0 +1,27 @@
+# Linux x86_64 release-test fixture graph.  This configuration exists only
+# to let Gecko generate authoritative build rules for helpers such as its
+# HTTP/3 server.  Helpers produced from it are never installed into Navis.
+ac_add_options --enable-project=navis
+ac_add_options --enable-tests
+ac_add_options --enable-release
+ac_add_options --disable-crashreporter
+ac_add_options --disable-updater
+ac_add_options --disable-local-ml
+ac_add_options --disable-eme-api
+ac_add_options --disable-web-push
+ac_add_options --disable-safe-browsing
+ac_add_options --enable-webdriver
+ac_add_options --disable-printing
+ac_add_options --disable-ctypes
+ac_add_options --disable-backgroundtasks
+ac_add_options --enable-desktop-embedder
+ac_add_options --enable-webextensions-runtime
+ac_add_options --disable-observability-runtime
+ac_add_options --disable-webrtc
+ac_add_options --disable-cargo-incremental
+ac_add_options --host=x86_64-unknown-linux-gnu
+ac_add_options --target=x86_64-unknown-linux-gnu
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-navis-linux-test-fixtures
+mk_add_options AUTOCLOBBER=1
+mk_add_options MOZ_MAKE_FLAGS="-j16"

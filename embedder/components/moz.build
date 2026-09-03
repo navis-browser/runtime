@@ -1,0 +1,57 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+XPCOM_MANIFESTS += ["components.conf"]
+
+EXPORTS.mozilla.desktop += [
+    "DesktopEmbedderCoreState.h",
+]
+
+UNIFIED_SOURCES += [
+    "DesktopEmbedderCoreState.cpp",
+]
+
+LOCAL_INCLUDES += [
+    "/navis-core/rust/ffi/include",
+]
+
+FINAL_LIBRARY = "xul"
+
+if CONFIG["MOZ_DESKTOP_EMBEDDER_HISTORY"]:
+    EXPORTS.mozilla.desktop += [
+        "DesktopHistory.h",
+    ]
+
+    UNIFIED_SOURCES += [
+        "DesktopHistory.cpp",
+    ]
+
+    include("/ipc/chromium/chromium-config.mozbuild")
+
+EXTRA_JS_MODULES += [
+    "DesktopContextMenuChild.sys.mjs",
+    "DesktopContextMenuParent.sys.mjs",
+    "DesktopCredentialChild.sys.mjs",
+    "DesktopCredentialParent.sys.mjs",
+    "DesktopEmbedderActorRegistry.sys.mjs",
+    "DesktopEmbedderAuthPromptFactory.sys.mjs",
+    "DesktopEmbedderContentPermissionPrompt.sys.mjs",
+    "DesktopEmbedderPromptCollection.sys.mjs",
+    "DesktopEmbedderPromptParent.sys.mjs",
+    "DesktopEmbedderStartup.sys.mjs",
+    "DesktopFaviconChild.sys.mjs",
+    "DesktopFaviconParent.sys.mjs",
+    "DesktopFullscreenChild.sys.mjs",
+    "DesktopFullscreenParent.sys.mjs",
+    "DesktopInternalPageChild.sys.mjs",
+    "DesktopInternalPageParent.sys.mjs",
+    "DesktopWebAuthnPrompt.sys.mjs",
+]
+
+if CONFIG["MOZ_WEBRTC"]:
+    EXTRA_JS_MODULES += [
+        "DesktopEmbedderBrowserProcessChild.sys.mjs",
+        "DesktopEmbedderWebRTCChild.sys.mjs",
+        "DesktopEmbedderWebRTCParent.sys.mjs",
+    ]

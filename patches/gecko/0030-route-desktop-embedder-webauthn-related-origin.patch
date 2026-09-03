@@ -1,0 +1,66 @@
+From 74f24e6a4ae85c6fb544798653c0b87f55a6345b Mon Sep 17 00:00:00 2001
+From: willvar <0@willvar.tw>
+Date: Sun, 30 Aug 2026 21:20:00 +0800
+Subject: [PATCH] Route Desktop Embedder related-origin WebAuthn consent
+
+---
+ dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs | 43 +++++++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs b/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs
+index 1bafa6e8eb40..734b840238e3 100644
+--- a/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs
++++ b/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs
+@@ -217,6 +217,49 @@ export class WebAuthnRelatedOriginFetcher {
+   }
+ 
+   _showDesktopPrompt(aManager, aRpId, aIsCreate) {
++    const browser = aManager.browsingContext.top.embedderElement;
++    if (
++      typeof browser?.desktopEmbedderWebAuthnRelatedOriginPrompt === "function"
++    ) {
++      const request = Object.freeze({
++        browsingContextId: aManager.browsingContext.id,
++        origin: aManager.documentPrincipal.originNoSuffix,
++        rpId: aRpId,
++        isCreate: aIsCreate,
++      });
++      let active = true;
++      const prompt = {
++        remove: () => {
++          if (!active) {
++            return;
++          }
++          active = false;
++          browser.desktopEmbedderWebAuthnRelatedOriginPromptCanceled?.(request);
++        },
++      };
++      this._currentPrompt = prompt;
++      let decision;
++      try {
++        decision = browser.desktopEmbedderWebAuthnRelatedOriginPrompt(request);
++      } catch {
++        decision = false;
++      }
++      const settle = allow => {
++        if (!active || this._currentPrompt !== prompt || !this._callback) {
++          return;
++        }
++        active = false;
++        this._currentPrompt = null;
++        if (allow === true) {
++          this._resolve();
++        } else {
++          this._userCancel();
++        }
++      };
++      Promise.resolve(decision).then(settle, () => settle(false));
++      return;
++    }
++
+     if (!l10n) {
+       l10n = new Localization(
+         ["branding/brand.ftl", "toolkit/webauthnDialog.ftl"],
+-- 
+2.51.0
+

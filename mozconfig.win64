@@ -1,0 +1,28 @@
+# Navis 1.0 Win64 production graph. Keep the bounded WebExtensions runtime for
+# application-owned built-ins such as the required upstream uBlock Origin XPI;
+# user installation, mutation and store surfaces remain independently cut.
+ac_add_options --enable-project=navis
+ac_add_options --disable-tests
+ac_add_options --disable-release
+ac_add_options --disable-crashreporter
+ac_add_options --disable-updater
+ac_add_options --disable-bits-download
+ac_add_options --disable-local-ml
+ac_add_options --disable-eme-api
+ac_add_options --disable-web-push
+ac_add_options --disable-safe-browsing
+ac_add_options --enable-webdriver
+ac_add_options --disable-printing
+ac_add_options --disable-ctypes
+ac_add_options --enable-desktop-embedder
+ac_add_options --enable-webextensions-runtime
+ac_add_options --disable-observability-runtime
+ac_add_options --disable-webrtc
+ac_add_options --disable-backgroundtasks
+ac_add_options --disable-cargo-incremental
+ac_add_options --target=x86_64-pc-windows-msvc
+ac_add_options --enable-bootstrap
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-navis-win64
+mk_add_options AUTOCLOBBER=1
+mk_add_options MOZ_MAKE_FLAGS="-j16"

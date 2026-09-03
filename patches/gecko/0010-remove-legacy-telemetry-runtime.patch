@@ -1,0 +1,1191 @@
+diff --git a/docshell/base/nsAboutRedirector.cpp b/docshell/base/nsAboutRedirector.cpp
+index 22bef40..99d55d6 100644
+--- a/docshell/base/nsAboutRedirector.cpp
++++ b/docshell/base/nsAboutRedirector.cpp
+@@ -212,15 +212,17 @@ static const RedirEntry kRedirMap[] = {
+     {"windows-messages", "chrome://global/content/aboutWindowsMessages.html",
+      nsIAboutModule::ALLOW_SCRIPT},
+ #endif
+-#ifndef MOZ_GLEAN_ANDROID
++#ifdef MOZ_OBSERVABILITY_RUNTIME
++#  ifndef MOZ_GLEAN_ANDROID
+     {"glean", "chrome://global/content/aboutGlean.html",
+-#  if !defined(NIGHTLY_BUILD) && defined(MOZILLA_OFFICIAL)
++#    if !defined(NIGHTLY_BUILD) && defined(MOZILLA_OFFICIAL)
+      nsIAboutModule::HIDE_FROM_ABOUTABOUT |
+-#  endif
++#    endif
+          nsIAboutModule::ALLOW_SCRIPT},
+-#endif
++#  endif
+     {"telemetry", "chrome://global/content/aboutTelemetry.xhtml",
+      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI},
++#endif
+ #ifndef MOZ_WIDGET_ANDROID
+     {"translations",
+      "chrome://global/content/translations/about-translations.html",
+diff --git a/services/settings/UptakeTelemetry.sys.mjs b/services/settings/UptakeTelemetry.sys.mjs
+index 37e22fc..d1070be 100644
+--- a/services/settings/UptakeTelemetry.sys.mjs
++++ b/services/settings/UptakeTelemetry.sys.mjs
+@@ -63,10 +63,14 @@ export class UptakeTelemetry {
+       throw new Error(`Unknown status '${status}'`);
+     }
+ 
++#ifndef MOZ_OBSERVABILITY_RUNTIME
++    return;
++#else
+     extra.value = status;
+     const stringExtra = Object.fromEntries(
+       Object.entries(extra).map(([k, v]) => [k, `${v}`])
+     );
+     Glean.uptakeRemotecontentResult.uptakeRemotesettings.record(stringExtra);
++#endif
+   }
+ }
+diff --git a/services/settings/moz.build b/services/settings/moz.build
+index 64afd41..ac27c60 100644
+--- a/services/settings/moz.build
++++ b/services/settings/moz.build
+@@ -25,10 +25,13 @@ EXTRA_JS_MODULES["services-settings"] += [
+     "RemoteSettingsWorker.sys.mjs",
+     "SharedUtils.sys.mjs",
+     "SyncHistory.sys.mjs",
+-    "UptakeTelemetry.sys.mjs",
+     "Utils.sys.mjs",
+ ]
+ 
++EXTRA_PP_JS_MODULES["services-settings"] += [
++    "UptakeTelemetry.sys.mjs",
++]
++
+ XPCOM_MANIFESTS += [
+     "components.conf",
+ ]
+diff --git a/services/settings/test/unit/head_settings.js b/services/settings/test/unit/head_settings.js
+index 2acf4813eb81..529ab9075621 100644
+--- a/services/settings/test/unit/head_settings.js
++++ b/services/settings/test/unit/head_settings.js
+@@ -28,10 +28,23 @@ function arrayEqual(a, b) {
+ }
+ 
+ add_setup(function () {
+-  Services.fog.initializeFOG();
++  if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++    Services.fog.initializeFOG();
++  }
+ });
+ 
++function resetUptakeTelemetry() {
++  if (!AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++    return;
++  }
++  Services.telemetry.snapshotEvents(Ci.nsITelemetry.DATASET_ALL_CHANNELS, true);
++  Services.fog.testResetFOG();
++}
++
+ function enableUptakeMetric() {
++  if (!AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++    return;
++  }
+   Services.fog.applyServerKnobsConfig(
+     JSON.stringify({
+       metrics_enabled: {
+@@ -42,6 +55,9 @@ function enableUptakeMetric() {
+ }
+ 
+ function assertTelemetryEvents(expectedEvents) {
++  if (!AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++    return;
++  }
+   const events =
+     Glean.uptakeRemotecontentResult.uptakeRemotesettings.testGetValue() ?? [];
+   const receivedValues = events.map(e => e.extra.value);
+diff --git a/services/settings/test/unit/test_remote_settings_signatures.js b/services/settings/test/unit/test_remote_settings_signatures.js
+index 8b50c3519acd..5a3563833f1e 100644
+--- a/services/settings/test/unit/test_remote_settings_signatures.js
++++ b/services/settings/test/unit/test_remote_settings_signatures.js
+@@ -386,8 +386,7 @@ add_task(async function test_check_synchronization_with_signatures() {
+   registerHandlers(emptyCollectionResponses);
+ 
+   // Clear events snapshot.
+-  Services.telemetry.snapshotEvents(Ci.nsITelemetry.DATASET_ALL_CHANNELS, true);
+-  Services.fog.testResetFOG();
++  resetUptakeTelemetry();
+   enableUptakeMetric();
+ 
+   // With all of this set up, we attempt a sync. This will resolve if all is
+@@ -591,8 +590,7 @@ add_task(async function test_check_synchronization_with_signatures() {
+   };
+ 
+   registerHandlers(badSigGoodSigResponses);
+-  Services.telemetry.snapshotEvents(Ci.nsITelemetry.DATASET_ALL_CHANNELS, true);
+-  Services.fog.testResetFOG();
++  resetUptakeTelemetry();
+   enableUptakeMetric();
+ 
+   let syncEventSent = false;
+@@ -723,8 +721,7 @@ add_task(async function test_check_synchronization_with_signatures() {
+   });
+ 
+   // Clear events snapshot.
+-  Services.telemetry.snapshotEvents(Ci.nsITelemetry.DATASET_ALL_CHANNELS, true);
+-  Services.fog.testResetFOG();
++  resetUptakeTelemetry();
+   enableUptakeMetric();
+ 
+   // Events telemetry is sampled on released, use fake channel.
+@@ -816,8 +813,7 @@ add_task(async function test_check_synchronization_with_signatures() {
+   };
+ 
+   // Reset telemetry capture.
+-  Services.telemetry.snapshotEvents(Ci.nsITelemetry.DATASET_ALL_CHANNELS, true);
+-  Services.fog.testResetFOG();
++  resetUptakeTelemetry();
+   enableUptakeMetric();
+ 
+   registerHandlers(allBadSigResponses);
+diff --git a/toolkit/components/antitracking/components.conf b/toolkit/components/antitracking/components.conf
+index b7e4756..3dc3f67 100644
+--- a/toolkit/components/antitracking/components.conf
++++ b/toolkit/components/antitracking/components.conf
+@@ -29,16 +29,6 @@ Classes = [
+         'esModule': 'resource://gre/modules/PartitioningExceptionListService.sys.mjs',
+         'constructor': 'PartitioningExceptionListService',
+     },
+-    {
+-        'cid': '{42906796-d16a-44a1-b518-0f108ab38eba}',
+-        'contract_ids': ['@mozilla.org/content-blocking-telemetry-service;1'],
+-        'singleton': True,
+-        'type': 'mozilla::ContentBlockingTelemetryService',
+-        'headers': ['mozilla/ContentBlockingTelemetryService.h'],
+-        'constructor': 'mozilla::ContentBlockingTelemetryService::GetSingleton',
+-        'categories': {'idle-daily': 'ContentBlockingTelemetryService'},
+-        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+-    },
+     {
+         'cid': '{afff16f0-3fd2-4153-9ccd-c6d9abd879e4}',
+         'contract_ids': ['@mozilla.org/query-stripping-list-service;1'],
+@@ -60,3 +50,15 @@ Classes = [
+         }
+     },
+ ]
++
++if buildconfig.substs.get('MOZ_OBSERVABILITY_RUNTIME'):
++    Classes.append({
++        'cid': '{42906796-d16a-44a1-b518-0f108ab38eba}',
++        'contract_ids': ['@mozilla.org/content-blocking-telemetry-service;1'],
++        'singleton': True,
++        'type': 'mozilla::ContentBlockingTelemetryService',
++        'headers': ['mozilla/ContentBlockingTelemetryService.h'],
++        'constructor': 'mozilla::ContentBlockingTelemetryService::GetSingleton',
++        'categories': {'idle-daily': 'ContentBlockingTelemetryService'},
++        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
++    })
+diff --git a/toolkit/components/antitracking/moz.build b/toolkit/components/antitracking/moz.build
+index 44f4a6d..1f36dc9 100644
+--- a/toolkit/components/antitracking/moz.build
++++ b/toolkit/components/antitracking/moz.build
+@@ -48,7 +48,6 @@ EXPORTS.mozilla = [
+     "ContentBlockingAllowList.h",
+     "ContentBlockingLog.h",
+     "ContentBlockingNotifier.h",
+-    "ContentBlockingTelemetryService.h",
+     "ContentBlockingUserInteraction.h",
+     "DynamicFpiNavigationHeuristic.h",
+     "DynamicFpiRedirectHeuristic.h",
+@@ -66,7 +65,6 @@ UNIFIED_SOURCES += [
+     "ContentBlockingAllowList.cpp",
+     "ContentBlockingLog.cpp",
+     "ContentBlockingNotifier.cpp",
+-    "ContentBlockingTelemetryService.cpp",
+     "ContentBlockingUserInteraction.cpp",
+     "DynamicFpiNavigationHeuristic.cpp",
+     "DynamicFpiRedirectHeuristic.cpp",
+@@ -80,6 +78,10 @@ UNIFIED_SOURCES += [
+     "URLQueryStringStripper.cpp",
+ ]
+ 
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    EXPORTS.mozilla += ["ContentBlockingTelemetryService.h"]
++    UNIFIED_SOURCES += ["ContentBlockingTelemetryService.cpp"]
++
+ LOCAL_INCLUDES += [
+     "/netwerk/base",
+     "/netwerk/protocol/http",
+diff --git a/toolkit/components/backgroundhangmonitor/moz.build b/toolkit/components/backgroundhangmonitor/moz.build
+index 7211ee0..c9a7877 100644
+--- a/toolkit/components/backgroundhangmonitor/moz.build
++++ b/toolkit/components/backgroundhangmonitor/moz.build
+@@ -17,6 +17,7 @@ if (
+     and not CONFIG["MOZ_DEBUG"]
+     and not CONFIG["MOZ_TSAN"]
+     and not CONFIG["MOZ_ASAN"]
++    and CONFIG["MOZ_OBSERVABILITY_RUNTIME"]
+ ):
+     DEFINES["MOZ_ENABLE_BACKGROUND_HANG_MONITOR"] = 1
+ 
+diff --git a/toolkit/components/telemetry/core/TelemetryNoop.cpp b/toolkit/components/telemetry/core/TelemetryNoop.cpp
+new file mode 100644
+index 0000000..1aa58f5
+--- /dev/null
++++ b/toolkit/components/telemetry/core/TelemetryNoop.cpp
+@@ -0,0 +1,472 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++// A minimal desktop embedder keeps this compatibility surface because retained
++// Gecko code uses the process-clock methods and many call sites still reference
++// Telemetry enums. It deliberately has no recorder, storage, archive, uploader,
++// or mutable enable state.
++
++#include "Telemetry.h"
++
++#include "TelemetryEvent.h"
++#include "TelemetryHistogram.h"
++#include "TelemetryScalar.h"
++#include "TelemetryUserInteraction.h"
++#include "js/Array.h"
++#include "js/PropertyAndElement.h"
++#include "jsapi.h"
++#include "mozilla/Components.h"
++#include "mozilla/MemoryReporting.h"
++#include "mozilla/ModuleUtils.h"
++#include "mozilla/Uptime.h"
++#include "mozilla/telemetry/Stopwatch.h"
++#include "nsITelemetry.h"
++#include "nsServiceManagerUtils.h"
++#include "prtime.h"
++
++namespace {
++
++nsresult EmptyObject(JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  JS::Rooted<JSObject*> object(aCx, JS_NewPlainObject(aCx));
++  if (!object) {
++    return NS_ERROR_OUT_OF_MEMORY;
++  }
++  aResult.setObject(*object);
++  return NS_OK;
++}
++
++nsresult EmptyArray(JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  JS::Rooted<JSObject*> array(aCx, JS::NewArrayObject(aCx, 0));
++  if (!array) {
++    return NS_ERROR_OUT_OF_MEMORY;
++  }
++  aResult.setObject(*array);
++  return NS_OK;
++}
++
++bool NoopMethod(JSContext* aCx, unsigned aArgc, JS::Value* aVp) {
++  JS::CallArgs args = JS::CallArgsFromVp(aArgc, aVp);
++  args.rval().setUndefined();
++  return true;
++}
++
++bool EmptyObjectMethod(JSContext* aCx, unsigned aArgc, JS::Value* aVp) {
++  JS::CallArgs args = JS::CallArgsFromVp(aArgc, aVp);
++  JS::Rooted<JSObject*> object(aCx, JS_NewPlainObject(aCx));
++  if (!object) {
++    return false;
++  }
++  args.rval().setObject(*object);
++  return true;
++}
++
++bool EmptyArrayMethod(JSContext* aCx, unsigned aArgc, JS::Value* aVp) {
++  JS::CallArgs args = JS::CallArgsFromVp(aArgc, aVp);
++  JS::Rooted<JSObject*> array(aCx, JS::NewArrayObject(aCx, 0));
++  if (!array) {
++    return false;
++  }
++  args.rval().setObject(*array);
++  return true;
++}
++
++nsresult EmptyHistogram(JSContext* aCx, bool aKeyed,
++                        JS::MutableHandle<JS::Value> aResult) {
++  JS::Rooted<JSObject*> object(aCx, JS_NewPlainObject(aCx));
++  if (!object || !JS_DefineFunction(aCx, object, "name", NoopMethod, 0, 0) ||
++      !JS_DefineFunction(aCx, object, "snapshot", EmptyObjectMethod, 0, 0) ||
++      !JS_DefineFunction(aCx, object, "clear", NoopMethod, 0, 0) ||
++      (aKeyed &&
++       !JS_DefineFunction(aCx, object, "keys", EmptyArrayMethod, 0, 0))) {
++    return NS_ERROR_OUT_OF_MEMORY;
++  }
++  aResult.setObject(*object);
++  return NS_OK;
++}
++
++class NoopTelemetry final : public nsITelemetry {
++ public:
++  NoopTelemetry() = default;
++  NS_DECL_THREADSAFE_ISUPPORTS
++  NS_DECL_NSITELEMETRY
++
++ private:
++  ~NoopTelemetry() = default;
++};
++
++NS_IMPL_ISUPPORTS(NoopTelemetry, nsITelemetry)
++
++NS_IMETHODIMP NoopTelemetry::GetCategoricalLabels(
++    JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  return EmptyObject(aCx, aResult);
++}
++
++#define EMPTY_SNAPSHOT_METHOD(name)                                         \
++  NS_IMETHODIMP NoopTelemetry::name(const nsACString&, bool, bool,          \
++                                    JSContext* aCx,                         \
++                                    JS::MutableHandle<JS::Value> aResult) { \
++    return EmptyObject(aCx, aResult);                                       \
++  }
++
++EMPTY_SNAPSHOT_METHOD(GetSnapshotForHistograms)
++EMPTY_SNAPSHOT_METHOD(GetSnapshotForKeyedHistograms)
++EMPTY_SNAPSHOT_METHOD(GetSnapshotForScalars)
++EMPTY_SNAPSHOT_METHOD(GetSnapshotForKeyedScalars)
++
++#undef EMPTY_SNAPSHOT_METHOD
++
++NS_IMETHODIMP NoopTelemetry::GetLastShutdownDuration(uint32_t* aResult) {
++  *aResult = 0;
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::GetFailedProfileLockCount(uint32_t* aResult) {
++  *aResult = 0;
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::GetSlowSQL(JSContext* aCx,
++                                        JS::MutableHandle<JS::Value> aResult) {
++  return EmptyObject(aCx, aResult);
++}
++
++NS_IMETHODIMP NoopTelemetry::GetDebugSlowSQL(
++    JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  return EmptyObject(aCx, aResult);
++}
++
++NS_IMETHODIMP NoopTelemetry::SubmitAndGetUntrustedModulePayload(
++    JSContext*, mozilla::dom::Promise** aResult) {
++  *aResult = nullptr;
++  return NS_ERROR_NOT_AVAILABLE;
++}
++
++NS_IMETHODIMP NoopTelemetry::GetUntrustedModuleLoadEvents(
++    uint32_t, JSContext*, mozilla::dom::Promise** aResult) {
++  *aResult = nullptr;
++  return NS_ERROR_NOT_AVAILABLE;
++}
++
++NS_IMETHODIMP NoopTelemetry::GetAreUntrustedModuleLoadEventsReady(
++    bool* aResult) {
++  *aResult = true;
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::GetHistogramById(
++    const nsACString&, JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  return EmptyHistogram(aCx, false, aResult);
++}
++
++NS_IMETHODIMP NoopTelemetry::GetKeyedHistogramById(
++    const nsACString&, JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  return EmptyHistogram(aCx, true, aResult);
++}
++
++#define FALSE_GETTER(name)                           \
++  NS_IMETHODIMP NoopTelemetry::name(bool* aResult) { \
++    *aResult = false;                                \
++    return NS_OK;                                    \
++  }
++
++FALSE_GETTER(GetCanRecordBase)
++FALSE_GETTER(GetCanRecordExtended)
++FALSE_GETTER(GetCanRecordReleaseData)
++FALSE_GETTER(GetCanRecordPrereleaseData)
++FALSE_GETTER(GetIsOfficialTelemetry)
++
++#undef FALSE_GETTER
++
++NS_IMETHODIMP NoopTelemetry::SetCanRecordBase(bool) { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::SetCanRecordExtended(bool) { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::AsyncFetchTelemetryData(
++    nsIFetchTelemetryDataCallback* aCallback) {
++  return aCallback ? aCallback->Complete() : NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::GetFileIOReports(
++    JSContext*, JS::MutableHandle<JS::Value> aResult) {
++  aResult.setNull();
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::MsSinceProcessStart(double* aResult) {
++  *aResult =
++      (mozilla::TimeStamp::NowLoRes() - mozilla::TimeStamp::ProcessCreation())
++          .ToMilliseconds();
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::MsSinceProcessStartIncludingSuspend(
++    double* aResult) {
++  auto uptime = mozilla::ProcessUptimeMs();
++  if (!uptime) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++  *aResult = uptime.value();
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::MsSinceProcessStartExcludingSuspend(
++    double* aResult) {
++  auto uptime = mozilla::ProcessUptimeExcludingSuspendMs();
++  if (!uptime) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++  *aResult = uptime.value();
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::MsSystemNow(double* aResult) {
++  *aResult = static_cast<double>(PR_Now()) / PR_USEC_PER_MSEC;
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::ClearScalars() { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::FlushBatchedChildTelemetry() { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::SnapshotEvents(
++    uint32_t, bool, uint32_t, JSContext* aCx, uint8_t,
++    JS::MutableHandle<JS::Value> aResult) {
++  return EmptyArray(aCx, aResult);
++}
++
++NS_IMETHODIMP NoopTelemetry::RegisterBuiltinEvents(const nsACString&,
++                                                   JS::Handle<JS::Value>,
++                                                   JSContext*) {
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::RegisterBuiltinScalars(const nsACString&,
++                                                    JS::Handle<JS::Value>,
++                                                    JSContext*) {
++  return NS_OK;
++}
++
++NS_IMETHODIMP NoopTelemetry::ClearEvents() { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::GetAllStores(
++    JSContext* aCx, JS::MutableHandle<JS::Value> aResult) {
++  return EmptyArray(aCx, aResult);
++}
++
++NS_IMETHODIMP NoopTelemetry::EarlyInit() { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::DelayedInit() { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::Shutdown() { return NS_OK; }
++
++NS_IMETHODIMP NoopTelemetry::GatherMemory(JSContext*,
++                                          mozilla::dom::Promise** aResult) {
++  *aResult = nullptr;
++  return NS_ERROR_NOT_AVAILABLE;
++}
++
++}  // namespace
++
++namespace mozilla {
++
++void RecordShutdownStartTimeStamp() {}
++void RecordShutdownEndTimeStamp() {}
++
++}  // namespace mozilla
++
++namespace mozilla::Telemetry {
++
++void Init() {
++  nsCOMPtr<nsITelemetry> service =
++      do_GetService("@mozilla.org/base/telemetry;1");
++  MOZ_RELEASE_ASSERT(service);
++}
++
++void ShutdownTelemetry() {}
++const char* GetHistogramName(HistogramID) { return ""; }
++bool CanRecordBase() { return false; }
++bool CanRecordExtended() { return false; }
++bool CanRecordReleaseData() { return false; }
++bool CanRecordPrereleaseData() { return false; }
++void RecordSlowSQLStatement(const nsACString&, const nsACString&, uint32_t) {}
++void InitIOReporting(nsIFile*) {}
++void SetProfileDir(nsIFile*) {}
++void LeavingStartupStage() {}
++void EnteringShutdownStage() {}
++void WriteFailedProfileLock(nsIFile*) {}
++
++}  // namespace mozilla::Telemetry
++
++namespace TelemetryHistogram {
++
++void InitializeGlobalState(bool, bool) {}
++void DeInitializeGlobalState() {}
++#ifdef DEBUG
++bool GlobalStateHasBeenInitialized() { return false; }
++#endif
++bool CanRecordBase() { return false; }
++void SetCanRecordBase(bool) {}
++bool CanRecordExtended() { return false; }
++void SetCanRecordExtended(bool) {}
++void InitHistogramRecordingEnabled() {}
++void Accumulate(mozilla::Telemetry::HistogramID, uint32_t) {}
++void Accumulate(mozilla::Telemetry::HistogramID, const nsTArray<uint32_t>&) {}
++void Accumulate(mozilla::Telemetry::HistogramID, const nsCString&, uint32_t) {}
++void AccumulateCategorical(mozilla::Telemetry::HistogramID, const nsCString&) {}
++void AccumulateCategorical(mozilla::Telemetry::HistogramID, const nsCString&,
++                           const nsCString&) {}
++void AccumulateChild(
++    mozilla::Telemetry::ProcessID,
++    const nsTArray<mozilla::Telemetry::HistogramAccumulation>&) {}
++void AccumulateChildKeyed(
++    mozilla::Telemetry::ProcessID,
++    const nsTArray<mozilla::Telemetry::KeyedHistogramAccumulation>&) {}
++nsresult GetAllStores(mozilla::Telemetry::Common::StringHashSet&) {
++  return NS_OK;
++}
++nsresult GetCategoricalHistogramLabels(JSContext* aCx,
++                                       JS::MutableHandle<JS::Value> aResult) {
++  return EmptyObject(aCx, aResult);
++}
++nsresult GetHistogramById(const nsACString&, JSContext* aCx,
++                          JS::MutableHandle<JS::Value> aResult) {
++  return EmptyHistogram(aCx, false, aResult);
++}
++nsresult GetKeyedHistogramById(const nsACString&, JSContext* aCx,
++                               JS::MutableHandle<JS::Value> aResult) {
++  return EmptyHistogram(aCx, true, aResult);
++}
++const char* GetHistogramName(mozilla::Telemetry::HistogramID) { return ""; }
++uint8_t GetHistogramType(mozilla::Telemetry::HistogramID) {
++  return nsITelemetry::HISTOGRAM_COUNT;
++}
++nsresult CreateHistogramSnapshots(JSContext* aCx,
++                                  JS::MutableHandle<JS::Value> aResult,
++                                  const nsACString&, unsigned int, bool, bool) {
++  return EmptyObject(aCx, aResult);
++}
++nsresult GetKeyedHistogramSnapshots(JSContext* aCx,
++                                    JS::MutableHandle<JS::Value> aResult,
++                                    const nsACString&, unsigned int, bool,
++                                    bool) {
++  return EmptyObject(aCx, aResult);
++}
++size_t GetHistogramSizesOfIncludingThis(mozilla::MallocSizeOf) { return 0; }
++
++}  // namespace TelemetryHistogram
++
++namespace TelemetryScalar {
++
++void InitializeGlobalState(bool, bool) {}
++void DeInitializeGlobalState() {}
++void SetCanRecordBase(bool) {}
++void SetCanRecordExtended(bool) {}
++nsresult CreateSnapshots(unsigned int, bool, JSContext* aCx, uint8_t,
++                         JS::MutableHandle<JS::Value> aResult, bool,
++                         const nsACString&) {
++  return EmptyObject(aCx, aResult);
++}
++nsresult CreateKeyedSnapshots(unsigned int, bool, JSContext* aCx, uint8_t,
++                              JS::MutableHandle<JS::Value> aResult, bool,
++                              const nsACString&) {
++  return EmptyObject(aCx, aResult);
++}
++void Add(mozilla::Telemetry::ScalarID, uint32_t) {}
++void Set(mozilla::Telemetry::ScalarID, uint32_t) {}
++void Set(mozilla::Telemetry::ScalarID, const nsAString&) {}
++void Set(mozilla::Telemetry::ScalarID, bool) {}
++void Add(mozilla::Telemetry::ScalarID, const nsAString&, uint32_t) {}
++void Set(mozilla::Telemetry::ScalarID, const nsAString&, uint32_t) {}
++void Set(mozilla::Telemetry::ScalarID, const nsAString&, bool) {}
++nsresult RegisterScalars(const nsACString&, JS::Handle<JS::Value>, JSContext*) {
++  return NS_OK;
++}
++void ClearScalars() {}
++size_t GetMapShallowSizesOfExcludingThis(mozilla::MallocSizeOf) { return 0; }
++size_t GetScalarSizesOfIncludingThis(mozilla::MallocSizeOf) { return 0; }
++void UpdateChildData(mozilla::Telemetry::ProcessID,
++                     const nsTArray<mozilla::Telemetry::ScalarAction>&) {}
++void UpdateChildKeyedData(
++    mozilla::Telemetry::ProcessID,
++    const nsTArray<mozilla::Telemetry::KeyedScalarAction>&) {}
++void RecordDiscardedData(mozilla::Telemetry::ProcessID,
++                         const mozilla::Telemetry::DiscardedData&) {}
++void GetDynamicScalarDefinitions(
++    nsTArray<mozilla::Telemetry::DynamicScalarDefinition>&) {}
++void AddDynamicScalarDefinitions(
++    const nsTArray<mozilla::Telemetry::DynamicScalarDefinition>&) {}
++nsresult GetAllStores(mozilla::Telemetry::Common::StringHashSet&) {
++  return NS_OK;
++}
++
++}  // namespace TelemetryScalar
++
++namespace TelemetryEvent {
++
++void InitializeGlobalState(bool, bool) {}
++void DeInitializeGlobalState() {}
++void SetCanRecordBase(bool) {}
++void SetCanRecordExtended(bool) {}
++void RecordEventNative(mozilla::Telemetry::EventID,
++                       const mozilla::Maybe<nsCString>&,
++                       const mozilla::Maybe<CopyableTArray<EventExtraEntry>>&) {
++}
++nsresult RegisterBuiltinEvents(const nsACString&, JS::Handle<JS::Value>,
++                               JSContext*) {
++  return NS_OK;
++}
++nsresult CreateSnapshots(uint32_t, bool, uint32_t, JSContext* aCx, uint8_t,
++                         JS::MutableHandle<JS::Value> aResult) {
++  return EmptyArray(aCx, aResult);
++}
++nsresult RecordChildEvents(
++    mozilla::Telemetry::ProcessID,
++    const nsTArray<mozilla::Telemetry::ChildEventData>&) {
++  return NS_OK;
++}
++void ClearEvents() {}
++size_t SizeOfIncludingThis(mozilla::MallocSizeOf) { return 0; }
++
++}  // namespace TelemetryEvent
++
++namespace TelemetryUserInteraction {
++
++void InitializeGlobalState(bool) {}
++void DeInitializeGlobalState() {}
++bool CanRecord(const nsAString&) { return false; }
++
++}  // namespace TelemetryUserInteraction
++
++namespace mozilla::telemetry {
++
++bool UserInteractionStopwatch::Start(const dom::GlobalObject&, const nsAString&,
++                                     const nsACString&, JS::Handle<JSObject*>) {
++  return false;
++}
++bool UserInteractionStopwatch::Running(const dom::GlobalObject&,
++                                       const nsAString&,
++                                       JS::Handle<JSObject*>) {
++  return false;
++}
++bool UserInteractionStopwatch::Update(const dom::GlobalObject&,
++                                      const nsAString&, const nsACString&,
++                                      JS::Handle<JSObject*>) {
++  return false;
++}
++bool UserInteractionStopwatch::Cancel(const dom::GlobalObject&,
++                                      const nsAString&, JS::Handle<JSObject*>) {
++  return false;
++}
++bool UserInteractionStopwatch::Finish(const dom::GlobalObject&,
++                                      const nsAString&, JS::Handle<JSObject*>,
++                                      const dom::Optional<nsACString>&) {
++  return false;
++}
++
++}  // namespace mozilla::telemetry
++
++NS_IMPL_COMPONENT_FACTORY(nsITelemetry) {
++  RefPtr<NoopTelemetry> instance = new NoopTelemetry();
++  return instance.forget().downcast<nsISupports>();
++}
+diff --git a/toolkit/components/telemetry/moz.build b/toolkit/components/telemetry/moz.build
+index 91ae538..4265dfe 100644
+--- a/toolkit/components/telemetry/moz.build
++++ b/toolkit/components/telemetry/moz.build
+@@ -6,10 +6,6 @@ include("/ipc/chromium/chromium-config.mozbuild")
+ 
+ FINAL_LIBRARY = "xul"
+ 
+-DIRS = [
+-    "pingsender",
+-]
+-
+ DEFINES["MOZ_APP_VERSION"] = '"%s"' % CONFIG["MOZ_APP_VERSION"]
+ 
+ LOCAL_INCLUDES += [
+@@ -51,78 +47,96 @@ EXPORTS.mozilla.telemetry += [
+     "core/Stopwatch.h",
+ ]
+ 
+-UNIFIED_SOURCES += [
+-    "core/Stopwatch.cpp",
+-    "core/Telemetry.cpp",
+-    "core/TelemetryCommon.cpp",
+-    "core/TelemetryEvent.cpp",
+-    "core/TelemetryHistogram.cpp",
+-    "core/TelemetryScalar.cpp",
+-    "core/TelemetryUserInteraction.cpp",
+-    "other/CombinedStacks.cpp",
+-    "other/ProcessedStack.cpp",
+-    "other/TelemetryIOInterposeObserver.cpp",
+-]
+-
+-# Android and iOS don't support Legacy Telemetry.
+-if CONFIG["MOZ_WIDGET_TOOLKIT"] not in ("android", "uikit"):
+-    UNIFIED_SOURCES += [
+-        "core/ipc/TelemetryIPC.cpp",
+-        "core/ipc/TelemetryIPCAccumulator.cpp",
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    DIRS = [
++        "pingsender",
+     ]
+-else:
++
+     UNIFIED_SOURCES += [
+-        "core/ipc/TelemetryIPCAccumulatorStub.cpp",
+-        "core/ipc/TelemetryIPCStub.cpp",
++        "core/Stopwatch.cpp",
++        "core/Telemetry.cpp",
++        "core/TelemetryCommon.cpp",
++        "core/TelemetryEvent.cpp",
++        "core/TelemetryHistogram.cpp",
++        "core/TelemetryScalar.cpp",
++        "core/TelemetryUserInteraction.cpp",
++        "other/CombinedStacks.cpp",
++        "other/ProcessedStack.cpp",
++        "other/TelemetryIOInterposeObserver.cpp",
+     ]
+ 
+-if CONFIG["OS_ARCH"] == "WINNT":
+-    UNIFIED_SOURCES += [
+-        "other/UntrustedModules.cpp",
+-        "other/UntrustedModulesBackupService.cpp",
+-        "other/UntrustedModulesDataSerializer.cpp",
++    # Android and iOS don't support Legacy Telemetry.
++    if CONFIG["MOZ_WIDGET_TOOLKIT"] not in ("android", "uikit"):
++        UNIFIED_SOURCES += [
++            "core/ipc/TelemetryIPC.cpp",
++            "core/ipc/TelemetryIPCAccumulator.cpp",
++        ]
++    else:
++        UNIFIED_SOURCES += [
++            "core/ipc/TelemetryIPCAccumulatorStub.cpp",
++            "core/ipc/TelemetryIPCStub.cpp",
++        ]
++
++    if CONFIG["OS_ARCH"] == "WINNT":
++        UNIFIED_SOURCES += [
++            "other/UntrustedModules.cpp",
++            "other/UntrustedModulesBackupService.cpp",
++            "other/UntrustedModulesDataSerializer.cpp",
++        ]
++
++    XPCOM_MANIFESTS += [
++        "components.conf",
++        "core/components.conf",
+     ]
+ 
+-XPCOM_MANIFESTS += [
+-    "components.conf",
+-    "core/components.conf",
+-]
++    EXTRA_COMPONENTS += ["TelemetryStartup.manifest"]
+ 
+-EXTRA_COMPONENTS += ["TelemetryStartup.manifest"]
+-
+-EXTRA_JS_MODULES += [
+-    "app/ClientID.sys.mjs",
+-    "app/TelemetryArchive.sys.mjs",
+-    "app/TelemetryController.sys.mjs",
+-    "app/TelemetryControllerBase.sys.mjs",
+-    "app/TelemetryControllerContent.sys.mjs",
+-    "app/TelemetryControllerParent.sys.mjs",
+-    "app/TelemetryEnvironment.sys.mjs",
+-    "app/TelemetryReportingPolicy.sys.mjs",
+-    "app/TelemetryScheduler.sys.mjs",
+-    "app/TelemetrySend.sys.mjs",
+-    "app/TelemetryStorage.sys.mjs",
+-    "app/TelemetryTimestamps.sys.mjs",
+-    "app/TelemetryUtils.sys.mjs",
+-    "app/UsageReporting.sys.mjs",
+-    "pings/CoveragePing.sys.mjs",
+-    "pings/EventPing.sys.mjs",
+-    "pings/HealthPing.sys.mjs",
+-    "pings/TelemetrySession.sys.mjs",
+-    "pings/UntrustedModulesPing.sys.mjs",
+-    "pings/UpdatePing.sys.mjs",
+-    "TelemetryStartup.sys.mjs",
+-]
++    EXTRA_JS_MODULES += [
++        "app/ClientID.sys.mjs",
++        "app/TelemetryArchive.sys.mjs",
++        "app/TelemetryController.sys.mjs",
++        "app/TelemetryControllerBase.sys.mjs",
++        "app/TelemetryControllerContent.sys.mjs",
++        "app/TelemetryControllerParent.sys.mjs",
++        "app/TelemetryEnvironment.sys.mjs",
++        "app/TelemetryReportingPolicy.sys.mjs",
++        "app/TelemetryScheduler.sys.mjs",
++        "app/TelemetrySend.sys.mjs",
++        "app/TelemetryStorage.sys.mjs",
++        "app/TelemetryTimestamps.sys.mjs",
++        "app/TelemetryUtils.sys.mjs",
++        "app/UsageReporting.sys.mjs",
++        "pings/CoveragePing.sys.mjs",
++        "pings/EventPing.sys.mjs",
++        "pings/HealthPing.sys.mjs",
++        "pings/TelemetrySession.sys.mjs",
++        "pings/UntrustedModulesPing.sys.mjs",
++        "pings/UpdatePing.sys.mjs",
++        "TelemetryStartup.sys.mjs",
++    ]
+ 
+-EXTRA_JS_MODULES.backgroundtasks += [
+-    "pings/BackgroundTask_pingsender.sys.mjs",
+-]
++    EXTRA_JS_MODULES.backgroundtasks += [
++        "pings/BackgroundTask_pingsender.sys.mjs",
++    ]
+ 
+-if CONFIG["OS_ARCH"] == "WINNT":
+-    EXTRA_JS_MODULES += [
+-        "pings/UninstallPing.sys.mjs",
++    if CONFIG["OS_ARCH"] == "WINNT":
++        EXTRA_JS_MODULES += [
++            "pings/UninstallPing.sys.mjs",
++        ]
++else:
++    SOURCES += [
++        "core/TelemetryNoop.cpp",
+     ]
+ 
++    UNIFIED_SOURCES += [
++        "core/ipc/TelemetryIPCAccumulatorStub.cpp",
++        "core/ipc/TelemetryIPCStub.cpp",
++        "other/CombinedStacks.cpp",
++        "other/ProcessedStack.cpp",
++    ]
++
++    XPCOM_MANIFESTS += ["core/components.conf"]
++
+ TESTING_JS_MODULES += [
+     "tests/unit/TelemetryArchiveTesting.sys.mjs",
+     "tests/unit/TelemetryEnvironmentTesting.sys.mjs",
+@@ -139,21 +153,22 @@ histogram_files = [
+ if CONFIG["MOZ_TELEMETRY_EXTRA_HISTOGRAM_FILES"]:
+     histogram_files.extend(CONFIG["MOZ_TELEMETRY_EXTRA_HISTOGRAM_FILES"])
+ 
+-GeneratedFile(
+-    "TelemetryHistogramData.inc",
+-    script="build_scripts/gen_histogram_data.py",
+-    inputs=histogram_files,
+-)
+ GeneratedFile(
+     "TelemetryHistogramEnums.h",
+     script="build_scripts/gen_histogram_enum.py",
+     inputs=histogram_files,
+ )
+-GeneratedFile(
+-    "TelemetryHistogramNameMap.h",
+-    script="build_scripts/gen_histogram_phf.py",
+-    inputs=histogram_files,
+-)
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    GeneratedFile(
++        "TelemetryHistogramData.inc",
++        script="build_scripts/gen_histogram_data.py",
++        inputs=histogram_files,
++    )
++    GeneratedFile(
++        "TelemetryHistogramNameMap.h",
++        script="build_scripts/gen_histogram_phf.py",
++        inputs=histogram_files,
++    )
+ 
+ # Generate scalar files.
+ scalar_files = [
+@@ -162,28 +177,26 @@ scalar_files = [
+ if CONFIG["MOZ_TELEMETRY_EXTRA_SCALAR_FILES"]:
+     scalar_files.extend(CONFIG["MOZ_TELEMETRY_EXTRA_SCALAR_FILES"])
+ 
+-GeneratedFile(
+-    "TelemetryScalarData.h",
+-    script="build_scripts/gen_scalar_data.py",
+-    inputs=scalar_files,
+-)
+ GeneratedFile(
+     "TelemetryScalarEnums.h",
+     script="build_scripts/gen_scalar_enum.py",
+     inputs=scalar_files,
+ )
+-
+-# Generate the JSON scalar definitions. They will only be
+-# used in artifact or "build faster" builds.
+-GeneratedFile(
+-    "ScalarArtifactDefinitions.json",
+-    script="build_scripts/gen_scalar_data.py",
+-    entry_point="generate_JSON_definitions",
+-    inputs=scalar_files,
+-)
+-
+-# Move the scalars JSON file to the directory where the Firefox binary is.
+-FINAL_TARGET_FILES += ["!ScalarArtifactDefinitions.json"]
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    GeneratedFile(
++        "TelemetryScalarData.h",
++        script="build_scripts/gen_scalar_data.py",
++        inputs=scalar_files,
++    )
++    # Generate the JSON scalar definitions. They will only be used in artifact
++    # or "build faster" builds.
++    GeneratedFile(
++        "ScalarArtifactDefinitions.json",
++        script="build_scripts/gen_scalar_data.py",
++        entry_point="generate_JSON_definitions",
++        inputs=scalar_files,
++    )
++    FINAL_TARGET_FILES += ["!ScalarArtifactDefinitions.json"]
+ 
+ # Generate event files.
+ event_files = [
+@@ -192,27 +205,26 @@ event_files = [
+ if CONFIG["MOZ_TELEMETRY_EXTRA_EVENT_FILES"]:
+     event_files.extend(CONFIG["MOZ_TELEMETRY_EXTRA_EVENT_FILES"])
+ 
+-GeneratedFile(
+-    "TelemetryEventData.h", script="build_scripts/gen_event_data.py", inputs=event_files
+-)
+-
+ GeneratedFile(
+     "TelemetryEventEnums.h",
+     script="build_scripts/gen_event_enum.py",
+     inputs=event_files,
+ )
+-
+-# Generate the JSON event definitions. They will only be
+-# used in artifact or "build faster" builds.
+-GeneratedFile(
+-    "EventArtifactDefinitions.json",
+-    script="build_scripts/gen_event_data.py",
+-    entry_point="generate_JSON_definitions",
+-    inputs=event_files,
+-)
+-
+-# Move the events JSON file to the directory where the Firefox binary is.
+-FINAL_TARGET_FILES += ["!EventArtifactDefinitions.json"]
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    GeneratedFile(
++        "TelemetryEventData.h",
++        script="build_scripts/gen_event_data.py",
++        inputs=event_files,
++    )
++    # Generate the JSON event definitions. They will only be used in artifact
++    # or "build faster" builds.
++    GeneratedFile(
++        "EventArtifactDefinitions.json",
++        script="build_scripts/gen_event_data.py",
++        entry_point="generate_JSON_definitions",
++        inputs=event_files,
++    )
++    FINAL_TARGET_FILES += ["!EventArtifactDefinitions.json"]
+ 
+ # Generate data from Processes.yaml
+ processes_files = [
+@@ -226,26 +238,28 @@ GeneratedFile(
+ )
+ 
+ 
+-GeneratedFile(
+-    "TelemetryProcessData.h",
+-    script="build_scripts/gen_process_data.py",
+-    inputs=processes_files,
+-)
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    GeneratedFile(
++        "TelemetryProcessData.h",
++        script="build_scripts/gen_process_data.py",
++        inputs=processes_files,
++    )
+ 
+ # Generate UserInteraction file
+ userinteraction_files = [
+     "UserInteractions.yaml",
+ ]
+-GeneratedFile(
+-    "TelemetryUserInteractionData.h",
+-    script="build_scripts/gen_userinteraction_data.py",
+-    inputs=userinteraction_files,
+-)
+-GeneratedFile(
+-    "TelemetryUserInteractionNameMap.h",
+-    script="build_scripts/gen_userinteraction_phf.py",
+-    inputs=userinteraction_files,
+-)
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    GeneratedFile(
++        "TelemetryUserInteractionData.h",
++        script="build_scripts/gen_userinteraction_data.py",
++        inputs=userinteraction_files,
++    )
++    GeneratedFile(
++        "TelemetryUserInteractionNameMap.h",
++        script="build_scripts/gen_userinteraction_phf.py",
++        inputs=userinteraction_files,
++    )
+ 
+ with Files("**"):
+     BUG_COMPONENT = ("Toolkit", "Telemetry")
+diff --git a/toolkit/content/jar.mn b/toolkit/content/jar.mn
+index 27c97a5..16baee9 100644
+--- a/toolkit/content/jar.mn
++++ b/toolkit/content/jar.mn
+@@ -37,14 +37,16 @@ toolkit.jar:
+    content/global/aboutRestricted/aboutRestricted.css (aboutRestricted/aboutRestricted.css)
+    content/global/aboutSupport.js
+ *  content/global/aboutSupport.xhtml
+-#ifndef MOZ_GLEAN_ANDROID
++#ifdef MOZ_OBSERVABILITY_RUNTIME
++#ifndef MOZ_GLEAN_ANDROID
+    content/global/aboutGlean.js
+    content/global/aboutGlean.html
+    content/global/aboutGlean.css
+-#endif
++#endif
+    content/global/aboutTelemetry.js
+    content/global/aboutTelemetry.xhtml
+    content/global/aboutTelemetry.css
++#endif
+    content/global/aboutUrlClassifier.js
+    content/global/aboutUrlClassifier.xhtml
+    content/global/aboutUrlClassifier.css
+diff --git a/toolkit/modules/moz.build b/toolkit/modules/moz.build
+index f82f7c7..28b165e 100644
+--- a/toolkit/modules/moz.build
++++ b/toolkit/modules/moz.build
+@@ -151,7 +151,6 @@ EXTRA_JS_MODULES += [
+     "AppMenuNotifications.sys.mjs",
+     "AsyncPrefs.sys.mjs",
+     "BinarySearch.sys.mjs",
+-    "BrowserTelemetryUtils.sys.mjs",
+     "BrowserUtils.sys.mjs",
+     "CanonicalJSON.sys.mjs",
+     "CertUtils.sys.mjs",
+@@ -211,6 +210,9 @@ EXTRA_JS_MODULES += [
+     "WebChannel.sys.mjs",
+ ]
+ 
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    EXTRA_JS_MODULES += ["BrowserTelemetryUtils.sys.mjs"]
++
+ if not CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+     EXTRA_JS_MODULES += [
+         "AppServicesTracing.sys.mjs",
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index 111111111111..222222222222 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -54,6 +54,13 @@ export var AppConstants = Object.freeze({
+   false,
+ #endif
+ 
++  MOZ_OBSERVABILITY_RUNTIME:
++#ifdef MOZ_OBSERVABILITY_RUNTIME
++  true,
++#else
++  false,
++#endif
++
+   MOZ_UPDATER: @MOZ_UPDATER_BOOL@,
+ 
+   MOZ_WEBRTC: @MOZ_WEBRTC_BOOL@,
+diff --git a/testing/xpcshell/head.js b/testing/xpcshell/head.js
+index 333333333333..444444444444 100644
+--- a/testing/xpcshell/head.js
++++ b/testing/xpcshell/head.js
+@@ -1971,7 +1971,11 @@ try {
+ try {
+   // We only need to run this in the parent process.
+   // We only want to run this for local developer builds (which should have a "default" update channel).
+-  if (runningInParent && _AppConstants.MOZ_UPDATE_CHANNEL == "default") {
++  if (
++    runningInParent &&
++    _AppConstants.MOZ_UPDATE_CHANNEL == "default" &&
++    _AppConstants.MOZ_OBSERVABILITY_RUNTIME
++  ) {
+     let startTime = ChromeUtils.now();
+     let { TelemetryController: _TelemetryController } =
+       ChromeUtils.importESModule(
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+index 9acde9a..1d026af 100644
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -37,7 +37,9 @@
+ #include "mozilla/Telemetry.h"
+ #include "mozilla/Try.h"
+ #include "mozilla/intl/LocaleService.h"
+-#include "mozilla/JSONWriter.h"
++#ifdef MOZ_OBSERVABILITY_RUNTIME
++#  include "mozilla/JSONWriter.h"
++#endif
+ #include "mozilla/gfx/gfxVars.h"
+ #include "mozilla/glean/ToolkitMozappsUpdateSharedMetrics.h"
+ #include "mozilla/glean/ToolkitXreMetrics.h"
+@@ -276,8 +278,9 @@ extern void InstallSignalHandlers(const char* ProgramName);
+ #define FILE_INVALIDATE_CACHES ".purgecaches"_ns
+ #define FILE_STARTUP_INCOMPLETE u".startup-incomplete"_ns
+ 
+-#if defined(MOZ_BLOCK_PROFILE_DOWNGRADE) || defined(MOZ_LAUNCHER_PROCESS) || \
+-    defined(MOZ_DEFAULT_BROWSER_AGENT)
++#if (defined(MOZ_BLOCK_PROFILE_DOWNGRADE) && \
++     defined(MOZ_OBSERVABILITY_RUNTIME)) || \
++    defined(MOZ_LAUNCHER_PROCESS) || defined(MOZ_DEFAULT_BROWSER_AGENT)
+ static const char kPrefHealthReportUploadEnabled[] =
+     "datareporting.healthreport.uploadEnabled";
+ #endif  // defined(MOZ_BLOCK_PROFILE_DOWNGRADE) || defined(MOZ_LAUNCHER_PROCESS)
+@@ -3297,6 +3299,7 @@ static nsresult SelectProfile(nsToolkitProfileService* aProfileSvc,
+ }
+ 
+ #ifdef MOZ_BLOCK_PROFILE_DOWNGRADE
++#  ifdef MOZ_OBSERVABILITY_RUNTIME
+ struct FileWriteFunc final : public JSONWriteFunc {
+   FILE* mFile;
+   explicit FileWriteFunc(FILE* aFile) : mFile(aFile) {}
+@@ -3502,6 +3505,7 @@ static void SubmitDowngradeTelemetry(const nsCString& aLastVersion,
+   process->Run(false, args, 2);
+ #  endif
+ }
++#  endif
+ 
+ static const char kProfileDowngradeURL[] =
+     "chrome://mozapps/content/profile/profileDowngrade.xhtml";
+@@ -3588,8 +3592,10 @@ static ReturnAbortOnError HandleDetectedDowngrade(
+ 
+       paramBlock->GetInt(1, &result);
+ 
++#  ifdef MOZ_OBSERVABILITY_RUNTIME
+       SubmitDowngradeTelemetry(aLastVersion, hasSync, result,
+                                appRunnerTelemFlags);
++#  endif
+     }
+   }
+ 
+diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+index 74d738e46fe5..333333333333 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+@@ -3101,6 +3101,8 @@ export var XPIProvider = {
+     try {
+       Services.appinfo.annotateCrashReport("Add-ons", data);
+     } catch (e) {}
+ 
+-    lazy.TelemetrySession.setAddOns(data);
++    if (AppConstants.MOZ_TELEMETRY_REPORTING) {
++      lazy.TelemetrySession.setAddOns(data);
++    }
+   },
+ 

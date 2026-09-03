@@ -1,0 +1,31 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+EXTRA_JS_MODULES += [
+    "DesktopAddressInput.sys.mjs",
+    "DesktopCleanLinks.sys.mjs",
+    "DesktopEngine.sys.mjs",
+    "DesktopExtensionMenus.sys.mjs",
+    "DesktopExtensionTabs.sys.mjs",
+    "DesktopInternalPages.sys.mjs",
+    "DesktopLocale.sys.mjs",
+    "DesktopProcessIsolation.sys.mjs",
+    "DesktopProfileStore.sys.mjs",
+    "DesktopTabMetrics.sys.mjs",
+]
+
+if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
+    EXTRA_JS_MODULES += [
+        "DesktopExtensionActions.sys.mjs",
+        "DesktopExtensionManager.sys.mjs",
+        "DesktopExtensionOmnibox.sys.mjs",
+        "DesktopExtensionPermissionPrompts.sys.mjs",
+        "DesktopExtensionPopupHost.sys.mjs",
+    ]
+
+FINAL_TARGET_FILES.modules += [
+    "AboutNewTab.sys.mjs",
+    "BrowserWindowTracker.sys.mjs",
+    "ExtensionBrowsingData.sys.mjs",
+]

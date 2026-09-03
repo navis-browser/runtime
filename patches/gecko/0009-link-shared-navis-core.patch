@@ -1,0 +1,72 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2953,6 +2953,7 @@ dependencies = [
+  "mozglue-static",
+  "mozurl",
+  "mp4parse_capi",
++ "navis-core-ffi",
+  "neqo_glue",
+  "netwerk_helper",
+  "nserror",
+@@ -5327,6 +5328,17 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
++[[package]]
++name = "navis-core"
++version = "0.1.0"
++
++[[package]]
++name = "navis-core-ffi"
++version = "0.1.0"
++dependencies = [
++ "navis-core",
++]
++
+ [[package]]
+ name = "neqo-bin"
+ version = "0.29.0"
+diff --git a/toolkit/library/rust/gkrust-features.mozbuild b/toolkit/library/rust/gkrust-features.mozbuild
+--- a/toolkit/library/rust/gkrust-features.mozbuild
++++ b/toolkit/library/rust/gkrust-features.mozbuild
+@@ -9,5 +9,8 @@ if not CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+     gkrust_features += ["application_services"]
+ 
++if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
++    gkrust_features += ["desktop_embedder_core"]
++
+ if CONFIG["MOZ_DEBUG"]:
+     gkrust_features += [
+         "gecko_debug",
+diff --git a/toolkit/library/rust/shared/Cargo.toml b/toolkit/library/rust/shared/Cargo.toml
+--- a/toolkit/library/rust/shared/Cargo.toml
++++ b/toolkit/library/rust/shared/Cargo.toml
+@@ -34,6 +34,7 @@ authrs_bridge = { path = "../../../../dom/webauthn/authrs_bridge" }
+ gkrust_utils = { path = "../../../../xpcom/rust/gkrust_utils" }
+ gecko_logger = { path = "../../../../xpcom/rust/gecko_logger" }
+ gecko_tracing = { path = "../../../../xpcom/rust/gecko_tracing" }
++navis-core-ffi = { path = "../../../../navis-core/rust/ffi", optional = true }
+ rsdparsa_capi = { path = "../../../../dom/media/webrtc/sdp/rsdparsa_capi", optional = true }
+ # We have these to enforce common feature sets for said crates.
+ log = {version = "0.4", features = ["release_max_level_info"]}
+@@ -152,6 +153,7 @@ application_services = [
+     "dep:viaduct-necko",
+     "dep:webext-storage",
+ ]
++desktop_embedder_core = ["dep:navis-core-ffi"]
+ moz_memory = ["mozglue-static/moz_memory"]
+ cubeb-remoting = ["cubeb-sys", "audioipc2-client", "audioipc2-server"]
+ cubeb_coreaudio_rust = ["cubeb-sys", "cubeb-coreaudio"]
+diff --git a/toolkit/library/rust/shared/lib.rs b/toolkit/library/rust/shared/lib.rs
+--- a/toolkit/library/rust/shared/lib.rs
++++ b/toolkit/library/rust/shared/lib.rs
+@@ -119,6 +119,8 @@ extern crate viaduct_necko;
+ 
+ extern crate gecko_logger;
+ extern crate gecko_tracing;
++#[cfg(feature = "desktop_embedder_core")]
++extern crate navis_core_ffi;
+ 
+ #[cfg(feature = "oxidized_breakpad")]
+ extern crate rust_minidump_writer_linux;

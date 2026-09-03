@@ -1,0 +1,101 @@
+diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+index 74d738e46fe5..111111111111 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+@@ -81,6 +81,8 @@ const PREF_EM_LAST_APP_BUILD_ID = "extensions.lastAppBuildId";
+ 
+ const PREF_DATA_COLLECTION_PERMISSIONS_ENABLED =
+   "extensions.dataCollectionPermissions.enabled";
++const PREF_APPLICATION_BUILTIN_IDS =
++  "extensions.applicationBuiltins.allowedIds";
+ 
+ // Specify a list of valid built-in add-ons to load.
+ const BUILT_IN_ADDONS_URI = "chrome://browser/content/built_in_addons.json";
+@@ -1255,6 +1257,38 @@ class DirectoryLocation extends XPIStateLocation {
+   }
+ }
+ 
++class RestrictedApplicationExtensionLocation extends DirectoryLocation {
++  // This is a packaged built-in rather than an ordinary foreign/sideloaded
++  // extension. The distinction lets Gecko discover it while every generic
++  // sideload scope remains disabled. XPIInstall still requires its AMO
++  // signature through isApplicationBuiltin.
++  get isApplicationBuiltin() {
++    return true;
++  }
++
++  get isBuiltin() {
++    return true;
++  }
++
++  readAddons() {
++    const addons = super.readAddons();
++    const allowedIds = new Set(
++      Services.prefs
++        .getStringPref(PREF_APPLICATION_BUILTIN_IDS, "")
++        .split(",")
++        .map(id => id.trim())
++        .filter(Boolean)
++    );
++    for (const id of addons.keys()) {
++      if (!allowedIds.has(id)) {
++        logger.warn(`Ignoring unregistered application extension: ${id}`);
++        addons.delete(id);
++      }
++    }
++    return addons;
++  }
++}
++
+ /**
+  * An object which identifies a directory install location for system add-ons
+  * updates.
+@@ -1671,8 +1705,9 @@ var XPIStates = {
+           // addons.  We handle this here so changes for existing sideloads
+           // will function.
+           if (
+             !loc.isSystem &&
++            !loc.isApplicationBuiltin &&
+             !(loc.scope & lazy.AddonSettings.SCOPES_SIDELOAD)
+           ) {
+             continue;
+           }
+@@ -1690,7 +1725,7 @@ var XPIStates = {
+               rootURI: entry.builtin.res_url,
+             });
+           }
+-          if (!loc.isSystem) {
++          if (!loc.isSystem && !loc.isApplicationBuiltin) {
+             this.sideLoadedAddons.set(id, xpiState);
+           }
+         } else {
+@@ -2523,7 +2558,11 @@ export var XPIProvider = {
+       } catch (e) {
+         return null;
+       }
+-      return new DirectoryLocation(aName, dir, aScope, aLocked, aIsSystem);
++      const Location =
++        AppConstants.MOZ_DESKTOP_EMBEDDER && aName === KEY_APP_GLOBAL
++          ? RestrictedApplicationExtensionLocation
++          : DirectoryLocation;
++      return new Location(aName, dir, aScope, aLocked, aIsSystem);
+     }
+ 
+     function SystemLoc(aName, aScope, aKey, aPaths) {
+diff --git a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
+index c63f5ad14810..222222222222 100644
+--- a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
+@@ -902,6 +902,12 @@ function getSignedState(aRv, aAddonID) {
+ }
+ 
+ function shouldVerifySignedState(aAddonType, aLocation) {
++  // Desktop Embedder application built-ins use built-in lifecycle semantics
++  // to avoid generic sideload discovery, but remain official signed XPIs.
++  if (aLocation.isApplicationBuiltin) {
++    return true;
++  }
++
+   // Updated system add-ons should always have their signature checked (unless they are built
+   // into the omni jar).
+   if (

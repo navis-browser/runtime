@@ -1,0 +1,93 @@
+{
+  "browserAction": {
+    "url": "chrome://navis-extensions/content/ext-browserAction.js",
+    "schema": "chrome://extensions/content/schemas/browser_action.json",
+    "scopes": ["addon_parent"],
+    "manifest": ["browser_action", "action"],
+    "paths": [["browserAction"], ["action"]]
+  },
+  "browsingData": {
+    "url": "chrome://extensions/content/parent/ext-browsingData.js",
+    "schema": "chrome://extensions/content/schemas/browsing_data.json",
+    "scopes": ["addon_parent"],
+    "paths": [["browsingData"]]
+  },
+  "pageAction": {
+    "url": "chrome://navis-extensions/content/ext-pageAction.js",
+    "schema": "chrome://navis-extensions/content/schemas/page_action.json",
+    "scopes": ["addon_parent"],
+    "manifest": ["page_action"],
+    "paths": [["pageAction"]]
+  },
+  "commands": {
+    "url": "chrome://navis-extensions/content/ext-commands.js",
+    "schema": "chrome://navis-extensions/content/schemas/commands.json",
+    "scopes": ["addon_parent"],
+    "events": ["uninstall"],
+    "manifest": ["commands"],
+    "paths": [["commands"]]
+  },
+  "menusInternal": {
+    "url": "chrome://navis-extensions/content/ext-menus.js",
+    "schema": "chrome://navis-extensions/content/schemas/menus.json",
+    "scopes": ["addon_parent"],
+    "events": ["startup"],
+    "permissions": ["menus", "contextMenus"],
+    "paths": [["contextMenus"], ["menus"], ["menusInternal"]]
+  },
+  "omnibox": {
+    "url": "chrome://navis-extensions/content/ext-omnibox.js",
+    "schema": "chrome://navis-extensions/content/schemas/omnibox.json",
+    "scopes": ["addon_parent"],
+    "manifest": ["omnibox"],
+    "paths": [["omnibox"]]
+  },
+  "tabs": {
+    "url": "chrome://navis-extensions/content/ext-tabs.js",
+    "schema": "chrome://navis-extensions/content/schemas/tabs.json",
+    "scopes": ["addon_parent"],
+    "paths": [["tabs"]]
+  },
+  "windows": {
+    "url": "chrome://navis-extensions/content/ext-windows.js",
+    "schema": "chrome://navis-extensions/content/schemas/windows.json",
+    "scopes": ["addon_parent"],
+    "paths": [["windows"]]
+  },
+  "find": {
+    "url": "chrome://navis-extensions/content/ext-find.js",
+    "schema": "chrome://navis-extensions/content/schemas/find.json",
+    "scopes": ["addon_parent"],
+    "paths": [["find"]]
+  },
+  "history": {
+    "url": "chrome://navis-extensions/content/ext-history.js",
+    "schema": "chrome://navis-extensions/content/schemas/history.json",
+    "scopes": ["addon_parent"],
+    "paths": [["history"]]
+  },
+  "bookmarks": {
+    "url": "chrome://navis-extensions/content/ext-bookmarks.js",
+    "schema": "chrome://navis-extensions/content/schemas/bookmarks.json",
+    "scopes": ["addon_parent"],
+    "paths": [["bookmarks"]]
+  },
+  "topSites": {
+    "url": "chrome://navis-extensions/content/ext-topSites.js",
+    "schema": "chrome://navis-extensions/content/schemas/top_sites.json",
+    "scopes": ["addon_parent"],
+    "paths": [["topSites"]]
+  },
+  "search": {
+    "url": "chrome://navis-extensions/content/ext-search.js",
+    "schema": "chrome://navis-extensions/content/schemas/search.json",
+    "scopes": ["addon_parent"],
+    "paths": [["search"]]
+  },
+  "sessions": {
+    "url": "chrome://navis-extensions/content/ext-sessions.js",
+    "schema": "chrome://navis-extensions/content/schemas/sessions.json",
+    "scopes": ["addon_parent"],
+    "paths": [["sessions"]]
+  }
+}

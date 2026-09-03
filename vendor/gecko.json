@@ -1,0 +1,6 @@
+{
+  "remote": "https://github.com/mozilla-firefox/firefox.git",
+  "tag": "FIREFOX_153_1_0esr_RELEASE",
+  "build_tag": "FIREFOX_153_1_0esr_BUILD1",
+  "commit": "468445e58d3acc7e4e059be99856daff1f2ae8f1"
+}

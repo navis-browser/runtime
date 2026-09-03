@@ -1,0 +1,30 @@
+From b23d93861cc0ec74b18e9b103c97ceab8b0148c7 Mon Sep 17 00:00:00 2001
+From: willvar <0@willvar.tw>
+Date: Sun, 30 Aug 2026 15:45:00 +0800
+Subject: [PATCH] Initialize Desktop Embedder GTK IME focus
+
+---
+ widget/gtk/nsWindow.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
+--- a/widget/gtk/nsWindow.cpp
++++ b/widget/gtk/nsWindow.cpp
+@@ -3207,6 +3207,15 @@ void nsWindow::OnContainerFocusInEvent(GdkEventFocus* aEvent) {
+     // dispatching an activation notification if the widget is already
+     // active.
+     gFocusWindow = this;
++#ifdef MOZ_DESKTOP_EMBEDDER
++    // A Desktop Embedder chrome document may activate before its remote view
++    // has selected a DOM focus target.  Keep the IM context synchronized with
++    // the native fallback focus; otherwise later editable-content focus sees
++    // gFocusWindow == this and never supplies a dispatch target to the IME.
++    if (mIMContext) {
++      mIMContext->OnFocusWindow(this);
++    }
++#endif
+   }
+ 
+   LOG("Events sent from focus in event");
+-- 
+2.55.0

@@ -1,0 +1,29 @@
+From 2e8fc6728737043736f1859fa6148745672ad9b1 Mon Sep 17 00:00:00 2001
+From: willvar <0@willvar.tw>
+Date: Sat, 29 Aug 2026 22:52:00 +0800
+Subject: [PATCH] Create a standard Desktop Embedder internal-page URI
+
+---
+ netwerk/base/nsNetUtil.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/netwerk/base/nsNetUtil.cpp b/netwerk/base/nsNetUtil.cpp
+index 5b27e9190c23..5023122917ba 100644
+--- a/netwerk/base/nsNetUtil.cpp
++++ b/netwerk/base/nsNetUtil.cpp
+@@ -1917,6 +1917,13 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
+     return NewStandardURI(aSpec, aCharset, aBaseURI, 21, aURI);
+   }
+ 
++#if defined(MOZ_DESKTOP_EMBEDDER) && \
++    defined(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME)
++  if (scheme.EqualsLiteral(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME)) {
++    return NewStandardURI(aSpec, aCharset, aBaseURI, -1, aURI);
++  }
++#endif
++
+   if (scheme.EqualsLiteral("file")) {
+     return NS_MutateURI(new nsStandardURL::Mutator())
+         .Apply(&nsIFileURLMutator::MarkFileURL)
+-- 
+2.55.0

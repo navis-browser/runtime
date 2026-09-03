@@ -1,0 +1,20 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+XPIDL_SOURCES += [
+    "../../toolkit/components/bitsdownload/nsIBits.idl",
+    "../../toolkit/components/enterprisepolicies/nsIEnterprisePolicies.idl",
+    "../../toolkit/components/passwordmgr/nsILoginInfo.idl",
+    "../../toolkit/components/passwordmgr/nsILoginManager.idl",
+    "../../toolkit/components/passwordmgr/nsILoginManagerAuthPrompter.idl",
+    "../../toolkit/components/passwordmgr/nsILoginManagerCrypto.idl",
+    "../../toolkit/components/passwordmgr/nsILoginManagerPrompter.idl",
+    "../../toolkit/components/passwordmgr/nsILoginMetaInfo.idl",
+    "../../toolkit/components/passwordmgr/nsIPromptInstance.idl",
+    "../../toolkit/components/satchel/nsIFormFillController.idl",
+    "../../toolkit/components/shell/nsIToolkitShellService.idl",
+    "nsIDesktopEmbedderCoreState.idl",
+]
+
+XPIDL_MODULE = "desktop_embedder_interfaces"

@@ -1,0 +1,82 @@
+diff --git a/toolkit/components/extensions/parent/ext-management.js b/toolkit/components/extensions/parent/ext-management.js
+index a460a8f334f6..dcb21661f32a 100644
+--- a/toolkit/components/extensions/parent/ext-management.js
++++ b/toolkit/components/extensions/parent/ext-management.js
+@@ -10,5 +10,6 @@ ChromeUtils.defineLazyGetter(this, "strBundle", function () {
+   );
+ });
+ ChromeUtils.defineESModuleGetters(this, {
++  AppConstants: "resource://gre/modules/AppConstants.sys.mjs",
+   AddonManager: "resource://gre/modules/AddonManager.sys.mjs",
+ });
+@@ -94,7 +95,35 @@ const getExtensionInfoForAddon = (extension, addon) => {
+ // Some management APIs are intentionally limited.
+ const allowedTypes = ["theme", "extension"];
+ 
++function desktopEmbedderBuiltInIds() {
++  if (
++    !AppConstants.MOZ_DESKTOP_EMBEDDER ||
++    !Services.prefs.prefIsLocked("extensions.applicationBuiltins.allowedIds")
++  ) {
++    return new Set();
++  }
++  return new Set(
++    Services.prefs
++      .getStringPref("extensions.applicationBuiltins.allowedIds", "")
++      .split(",")
++      .map(id => id.trim())
++      .filter(Boolean)
++  );
++}
++
+ function checkAllowedAddon(addon) {
++  if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++    if (addon.type !== "extension" || !addon.isWebExtension) {
++      return false;
++    }
++    if (addon.scope === AddonManager.SCOPE_PROFILE) {
++      return !addon.foreignInstall;
++    }
++    return (
++      addon.scope === AddonManager.SCOPE_APPLICATION &&
++      desktopEmbedderBuiltInIds().has(addon.id)
++    );
++  }
+   if (addon.isSystem) {
+     return false;
+   }
+@@ -230,6 +259,11 @@ this.management = class extends ExtensionAPIPersistent {
+         },
+ 
+         async install({ url, hash }) {
++          if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++            throw new ExtensionError(
++              "Extension installation is available only in the application extension manager"
++            );
++          }
+           let listener = {
+             onDownloadEnded(install) {
+               if (install.addon.appDisabled || install.addon.type !== "theme") {
+@@ -265,5 +299,10 @@ this.management = class extends ExtensionAPIPersistent {
+         },
+ 
+         async uninstallSelf(options) {
++          if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++            throw new ExtensionError(
++              "Extension removal is available only in the application extension manager"
++            );
++          }
+           if (options && options.showConfirmDialog) {
+             let message = _("uninstall.confirmation.message", extension.name);
+@@ -302,6 +341,11 @@ this.management = class extends ExtensionAPIPersistent {
+         },
+ 
+         async setEnabled(id, enabled) {
++          if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++            throw new ExtensionError(
++              "Extension state is controlled only by the application extension manager"
++            );
++          }
+           let addon = await AddonManager.getAddonByID(id);
+           if (!addon) {
+             throw new ExtensionError(`No such addon ${id}`);

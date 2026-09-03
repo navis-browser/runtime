@@ -1,0 +1,17 @@
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -2137,6 +2137,10 @@ set_define("MOZ_LAUNCHER_PROCESS", launcher)
+-@depends(build_project, target, "--enable-compile-environment")
+-def check_for_llvm_dlltool(build_project, target, compile_environment):
+-    if build_project != "browser":
++@depends(
++    build_project, "--enable-desktop-embedder", target, "--enable-compile-environment"
++)
++def check_for_llvm_dlltool(
++    build_project, desktop_embedder, target, compile_environment
++):
++    if build_project != "browser" and not desktop_embedder:
+         return
+ 
+     if target.os != "WINNT":

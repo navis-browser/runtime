@@ -1,0 +1,26 @@
+# Compiler-cache test variant of the Navis runtime configuration. It enables Gecko
+# test targets in an isolated object directory and is never release evidence.
+ac_add_options --enable-project=navis
+ac_add_options --enable-tests
+ac_add_options --disable-release
+ac_add_options --disable-crashreporter
+ac_add_options --disable-updater
+ac_add_options --disable-local-ml
+ac_add_options --disable-eme-api
+ac_add_options --disable-web-push
+ac_add_options --disable-safe-browsing
+ac_add_options --enable-webdriver
+ac_add_options --disable-printing
+ac_add_options --disable-ctypes
+ac_add_options --disable-backgroundtasks
+ac_add_options --enable-desktop-embedder
+ac_add_options --enable-webextensions-runtime
+ac_add_options --disable-observability-runtime
+ac_add_options --disable-webrtc
+ac_add_options --with-ccache=sccache
+ac_add_options --host=x86_64-unknown-linux-gnu
+ac_add_options --target=x86_64-unknown-linux-gnu
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-navis-runtime-no-webrtc-tests-sccache
+mk_add_options AUTOCLOBBER=1
+mk_add_options MOZ_MAKE_FLAGS="-j16"
