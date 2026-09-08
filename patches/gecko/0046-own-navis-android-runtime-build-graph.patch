@@ -218,7 +218,7 @@ index b50f3a40f35f..c2e48428a419 100644
 +if (isNavisAndroid) {
 +    include ':navis-runtime-android'
 +    project(':navis-runtime-android').projectDir = new File(
-+        "${gradle.mozconfig.topsrcdir}/navis-android/runtime",
++        "${gradle.mozconfig.topsrcdir}/navis-runtime-android",
 +    )
 +
 +    include ':navis'

@@ -1,0 +1,301 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+plugins {
+    alias(libs.plugins.kotlin.android)
+    id 'com.android.library'
+}
+
+// JNI wrapper generation is a build-time tool dependency. It does not make
+// GeckoView a product dependency or a runtime owner.
+evaluationDependsOn(':annotations')
+
+def navisProductUserAgentSuffix =
+        " + \" Navis/${mozconfig.substs.MOZ_NAVIS_PRODUCT_VERSION}\""
+
+def geckoPrimitiveSourceIncludes = file('gecko-java-primitives.list')
+        .readLines('UTF-8')
+        .collect { it.trim() }
+        .findAll { it && !it.startsWith('#') }
+
+// Do not expose the complete historical GeckoView source tree to javac's
+// sourcepath. SourceDirectorySet include filters select compilation inputs,
+// but javac may still discover and implicitly compile excluded siblings when
+// their common source root is present. Physically stage only the reviewed
+// primitive allowlist so a missing dependency fails closed instead of pulling
+// GeckoRuntime/GeckoSession-backed embedding classes into Navis.
+def stagedGeckoPrimitiveSources = layout.buildDirectory.dir(
+        'generated/source/navisGeckoPrimitives',
+)
+def stageGeckoPrimitiveSources = tasks.register('stageGeckoPrimitiveSources', Sync) {
+    from("${topsrcdir}/mobile/android/geckoview/src/main/java") {
+        include geckoPrimitiveSourceIncludes
+    }
+    from("${topobjdir}/mobile/android/navis-runtime-android/src/main/java") {
+        include geckoPrimitiveSourceIncludes
+    }
+    into stagedGeckoPrimitiveSources
+    includeEmptyDirs = false
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+}
+
+def profileServiceRoot = layout.buildDirectory.dir('generated/navisProfileServices')
+def profileServiceManifest = profileServiceRoot.map { it.file('AndroidManifest_overlay.xml') }
+def profileServiceJava = profileServiceRoot.map {
+    it.file('java/org/mozilla/gecko/process/NavisProfileChildProcessServices.java')
+}
+def upstreamServiceManifest = file("${topobjdir}/mobile/android/navis-runtime-android/src/main/AndroidManifest_overlay.xml")
+def generateProfileServices = tasks.register('generateNavisProfileServices', Exec) {
+    inputs.file(upstreamServiceManifest)
+    inputs.file('generate-profile-services.py')
+    outputs.file(profileServiceManifest)
+    outputs.file(profileServiceJava)
+    commandLine 'python3', file('generate-profile-services.py'),
+            '--source-manifest', upstreamServiceManifest,
+            '--manifest', profileServiceManifest.get().asFile,
+            '--java', profileServiceJava.get().asFile
+}
+
+// Reuse the exact pinned desktop language pack as immutable application data.
+// Gecko's Langpack owner registers both legacy chrome strings and Fluent files.
+def navisLocalePack = file("${topsrcdir}/navis/locales/zh-CN/langpack-zh-CN@firefox.mozilla.org.xpi")
+def navisLocaleMetadata = file("${topsrcdir}/navis/locales/zh-CN/metadata.json")
+def generatedNavisLocales = layout.buildDirectory.dir('generated/assets/navisLocales')
+def stageNavisLocales = tasks.register('stageNavisLocales', Sync) {
+    inputs.file(navisLocalePack)
+    inputs.file(navisLocaleMetadata)
+    doFirst {
+        def metadata = new groovy.json.JsonSlurper().parse(navisLocaleMetadata)
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+                .digest(navisLocalePack.bytes).encodeHex().toString()
+        if (metadata.locale != 'zh-CN' ||
+                metadata.id != 'langpack-zh-CN@firefox.mozilla.org' ||
+                digest != metadata.sha256 || navisLocalePack.length() != metadata.size) {
+            throw new GradleException('The pinned Navis zh-CN language pack changed')
+        }
+    }
+    from({ zipTree(navisLocalePack) }) {
+        into 'navis_locales/zh-CN'
+    }
+    from(navisLocaleMetadata) {
+        into 'navis_locales/zh-CN'
+    }
+    into generatedNavisLocales
+}
+
+android {
+    buildToolsVersion = project.ext.buildToolsVersion
+    compileSdk {
+        version = release(project.ext.compileSdkMajorVersion) {
+            minorApiLevel = project.ext.compileSdkMinorVersion
+        }
+    }
+
+    defaultConfig {
+        minSdk project.ext.minSdkVersion
+        targetSdk project.ext.targetSdkVersion
+        consumerProguardFiles 'proguard-rules.pro'
+
+        buildConfigField 'String', 'GRE_MILESTONE', "\"${mozconfig.substs.GRE_MILESTONE}\""
+        buildConfigField 'String', 'MOZ_APP_BASENAME', "\"${mozconfig.substs.MOZ_APP_BASENAME}\""
+        buildConfigField 'String', 'MOZ_APP_BUILDID', "\"${project.ext.buildId}\""
+        buildConfigField 'String', 'MOZ_APP_ID', "\"${mozconfig.substs.MOZ_APP_ID}\""
+        buildConfigField 'String', 'MOZ_APP_NAME', "\"${mozconfig.substs.MOZ_APP_NAME}\""
+        buildConfigField 'String', 'MOZ_APP_VENDOR', "\"${mozconfig.substs.MOZ_APP_VENDOR}\""
+        buildConfigField 'String', 'MOZ_APP_VERSION', "\"${mozconfig.substs.MOZ_APP_VERSION}\""
+        buildConfigField 'String', 'MOZ_APP_DISPLAYNAME', "\"${mozconfig.substs.MOZ_APP_DISPLAYNAME}\""
+        buildConfigField 'String', 'MOZ_APP_UA_NAME', "\"${mozconfig.substs.MOZ_APP_UA_NAME}\""
+        buildConfigField 'String', 'MOZ_UPDATE_CHANNEL', "\"${mozconfig.substs.MOZ_UPDATE_CHANNEL}\""
+        buildConfigField 'String', 'MOZILLA_VERSION', "\"${mozconfig.substs.MOZILLA_VERSION}\""
+        buildConfigField 'String', 'OMNIJAR_NAME', "\"${mozconfig.substs.OMNIJAR_NAME}\""
+
+        // Keep these engine-private values consistent with Necko. They retain
+        // the Firefox compatibility token and append the Navis product token.
+        buildConfigField 'String', 'USER_AGENT_GECKOVIEW_MOBILE', "\"Mozilla/5.0 (Android \" + android.os.Build.VERSION.RELEASE + \"; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}${navisProductUserAgentSuffix}"
+        buildConfigField 'String', 'USER_AGENT_GECKOVIEW_MOBILE_ANDROID_10', "\"Mozilla/5.0 (Android 10; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}${navisProductUserAgentSuffix}"
+
+        buildConfigField 'int', 'MIN_SDK_VERSION', mozconfig.substs.MOZ_ANDROID_MIN_SDK_VERSION
+        buildConfigField 'boolean', 'DEBUG_BUILD', mozconfig.substs.MOZ_DEBUG ? 'true' : 'false'
+        buildConfigField 'boolean', 'RELEASE_OR_BETA', mozconfig.substs.RELEASE_OR_BETA ? 'true' : 'false'
+        buildConfigField 'boolean', 'NIGHTLY_BUILD', mozconfig.substs.NIGHTLY_BUILD ? 'true' : 'false'
+        buildConfigField 'boolean', 'MOZ_CRASHREPORTER', mozconfig.substs.MOZ_CRASHREPORTER ? 'true' : 'false'
+        buildConfigField 'int', 'MOZ_ANDROID_CONTENT_SERVICE_COUNT', mozconfig.substs.MOZ_ANDROID_CONTENT_SERVICE_COUNT
+        buildConfigField 'boolean', 'MOZILLA_OFFICIAL', mozconfig.substs.MOZILLA_OFFICIAL ? 'true' : 'false'
+        buildConfigField 'boolean', 'MOZ_ANDROID_CONTENT_SERVICE_ISOLATED_PROCESS', mozconfig.substs.MOZ_ANDROID_CONTENT_SERVICE_ISOLATED_PROCESS ? 'true' : 'false'
+    }
+
+    lint {
+        abortOnError = false
+    }
+
+    sourceSets {
+        main {
+            // The Navis module owns compilation and packaging. Selected pinned
+            // Gecko Android primitives remain source inputs while their public
+            // Runtime/Session/View ownership is replaced by Navis peers.
+            java {
+                srcDir stagedGeckoPrimitiveSources
+                srcDir profileServiceRoot.map { it.dir('java') }
+                include geckoPrimitiveSourceIncludes
+
+                // Keep the allowlist fail-closed even if a stale generated
+                // source or a future GeckoView file appears under the broad
+                // source root. These classes are never part of Navis DEX.
+                exclude 'org/mozilla/geckoview/GeckoRuntime.java'
+                exclude 'org/mozilla/geckoview/GeckoSession.java'
+                exclude 'org/mozilla/geckoview/GeckoView.java'
+                exclude 'org/mozilla/geckoview/GeckoDisplay.java'
+                exclude 'org/mozilla/geckoview/SessionAccessibility.java'
+                exclude 'org/mozilla/geckoview/GeckoWebExecutor.java'
+                exclude 'org/mozilla/geckoview/PanZoomController.java'
+                exclude 'org/mozilla/geckoview/SessionTextInput.java'
+                exclude 'org/mozilla/geckoview/WebAuthnTokenManager.java'
+                exclude 'org/mozilla/geckoview/WebExtensionController.java'
+
+                if (!mozconfig.substs.MOZ_ANDROID_HLS_SUPPORT) {
+                    exclude 'org/mozilla/gecko/media/GeckoHlsAudioRenderer.java'
+                    exclude 'org/mozilla/gecko/media/GeckoHlsPlayer.java'
+                    exclude 'org/mozilla/gecko/media/GeckoHlsRendererBase.java'
+                    exclude 'org/mozilla/gecko/media/GeckoHlsVideoRenderer.java'
+                    exclude 'org/mozilla/gecko/media/HttpChannelDataSource.java'
+                    exclude 'org/mozilla/gecko/media/Utils.java'
+                }
+            }
+            aidl.srcDir "${topsrcdir}/mobile/android/geckoview/src/main/aidl"
+            // The direct module only needs Gecko's private IPC definitions;
+            // do not let an unrelated AIDL added to the historical root enter
+            // the product transitively.
+            aidl.include 'org/mozilla/gecko/**/*.aidl'
+
+            if (mozconfig.substs.MOZ_WEBRTC) {
+                java.srcDir "${topsrcdir}/dom/media/systemservices/android_video_capture/java/src"
+                java.srcDir "${topsrcdir}/third_party/libwebrtc/sdk/android/api"
+                java.srcDir "${topsrcdir}/third_party/libwebrtc/sdk/android/src"
+                java.srcDir "${topsrcdir}/third_party/libwebrtc/rtc_base/java"
+            }
+
+            if (mozconfig.substs.MOZ_ASAN) {
+                resources.srcDir "${topsrcdir}/mobile/android/geckoview/src/asan/resources"
+            }
+
+            assets.srcDir "${topobjdir}/dist/navis-android/assets"
+            assets.srcDir generatedNavisLocales
+            jniLibs.srcDir "${topobjdir}/dist/navis-android/lib"
+        }
+
+        debug {
+            manifest.srcFile profileServiceManifest
+        }
+
+        release {
+            manifest.srcFile profileServiceManifest
+        }
+    }
+
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+    }
+
+    // The generated BuildConfig and the pinned primitive sources still use
+    // this engine-private package. The product API lives under org.navis.
+    namespace = 'org.mozilla.geckoview'
+}
+
+tasks.named('preBuild').configure {
+    dependsOn stageGeckoPrimitiveSources
+    dependsOn stageNavisLocales
+    dependsOn generateProfileServices
+}
+
+dependencies {
+    implementation libs.androidx.annotation
+    implementation libs.androidx.annotation.experimental
+    implementation libs.androidx.collection
+    implementation libs.androidx.core
+    implementation libs.androidx.lifecycle.common
+    implementation libs.androidx.lifecycle.process
+    implementation 'org.yaml:snakeyaml:2.2'
+
+    if (mozconfig.substs.MOZ_ANDROID_HLS_SUPPORT) {
+        implementation libs.androidx.media3.common
+        implementation libs.androidx.media3.datasource
+        implementation libs.androidx.media3.decoder
+        implementation libs.androidx.media3.exoplayer
+        implementation libs.androidx.media3.exoplayer.hls
+    }
+}
+
+apply from: "${topsrcdir}/mobile/android/gradle/with_gecko_binaries.gradle"
+apply from: "${topsrcdir}/mobile/android/gradle/debug_level.gradle"
+
+def navisRuntimeVariantNames = []
+
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    def name = variant.name
+    navisRuntimeVariantNames << name
+    configureVariantWithGeckoBinaries(name)
+    configureVariantDebugLevel(name, variant.buildType)
+}
+
+afterEvaluate {
+    def javacClasspath = { variantName ->
+        files(tasks.named("compile${variantName.capitalize()}JavaWithJavac").map { it.classpath })
+    }
+    def jniVariantName = mozconfig.substs.GRADLE_ANDROID_NAVIS_RUNTIME_VARIANT_NAME
+    if (navisRuntimeVariantNames.contains(jniVariantName)) {
+        configureLibraryVariantWithJNIWrappers(
+            jniVariantName,
+            javacClasspath(jniVariantName),
+            'Generated',
+        )
+    }
+}
+
+// SDK bindings are consumed by widget/android alongside the generated JNI
+// wrappers. Hosting this task here removes the last Gradle-time dependency on
+// the :geckoview project.
+def androidBootClasspath = provider {
+    androidComponents.sdkComponents.bootClasspath.get()*.asFile.findAll {
+        it.name.startsWith('android.jar')
+    }
+}
+def androidLintBindir = provider {
+    "${androidComponents.sdkComponents.sdkDirectory.get().asFile}/tools"
+}
+def bindingsDir = "${topobjdir}/widget/android/bindings"
+def generateSdkBindingsArgsProvider = project.provider {
+    project.hasProperty('generate_sdk_bindings_args')
+        ? project.generate_sdk_bindings_args
+        : false
+}
+
+tasks.register('generateSDKBindings', JavaExec) {
+    classpath project(':annotations').jar.archiveFile
+    classpath project(':annotations').compileJava.classpath
+    classpath project(':annotations').sourceSets.main.runtimeClasspath
+    mainClass = 'org.mozilla.gecko.annotationProcessors.SDKProcessor'
+
+    doFirst {
+        systemProperty 'com.android.tools.lint.bindir', androidLintBindir.get()
+        args androidBootClasspath.get()
+        args 29
+        args bindingsDir
+        if (generateSdkBindingsArgsProvider.get()) {
+            args generateSdkBindingsArgsProvider.get().split(';')
+        }
+    }
+
+    workingDir "${topsrcdir}/widget/android/bindings"
+    inputs.dir "${topsrcdir}/widget/android/bindings"
+    outputs.dir "${topobjdir}/widget/android/bindings"
+    dependsOn project(':annotations').jar
+    dependsOn rootProject.verifyGleanVersion
+}
+
+tasks.configureEach { task ->
+    if (task.name.toLowerCase().contains('lint')) {
+        mustRunAfter(':machStagePackage')
+    }
+}
