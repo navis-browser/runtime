@@ -510,7 +510,7 @@ index 1eab401455890aafc73f1da9080415fc035f1c30..a6f68a8254818fad5acd81d971f483a4
        nsAutoCString dummyFileName("f");
        if (ext.First() != '.') {
          dummyFileName.Append(".");
-@@ -1800,6 +1803,9 @@ NS_IMETHODIMP nsExternalAppHandler::OnStartRequest(nsIRequest* request) {
+@@ -1800,5 +1803,8 @@ NS_IMETHODIMP nsExternalAppHandler::OnStartRequest(nsIRequest* request) {
        nsCOMPtr<nsIApplicationReputationService> appRep =
            components::ApplicationReputation::Service();
        appRep->IsBinary(dummyFileName + ext, &alwaysAsk);
@@ -519,4 +519,41 @@ index 1eab401455890aafc73f1da9080415fc035f1c30..a6f68a8254818fad5acd81d971f483a4
 +#endif
      }
    }
+diff --git a/mobile/shared/chrome/geckoview/geckoview.js b/mobile/shared/chrome/geckoview/geckoview.js
+--- a/mobile/shared/chrome/geckoview/geckoview.js
++++ b/mobile/shared/chrome/geckoview/geckoview.js
+@@ -24,9 +24,14 @@ ChromeUtils.defineESModuleGetters(this, {
+   InitializationTracker: "resource://gre/modules/GeckoViewTelemetry.sys.mjs",
+   RemoteSecuritySettings:
+     "resource://gre/modules/psm/RemoteSecuritySettings.sys.mjs",
+-  SafeBrowsing: "resource://gre/modules/SafeBrowsing.sys.mjs",
+ });
  
++if (AppConstants.MOZ_SAFE_BROWSING) {
++  ChromeUtils.defineESModuleGetters(this, {
++    SafeBrowsing: "resource://gre/modules/SafeBrowsing.sys.mjs",
++  });
++}
++
+ if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
+   ChromeUtils.defineESModuleGetters(this, {
+     CaptchaDetectionPingUtils:
+@@ -810,11 +815,13 @@ function startup() {
+       RemoteSecuritySettings.init();
+     });
+ 
+-    InitLater(() => {
+-      // Initialize safe browsing module. This is required for content
+-      // blocking features and manages blocklist downloads and updates.
+-      SafeBrowsing.init();
+-    });
++    if (AppConstants.MOZ_SAFE_BROWSING) {
++      InitLater(() => {
++        // Initialize safe browsing module. This is required for content
++        // blocking features and manages blocklist downloads and updates.
++        SafeBrowsing.init();
++      });
++    }
+ 
+     InitLater(() => {
+       // It's enough to run this once to set up FOG.

@@ -1,0 +1,1796 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java
+@@ -67,6 +67,8 @@
+       "NavisAndroid:Extensions:ProcessSpawningDisabled";
+   private static final String EVENT_TAB_COMMAND =
+       "NavisAndroid:Extensions:TabCommand";
++  private static final String EVENT_WINDOW_COMMAND =
++      "NavisAndroid:Extensions:WindowCommand";
+   private static final String EVENT_POPUP_REQUESTED =
+       "NavisAndroid:Extensions:PopupRequested";
+   private static final String EVENT_OPTIONAL_PERMISSION_REQUESTED =
+@@ -132,6 +134,8 @@
+     MOVE
+   }
+ 
++  public enum WindowOperation { CREATE, FOCUS, REMOVE }
++
+   public enum TabTopologyEventType {
+     CREATED,
+     REMOVED,
+@@ -210,6 +214,8 @@
+ 
+     CompletionStage<TabResult> onTabCommand(TabCommand command);
+ 
++    CompletionStage<WindowResult> onWindowCommand(WindowCommand command);
++
+     CompletionStage<Boolean> onOptionalPermissionRequested(
+         OptionalPermissionRequest request);
+   }
+@@ -240,6 +246,7 @@
+     public final String actionBadgeText;
+     public final Integer actionBadgeTextColor;
+     public final Integer actionBadgeBackgroundColor;
++    public final long actionSourceTabId;
+ 
+     private ExtensionRecord(final GeckoBundle value) {
+       id = boundedRequiredString(value, "id", 256);
+@@ -268,6 +275,10 @@
+       actionBadgeText = boundedString(value, "actionBadgeText", 64);
+       actionBadgeTextColor = optionalInt(value, "actionBadgeTextColor");
+       actionBadgeBackgroundColor = optionalInt(value, "actionBadgeBackgroundColor");
++      actionSourceTabId = value.getLong("actionSourceTabId", 0);
++      if (actionSourceTabId < 0 || actionSourceTabId > 9007199254740991L) {
++        throw new IllegalArgumentException("Invalid action source tab");
++      }
+ 
+       if (source == Source.BLOCKED_SIDELOAD && enabled) {
+         throw new IllegalArgumentException("A blocked side-load cannot be enabled");
+@@ -418,14 +429,20 @@
+     public final long tabId;
+     public final int index;
+     public final boolean privateMode;
++    public final long windowId;
+ 
+     public TabTopologyEntry(final long tabId, final int index, final boolean privateMode) {
+-      if (tabId <= 0 || index < 0) {
++      this(tabId, index, privateMode, 0);
++    }
++
++    public TabTopologyEntry(final long tabId, final int index, final boolean privateMode, final long windowId) {
++      if (tabId <= 0 || index < 0 || windowId < 0) {
+         throw new IllegalArgumentException("Invalid extension tab topology entry");
+       }
+       this.tabId = tabId;
+       this.index = index;
+       this.privateMode = privateMode;
++      this.windowId = windowId;
+     }
+ 
+     private GeckoBundle toBundle() {
+@@ -433,6 +450,7 @@
+       value.putLong("tabId", tabId);
+       value.putInt("index", index);
+       value.putBoolean("privateMode", privateMode);
++      if (windowId != 0) value.putLong("windowId", windowId);
+       return value;
+     }
+   }
+@@ -442,9 +460,15 @@
+     public final TabTopologyEventType type;
+     public final long tabId;
+     public final Long previousTabId;
++    public final boolean isWindowClosing;
+ 
+     public TabTopologyEvent(
+         final TabTopologyEventType type, final long tabId, final Long previousTabId) {
++      this(type, tabId, previousTabId, false);
++    }
++
++    public TabTopologyEvent(final TabTopologyEventType type, final long tabId,
++        final Long previousTabId, final boolean isWindowClosing) {
+       if (type == null || tabId <= 0 || (previousTabId != null && previousTabId <= 0)) {
+         throw new IllegalArgumentException("Invalid extension tab topology event");
+       }
+@@ -454,12 +478,17 @@
+       this.type = type;
+       this.tabId = tabId;
+       this.previousTabId = previousTabId;
++      if (isWindowClosing && type != TabTopologyEventType.REMOVED) {
++        throw new IllegalArgumentException("Only removed tabs may be closing their window");
++      }
++      this.isWindowClosing = isWindowClosing;
+     }
+ 
+     private GeckoBundle toBundle() {
+       final GeckoBundle value = new GeckoBundle(previousTabId == null ? 2 : 3);
+       value.putString("type", type.name());
+       value.putLong("tabId", tabId);
++      value.putBoolean("isWindowClosing", isWindowClosing);
+       if (previousTabId != null) {
+         value.putLong("previousTabId", previousTabId.longValue());
+       }
+@@ -467,13 +496,55 @@
+     }
+   }
+ 
+-  /** Immutable, product-owned single-window tab topology. */
++  /** Actual Android Activity geometry and product-selected Session. */
++  public static final class WindowTopologyEntry {
++    public final long windowId;
++    public final Long activeTabId;
++    public final boolean privateMode;
++    public final boolean focused;
++    public final int left, top, width, height;
++
++    public WindowTopologyEntry(final long windowId, final Long activeTabId,
++        final boolean privateMode, final boolean focused,
++        final int left, final int top, final int width, final int height) {
++      if (windowId <= 0 || (activeTabId != null && activeTabId <= 0) || width < 0 || height < 0) {
++        throw new IllegalArgumentException("Invalid Android window topology");
++      }
++      this.windowId = windowId;
++      this.activeTabId = activeTabId;
++      this.privateMode = privateMode;
++      this.focused = focused;
++      this.left = left;
++      this.top = top;
++      this.width = width;
++      this.height = height;
++    }
++
++    private GeckoBundle toBundle() {
++      final GeckoBundle value = new GeckoBundle(8);
++      value.putLong("windowId", windowId);
++      if (activeTabId != null) value.putLong("activeTabId", activeTabId);
++      value.putBoolean("privateMode", privateMode);
++      value.putBoolean("focused", focused);
++      value.putInt("left", left);
++      value.putInt("top", top);
++      value.putInt("width", width);
++      value.putInt("height", height);
++      return value;
++    }
++  }
++
++  /** Immutable process-wide topology; engine chrome hosts are not product windows. */
+   public static final class TabTopology {
+     public final long revision;
+     public final long windowId;
+     public final Long activeTabId;
+     public final List<TabTopologyEntry> tabs;
+     public final List<TabTopologyEvent> events;
++    public final List<WindowTopologyEntry> windows;
++    public final Long focusedWindowId;
++    public final Long lastFocusedWindowId;
++    public final long[] focusOrder;
+ 
+     public TabTopology(
+         final long revision,
+@@ -481,16 +552,55 @@
+         final Long activeTabId,
+         final List<TabTopologyEntry> tabs,
+         final List<TabTopologyEvent> events) {
+-      if (revision <= 0 || windowId <= 0 || tabs == null || events == null || tabs.size() > 2048
++      this(revision, windowId, activeTabId, tabs, events,
++          Collections.singletonList(new WindowTopologyEntry(windowId, activeTabId, false, false, 0, 0, 0, 0)), null, null);
++    }
++
++    public TabTopology(final long revision, final long windowId, final Long activeTabId,
++        final List<TabTopologyEntry> tabs, final List<TabTopologyEvent> events,
++        final List<WindowTopologyEntry> windows, final Long focusedWindowId, final Long lastFocusedWindowId) {
++      this(revision, windowId, activeTabId, tabs, events, windows, focusedWindowId, lastFocusedWindowId,
++          lastFocusedWindowId == null ? new long[0] : new long[] {lastFocusedWindowId});
++    }
++
++    public TabTopology(final long revision, final long windowId, final Long activeTabId,
++        final List<TabTopologyEntry> tabs, final List<TabTopologyEvent> events,
++        final List<WindowTopologyEntry> windows, final Long focusedWindowId, final Long lastFocusedWindowId,
++        final long[] focusOrder) {
++      if (revision <= 0 || windowId < 0 || windows == null || windows.size() > 64 || tabs == null || events == null || tabs.size() > 2048
+           || events.size() > 4096) {
+         throw new IllegalArgumentException("Invalid extension tab topology");
+       }
++      final LinkedHashMap<Long, WindowTopologyEntry> owners = new LinkedHashMap<>();
++      Long focused = null;
++      for (final WindowTopologyEntry window : windows) {
++        if (window == null || owners.put(window.windowId, window) != null || (window.focused && focused != null)) {
++          throw new IllegalArgumentException("Invalid extension window topology");
++        }
++        if (window.focused) focused = window.windowId;
++      }
++      if (!java.util.Objects.equals(focused, focusedWindowId)
++          || (lastFocusedWindowId != null && !owners.containsKey(lastFocusedWindowId))
++          || (windowId != 0 && !owners.containsKey(windowId)) || (windowId == 0 && !owners.isEmpty())) {
++        throw new IllegalArgumentException("Invalid Android focused window");
++      }
+       final LinkedHashMap<Long, TabTopologyEntry> unique = new LinkedHashMap<>();
++      final LinkedHashMap<Long, Integer> indexes = new LinkedHashMap<>();
+       for (int index = 0; index < tabs.size(); index++) {
+         final TabTopologyEntry entry = tabs.get(index);
+-        if (entry == null || entry.index != index || unique.put(entry.tabId, entry) != null) {
++        final long owner = entry == null ? 0 : (entry.windowId == 0 ? windowId : entry.windowId);
++        final int expected = indexes.containsKey(owner) ? indexes.get(owner) : 0;
++        if (entry == null || !owners.containsKey(owner) || entry.index != expected || unique.put(entry.tabId, entry) != null) {
+           throw new IllegalArgumentException("Invalid extension tab topology order");
+         }
++        indexes.put(owner, expected + 1);
++      }
++      for (final WindowTopologyEntry window : windows) {
++        final TabTopologyEntry selected = window.activeTabId == null ? null : unique.get(window.activeTabId);
++        if (window.activeTabId != null && (selected == null ||
++            (selected.windowId == 0 ? windowId : selected.windowId) != window.windowId)) {
++          throw new IllegalArgumentException("Selected tab belongs to another Android window");
++        }
+       }
+       if (activeTabId != null && !unique.containsKey(activeTabId)) {
+         throw new IllegalArgumentException("Active extension tab is outside the product window");
+@@ -505,6 +615,18 @@
+       this.activeTabId = activeTabId;
+       this.tabs = Collections.unmodifiableList(new ArrayList<>(tabs));
+       this.events = Collections.unmodifiableList(new ArrayList<>(events));
++      this.windows = Collections.unmodifiableList(new ArrayList<>(windows));
++      this.focusedWindowId = focusedWindowId;
++      this.lastFocusedWindowId = lastFocusedWindowId;
++      if (focusOrder == null || focusOrder.length > windows.size() ||
++          !java.util.Objects.equals(focusOrder.length == 0 ? null : Long.valueOf(focusOrder[0]), lastFocusedWindowId)) {
++        throw new IllegalArgumentException("Invalid Android window focus history");
++      }
++      final java.util.HashSet<Long> seenFocus = new java.util.HashSet<>();
++      for (final long id : focusOrder) {
++        if (!owners.containsKey(id) || !seenFocus.add(id)) throw new IllegalArgumentException("Invalid window focus owner");
++      }
++      this.focusOrder = focusOrder.clone();
+     }
+ 
+     private GeckoBundle toBundle() {
+@@ -524,6 +646,12 @@
+         eventValues.add(event.toBundle());
+       }
+       value.putBundleArray("events", eventValues);
++      final List<GeckoBundle> windowValues = new ArrayList<>(windows.size());
++      for (final WindowTopologyEntry window : windows) windowValues.add(window.toBundle());
++      value.putBundleArray("windows", windowValues);
++      if (focusedWindowId != null) value.putLong("focusedWindowId", focusedWindowId);
++      if (lastFocusedWindowId != null) value.putLong("lastFocusedWindowId", lastFocusedWindowId);
++      value.putLongArray("focusOrder", focusOrder);
+       return value;
+     }
+   }
+@@ -537,6 +665,7 @@
+     public final Boolean active;
+     public final Boolean privateMode;
+     public final Integer index;
++    public final Long windowId;
+ 
+     private TabCommand(final GeckoBundle value) {
+       if (value == null) {
+@@ -558,6 +687,8 @@
+               ? Boolean.valueOf(value.getBoolean("privateMode", false))
+               : null;
+       index = value.containsKey("index") ? Integer.valueOf(value.getInt("index", -1)) : null;
++      windowId = value.containsKey("windowId") ? Long.valueOf(value.getLong("windowId", -1)) : null;
++      if (windowId != null && windowId <= 0) throw new IllegalArgumentException("Invalid tab owner window");
+       if (tabId != null && tabId.longValue() <= 0) {
+         throw new IllegalArgumentException("Invalid extension tab ID");
+       }
+@@ -625,6 +756,62 @@
+     }
+   }
+ 
++  /** A command targets product windows, not one transient tab's native chrome host. */
++  public static final class WindowCommand {
++    public final String extensionId;
++    public final WindowOperation operation;
++    public final long sourceWindowId;
++    public final Long windowId;
++    public final Boolean privateMode;
++    public final List<String> urls;
++
++    private WindowCommand(final GeckoBundle value) {
++      extensionId = boundedRequiredString(value, "extensionId", 256);
++      operation = parseEnum(WindowOperation.class,
++          boundedRequiredString(value, "operation", 16).toUpperCase(Locale.ROOT));
++      sourceWindowId = value.getLong("sourceWindowId", -1);
++      windowId = value.containsKey("windowId") ? Long.valueOf(value.getLong("windowId", -1)) : null;
++      privateMode = value.containsKey("privateMode") ? Boolean.valueOf(value.getBoolean("privateMode", false)) : null;
++      final String[] candidates = value.getStringArray("urls");
++      if (sourceWindowId <= 0 || sourceWindowId > 9_007_199_254_740_991L ||
++          (windowId != null && (windowId <= 0 || windowId > 9_007_199_254_740_991L)) ||
++          (candidates != null && candidates.length > 128)) {
++        throw new IllegalArgumentException("Invalid extension window command");
++      }
++      final List<String> checked = new ArrayList<>();
++      if (candidates != null) for (final String candidate : candidates) {
++        if (candidate == null || candidate.trim().isEmpty() || candidate.length() > 16 * 1024) {
++          throw new IllegalArgumentException("Invalid extension window URL");
++        }
++        for (int i = 0; i < candidate.length(); i++) if (Character.isISOControl(candidate.charAt(i))) {
++          throw new IllegalArgumentException("Invalid extension window URL");
++        }
++        checked.add(candidate);
++      }
++      urls = Collections.unmodifiableList(checked);
++      if (operation == WindowOperation.CREATE ? windowId != null || privateMode == null :
++          windowId == null || privateMode != null || !urls.isEmpty()) {
++        throw new IllegalArgumentException("Invalid extension window operation properties");
++      }
++    }
++  }
++
++  public static final class WindowResult {
++    public final long windowId;
++    public final boolean removed;
++    public WindowResult(final long windowId, final boolean removed) {
++      if (windowId <= 0 || windowId > 9_007_199_254_740_991L) throw new IllegalArgumentException("Invalid window result");
++      this.windowId = windowId;
++      this.removed = removed;
++    }
++    private GeckoBundle toBundle() {
++      final GeckoBundle result = new GeckoBundle(2);
++      result.putLong("windowId", windowId);
++      result.putBoolean("removed", removed);
++      return result;
++    }
++  }
++
+   /** Bounded, engine-neutral request for a user-confirmed optional permission grant. */
+   public static final class OptionalPermissionRequest {
+     public final String token;
+@@ -706,6 +893,7 @@
+         EVENT_PROCESS_SPAWNING_DISABLED,
+         EVENT_POPUP_REQUESTED,
+         EVENT_TAB_COMMAND,
++        EVENT_WINDOW_COMMAND,
+         EVENT_OPTIONAL_PERMISSION_REQUESTED);
+     mIoExecutor.execute(this::cleanAbandonedStagingFiles);
+   }
+@@ -1003,6 +1191,15 @@
+     return queryBundle(COMMAND_ACTIVE_TAB_CHANGED, null).thenApply(ignored -> null);
+   }
+ 
++  public CompletionStage<Void> notifyActiveTabChanged(final long previousTabId) {
++    if (previousTabId <= 0) {
++      return failedFuture(new IllegalArgumentException("Invalid previous extension tab ID"));
++    }
++    final GeckoBundle request = new GeckoBundle(1);
++    request.putLong("tabId", previousTabId);
++    return queryBundle(COMMAND_ACTIVE_TAB_CHANGED, request).thenApply(ignored -> null);
++  }
++
+   public CompletionStage<Void> notifyTabClosed(final long tabId) {
+     if (tabId <= 0) {
+       return failedFuture(new IllegalArgumentException("Invalid closed extension tab ID"));
+@@ -1075,6 +1272,7 @@
+         EVENT_PROCESS_SPAWNING_DISABLED,
+         EVENT_POPUP_REQUESTED,
+         EVENT_TAB_COMMAND,
++        EVENT_WINDOW_COMMAND,
+         EVENT_OPTIONAL_PERMISSION_REQUESTED);
+     mDispatcher.shutdown();
+     for (final File file : mStagedPackages.values()) {
+@@ -1190,6 +1388,20 @@
+           pending.fail(error);
+         }
+         return;
++      } else if (EVENT_WINDOW_COMMAND.equals(event)) {
++        if (callback == null) throw new IllegalArgumentException("Window command requires a response");
++        final WindowCommand command = new WindowCommand(message);
++        final PendingEvent pending = new PendingEvent(callback);
++        mPendingEvents.add(pending);
++        try {
++          final CompletionStage<WindowResult> operation = mDelegate.onWindowCommand(command);
++          if (operation == null) throw new IllegalStateException("Window command returned no stage");
++          operation.whenComplete((result, error) -> mUiHandler.post(() -> {
++            if (error == null && result != null) pending.succeed(result.toBundle());
++            else pending.fail(error == null ? new IllegalStateException("Window command returned no result") : unwrap(error));
++          }));
++        } catch (final Throwable error) { pending.fail(error); }
++        return;
+       } else if (EVENT_OPTIONAL_PERMISSION_REQUESTED.equals(event)) {
+         if (callback == null) {
+           throw new IllegalArgumentException(
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidRuntime.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidRuntime.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidRuntime.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidRuntime.java
+@@ -65,19 +65,23 @@
+     }
+     sInstance = null;
+     ThreadUtils.runOnUiThread(NavisAndroidNotifications::shutdown);
+-    ThreadUtils.runOnUiThread(NavisAndroidWebAuthn::unbindActivity);
++    ThreadUtils.runOnUiThread(NavisAndroidWebAuthn::shutdown);
+   }
+ 
+-  public void bindWebAuthnActivity(final Activity activity) {
+-    NavisAndroidWebAuthn.bindActivity(activity);
++  public void bindWebAuthnActivity(final Activity activity, final long windowId, final long generation) {
++    NavisAndroidWebAuthn.bindActivity(activity, windowId, generation);
+   }
+ 
+-  public void unbindWebAuthnActivity() {
+-    NavisAndroidWebAuthn.unbindActivity();
++  public void unbindWebAuthnActivity(final long windowId, final long generation) {
++    NavisAndroidWebAuthn.unbindActivity(windowId, generation);
+   }
+ 
+-  public String webAuthnAvailability() {
+-    return NavisAndroidWebAuthn.availability();
++  public void setWebAuthnSessionWindow(final long sessionId, final long windowId) {
++    NavisAndroidWebAuthn.setSessionWindow(sessionId, windowId);
++  }
++
++  public String webAuthnAvailability(final long windowId) {
++    return NavisAndroidWebAuthn.availability(windowId);
+   }
+ 
+   @WrapForJNI
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -767,11 +767,14 @@
+               mSessionId, mWebAuthnContextId, mProductActive);
+         }
+         if (mDevToolsWindow) completeNewWindowOpen(true);
+-        mDelegate.onHostReady(mSessionId);
++        // A HostReady consumer may immediately query a restored Session. Hand
++        // off its queued RestoreState first; the query awaits Gecko's actual
++        // restore transaction, not merely this chrome-window lifecycle event.
+         while (!mPendingCommands.isEmpty()) {
+           final PendingCommand command = mPendingCommands.removeFirst();
+           mDispatcher.dispatch(command.event, command.data);
+         }
++        mDelegate.onHostReady(mSessionId);
+         break;
+       case EVENT_LOCATION:
+         final long webAuthnContextId = message.getLong("browsingContextId", 0);
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java
+@@ -8,6 +8,7 @@
+ import android.os.CancellationSignal;
+ import java.lang.ref.WeakReference;
+ import java.util.HashMap;
++import java.util.ArrayList;
+ import java.util.Map;
+ import org.mozilla.gecko.annotation.WrapForJNI;
+ import org.mozilla.gecko.util.ThreadUtils;
+@@ -22,8 +23,9 @@
+  */
+ public final class NavisAndroidWebAuthn {
+   private static final Map<Long, Scope> SCOPES = new HashMap<>();
+-  private static WeakReference<Activity> sActivity = new WeakReference<>(null);
+-  private static Pending<?> sPending;
++  private static final Map<Long, Long> SESSION_WINDOWS = new HashMap<>();
++  private static final Map<Long, Binding> ACTIVITIES = new HashMap<>();
++  private static final Map<Long, Pending<?>> PENDING = new HashMap<>();
+ 
+   private NavisAndroidWebAuthn() {}
+ 
+@@ -40,21 +42,60 @@
+     }
+   }
+ 
+-  public static void bindActivity(final Activity activity) {
++  private static final class Binding {
++    final long windowId;
++    final long generation;
++    final WeakReference<Activity> activity;
++
++    Binding(final Activity activity, final long windowId, final long generation) {
++      this.windowId = windowId;
++      this.generation = generation;
++      this.activity = new WeakReference<>(activity);
++    }
++  }
++
++  public static void bindActivity(final Activity activity, final long windowId, final long generation) {
+     ThreadUtils.assertOnUiThread();
+-    if (sActivity.get() != activity) cancelPending("ABORT_ERR");
+-    sActivity = new WeakReference<>(activity);
++    if (activity == null || windowId <= 0 || generation <= 0) throw new IllegalArgumentException("Invalid Activity lease");
++    final Binding previous = ACTIVITIES.get(windowId);
++    if (previous != null) {
++      if (previous.generation > generation) return;
++      if (previous.generation == generation && previous.activity.get() == activity) return;
++      if (previous.generation == generation) throw new IllegalStateException("Activity lease already owned");
++      cancelPending(windowId, "ABORT_ERR");
++    }
++    ACTIVITIES.put(windowId, new Binding(activity, windowId, generation));
+   }
+ 
+-  public static void unbindActivity() {
++  public static void unbindActivity(final long windowId, final long generation) {
+     ThreadUtils.assertOnUiThread();
+-    sActivity.clear();
+-    cancelPending("ABORT_ERR");
++    final Binding binding = ACTIVITIES.get(windowId);
++    if (binding == null || binding.generation != generation) return;
++    ACTIVITIES.remove(windowId);
++    cancelPending(windowId, "ABORT_ERR");
+   }
+ 
+-  public static String availability() {
++  public static void setSessionWindow(final long sessionId, final long windowId) {
+     ThreadUtils.assertOnUiThread();
+-    final Activity activity = sActivity.get();
++    final Long previous = SESSION_WINDOWS.get(sessionId);
++    if (previous != null && previous == windowId) return;
++    invalidateSession(sessionId);
++    if (windowId > 0) SESSION_WINDOWS.put(sessionId, windowId);
++    else SESSION_WINDOWS.remove(sessionId);
++  }
++
++  public static void shutdown() {
++    ThreadUtils.assertOnUiThread();
++    cancelPendingAll("ABORT_ERR");
++    ACTIVITIES.clear();
++    SESSION_WINDOWS.clear();
++    SCOPES.clear();
++  }
++
++  public static String availability(final long windowId) {
++    ThreadUtils.assertOnUiThread();
++    final Binding binding = ACTIVITIES.get(windowId);
++    final Activity activity = binding == null ? null : binding.activity.get();
+     if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+       return "NO_FOREGROUND_ACTIVITY";
+     }
+@@ -83,8 +124,8 @@
+     for (final Scope scope : SCOPES.values()) {
+       if (scope.sessionId == sessionId) scope.generation++;
+     }
+-    if (sPending != null && sPending.scope.sessionId == sessionId) {
+-      cancelPending("ABORT_ERR");
++    for (final Pending<?> pending : new ArrayList<>(PENDING.values())) {
++      if (pending.scope.sessionId == sessionId) pending.cancel("ABORT_ERR");
+     }
+   }
+ 
+@@ -122,15 +163,15 @@
+   @WrapForJNI(calledFrom = "gecko")
+   private static void cancelTransaction(final long transactionId) {
+     ThreadUtils.runOnUiThread(() -> {
+-      if (sPending != null && sPending.transactionId == transactionId) {
+-        cancelPending("ABORT_ERR");
++      for (final Pending<?> pending : new ArrayList<>(PENDING.values())) {
++        if (pending.transactionId == transactionId) pending.cancel("ABORT_ERR");
+       }
+     });
+   }
+ 
+   @WrapForJNI(calledFrom = "gecko")
+   private static void cancelAll() {
+-    ThreadUtils.runOnUiThread(() -> cancelPending("ABORT_ERR"));
++    ThreadUtils.runOnUiThread(() -> cancelPendingAll("ABORT_ERR"));
+   }
+ 
+   private interface Provider<T> {
+@@ -154,21 +195,23 @@
+         return;
+       }
+       final Scope scope = SCOPES.get(browsingContextId);
+-      final Activity activity = sActivity.get();
++      final Long windowId = scope == null ? null : SESSION_WINDOWS.get(scope.sessionId);
++      final Binding binding = windowId == null ? null : ACTIVITIES.get(windowId);
++      final Activity activity = binding == null ? null : binding.activity.get();
+       if (scope == null || !scope.active || activity == null
+           || activity.isFinishing() || activity.isDestroyed()) {
+         result.completeExceptionally(new WebAuthnUtils.Exception("ABORT_ERR"));
+         return;
+       }
+-      final String capability = availability();
++      final String capability = availability(windowId);
+       if (!"AVAILABLE".equals(capability)) {
+         result.completeExceptionally(new WebAuthnUtils.Exception(
+             "ORIGIN_PERMISSION_MISSING".equals(capability) ? "SECURITY_ERR" : "NOT_SUPPORTED_ERR"));
+         return;
+       }
+-      cancelPending("ABORT_ERR");
+-      final Pending<T> pending = new Pending<>(transactionId, scope, activity, result);
+-      sPending = pending;
++      cancelPending(windowId, "ABORT_ERR");
++      final Pending<T> pending = new Pending<>(transactionId, scope, binding, activity, result);
++      PENDING.put(windowId, pending);
+       ThreadUtils.getUiHandler().postDelayed(pending.timeout,
+           Math.max(1000L, Math.min(timeoutMs > 0 ? timeoutMs : 120000L, 120000L)));
+       try {
+@@ -185,17 +228,19 @@
+     final long transactionId;
+     final Scope scope;
+     final long generation;
++    final Binding binding;
+     final Activity activity;
+     final GeckoResult<T> result;
+     final CancellationSignal cancellation = new CancellationSignal();
+     final Runnable timeout = () -> cancel("TIMEOUT_ERR");
+     boolean completed;
+ 
+-    Pending(final long transactionId, final Scope scope, final Activity activity,
++    Pending(final long transactionId, final Scope scope, final Binding binding, final Activity activity,
+         final GeckoResult<T> result) {
+       this.transactionId = transactionId;
+       this.scope = scope;
+       this.generation = scope.generation;
++      this.binding = binding;
+       this.activity = activity;
+       this.result = result;
+     }
+@@ -203,7 +248,9 @@
+     void succeed(final T value) {
+       ThreadUtils.assertOnUiThread();
+       if (completed) return;
+-      if (sActivity.get() != activity || activity.isFinishing() || activity.isDestroyed()
++      if (ACTIVITIES.get(binding.windowId) != binding || binding.activity.get() != activity
++          || !Long.valueOf(binding.windowId).equals(SESSION_WINDOWS.get(scope.sessionId))
++          || activity.isFinishing() || activity.isDestroyed()
+           || SCOPES.get(scope.browsingContextId) != scope || !scope.active
+           || generation != scope.generation) {
+         cancel("ABORT_ERR");
+@@ -243,11 +290,16 @@
+     void finish() {
+       completed = true;
+       ThreadUtils.getUiHandler().removeCallbacks(timeout);
+-      if (sPending == this) sPending = null;
++      if (PENDING.get(binding.windowId) == this) PENDING.remove(binding.windowId);
+     }
+   }
+ 
+-  private static void cancelPending(final String reason) {
+-    if (sPending != null) sPending.cancel(reason);
++  private static void cancelPending(final long windowId, final String reason) {
++    final Pending<?> pending = PENDING.get(windowId);
++    if (pending != null) pending.cancel(reason);
++  }
++
++  private static void cancelPendingAll(final String reason) {
++    for (final Pending<?> pending : new ArrayList<>(PENDING.values())) pending.cancel(reason);
+   }
+ }
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -67,6 +67,7 @@
+   "links:set", "links:copy", "prefs:flush", "session:can-close", "support:get",
+   "session:presentation", "session:history", "session:traverse", "session:load",
+   "session:capture-closed",
++  "session:restore-result",
+ ]);
+ 
+ const MAX_SESSION_STATE_CHARS = 1024 * 1024;
+@@ -85,6 +86,7 @@
+ let faviconBridge;
+ const pendingWindowSetups = new Set();
+ let sessionRestoreGeneration = 0;
++let sessionRestoreTask = null;
+ const RESTORE_SUPERSEDING_COMMANDS = new Set([
+   "NavisAndroid:Load", "NavisAndroid:LoadExtensionPopup", "NavisAndroid:RetryDownload",
+   "NavisAndroid:Reload", "NavisAndroid:Stop", "NavisAndroid:Back", "NavisAndroid:Forward",
+@@ -207,6 +209,7 @@
+               "resource://gre/modules/NavisAndroidClosedTabs.sys.mjs");
+             return NavisAndroidClosedTabs.capture(window);
+           }
++          if (data.operation === "session:restore-result") return readSessionRestoreResult();
+           const product = ChromeUtils.importESModule(
+             "resource://gre/modules/navis/NavisAndroidProduct.sys.mjs"
+           );
+@@ -280,9 +283,7 @@
+         }
+         break;
+       case "NavisAndroid:RestoreState":
+-        restoreSessionState(data?.state).catch(error => {
+-          reportNavigationDiagnostic("restore-error", { error });
+-        });
++        beginSessionRestore(data?.state);
+         break;
+       case "NavisAndroid:FlushSessionState":
+         dispatchSessionState();
+@@ -947,6 +948,35 @@
+   }
+ }
+ 
++function beginSessionRestore(serialized) {
++  const task = { browser, generation: null, promise: null };
++  sessionRestoreTask = task;
++  try {
++    // Start synchronously so a later queued Stop/Load cannot be mistaken for
++    // a command predating this restore transaction.
++    task.promise = Promise.resolve(restoreSessionState(serialized));
++    task.generation = sessionRestoreGeneration;
++  } catch (error) {
++    task.promise = Promise.reject(error);
++  }
++  // Retain the rejected transaction for its owner query; diagnostics must not
++  // turn a restore failure into a resolved acknowledgement.
++  task.promise.catch(error => reportNavigationDiagnostic("restore-error", { error }));
++}
++
++async function readSessionRestoreResult() {
++  const task = sessionRestoreTask;
++  if (!task) throw new Error("No restore transaction belongs to this Session");
++  await task.promise;
++  if (task !== sessionRestoreTask || task.generation !== sessionRestoreGeneration ||
++      shuttingDown || window.closed || browser !== task.browser) {
++    throw new Error("Session restoration was superseded");
++  }
++  const state = collectSessionState();
++  if (!state) throw new Error("Restored session history is unavailable");
++  return { restored: true, state, uri: browser.browsingContext.currentURI.spec };
++}
++
+ function restoreSessionState(serialized) {
+   if (
+     typeof serialized !== "string" ||
+@@ -986,7 +1016,9 @@
+     state.history.disallow
+   ).then(() => {
+     if (shuttingDown || window.closed || generation !== sessionRestoreGeneration ||
+-        browser !== restoringBrowser || browser.browsingContext !== context) return;
++        browser !== restoringBrowser || browser.browsingContext !== context) {
++      throw new Error("Session restoration lost its owner");
++    }
+     // Pinned Gecko's canonical restore entry point reloads the selected SHEntry,
+     // retaining Gecko's entry metadata and back/forward position. Merely
+     // restoring docshell caps/currentURI does not initiate a document load.
+diff --git a/mobile/shared/components/extensions/ext-android.js b/mobile/shared/components/extensions/ext-android.js
+--- a/mobile/shared/components/extensions/ext-android.js
++++ b/mobile/shared/components/extensions/ext-android.js
+@@ -136,10 +136,15 @@
+     // In GeckoView the popup is on a separate window so getCurrentWindow for
+     // the popup should return whatever is the topWindow.
+     if (context?.viewType === "popup") {
+-      // TODO bug 2040609: Improve tracking of "current window" for popups.
++      const sourceTabId = context?.xulBrowser?.documentGlobal?.tab?.sourceTabId;
++      const entry = NavisAndroidExtensionTabTopology.entry(sourceTabId);
++      if (entry) return this.getWindow(entry.windowId, context);
+       return this.topWindow;
+     }
+     if (NavisAndroidExtensionTabTopology.ready) {
++      const tab = context?.xulBrowser?.documentGlobal?.tab;
++      const entry = NavisAndroidExtensionTabTopology.entry(tab?.id);
++      if (entry) return this.getWindow(entry.windowId, context);
+       return this.getTopWindow(context);
+     }
+     return super.getCurrentWindow(context);
+@@ -156,7 +161,9 @@
+ 
+   get topNonPBWindow() {
+     if (NavisAndroidExtensionTabTopology.ready) {
+-      return NavisAndroidExtensionTabTopology.representativeWindow(false);
++      return NavisAndroidExtensionTabTopology.representativeWindow(false) ||
++        NavisAndroidExtensionTabTopology.representativeWindow(false,
++          NavisAndroidExtensionTabTopology.lastFocusedWindow(false)?.windowId) || null;
+     }
+     return mobileWindowTracker.topNonPBWindow;
+   }
+@@ -166,7 +173,7 @@
+       NavisAndroidExtensionTabTopology.ready &&
+       NavisAndroidExtensionTabTopology.isDirectWindow(window)
+     ) {
+-      return NavisAndroidExtensionTabTopology.windowId;
++      return NavisAndroidExtensionTabTopology.entry(window.tab?.id)?.windowId ?? -1;
+     }
+     return super.getId(window);
+   }
+@@ -176,13 +183,13 @@
+       if (id === WINDOW_ID_CURRENT) {
+         return this.getCurrentWindow(context);
+       }
+-      if (id === NavisAndroidExtensionTabTopology.windowId) {
++      if (NavisAndroidExtensionTabTopology.window(id)) {
+         const includePrivate = Boolean(
+           context?.privateBrowsingAllowed ||
+             context?.extension?.privateBrowsingAllowed
+         );
+         const window =
+-          NavisAndroidExtensionTabTopology.representativeWindow(includePrivate);
++          NavisAndroidExtensionTabTopology.representativeWindow(includePrivate, id);
+         if (window && (!context || context.canAccessWindow(window))) {
+           return window;
+         }
+@@ -329,7 +336,7 @@
+         tabId: event.tabId,
+         windowId: event.windowId,
+         isPrivate: event.isPrivate,
+-        isWindowClosing: false,
++        isWindowClosing: event.isWindowClosing,
+       });
+     }
+   }
+@@ -490,7 +497,7 @@
+ 
+   get active() {
+     if (NavisAndroidExtensionTabTopology.isDirectTab(this.nativeTab)) {
+-      return NavisAndroidExtensionTabTopology.activeTabId === this.id;
++      return NavisAndroidExtensionTabTopology.selectedNativeTab(this.id);
+     }
+     return this.nativeTab.getActive();
+   }
+@@ -530,7 +537,7 @@
+ 
+   get windowId() {
+     return NavisAndroidExtensionTabTopology.isDirectTab(this.nativeTab)
+-      ? NavisAndroidExtensionTabTopology.windowId
++      ? NavisAndroidExtensionTabTopology.entry(this.id)?.windowId ?? -1
+       : windowTracker.getId(this.window);
+   }
+ 
+@@ -596,7 +603,8 @@
+         id: tab.id,
+         linkedBrowser: browser,
+         // TODO: we don't support selected so we just alway say we are
+-        selected: true,
++        selected: NavisAndroidExtensionTabTopology.isDirectTab(tab)
++          ? NavisAndroidExtensionTabTopology.selectedNativeTab(tab.id) : true,
+       },
+       fromBrowse
+     );
+@@ -621,6 +629,11 @@
+ }
+ 
+ class Window extends WindowBase {
++  get productWindow() {
++    return NavisAndroidExtensionTabTopology.isDirectWindow(this.window)
++      ? NavisAndroidExtensionTabTopology.window(windowTracker.getId(this.window)) : null;
++  }
++
+   get type() {
+     // The base implementation may return "popup" in some cases, but on mobile
+     // all tabs are associated with "normal" windowTypes.
+@@ -629,14 +642,14 @@
+ 
+   get focused() {
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+-      return true;
++      return this.productWindow?.focused === true;
+     }
+     return this.window.document.hasFocus();
+   }
+ 
+   isCurrentFor(context) {
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+-      return true;
++      return windowTracker.getId(windowTracker.getCurrentWindow(context)) === this.id;
+     }
+     // In GeckoView the popup is on a separate window so the current window for
+     // the popup is whatever is the topWindow.
+@@ -647,26 +660,24 @@
+   }
+ 
+   get top() {
+-    return this.window.screenY;
++    return this.productWindow?.top ?? this.window.screenY;
+   }
+ 
+   get left() {
+-    return this.window.screenX;
++    return this.productWindow?.left ?? this.window.screenX;
+   }
+ 
+   get width() {
+-    return this.window.outerWidth;
++    return this.productWindow?.width ?? this.window.outerWidth;
+   }
+ 
+   get height() {
+-    return this.window.outerHeight;
++    return this.productWindow?.height ?? this.window.outerHeight;
+   }
+ 
+   get incognito() {
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+-      return NavisAndroidExtensionTabTopology.allVisibleTabsPrivate(
+-        this.extension.privateBrowsingAllowed
+-      );
++      return this.productWindow?.privateMode === true;
+     }
+     return PrivateBrowsingUtils.isWindowPrivate(this.window);
+   }
+@@ -677,19 +688,19 @@
+ 
+   get isLastFocused() {
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+-      return true;
++      return this.id === NavisAndroidExtensionTabTopology.lastFocusedWindowId;
+     }
+     return this.window === windowTracker.topWindow;
+   }
+ 
+   get state() {
+-    return "fullscreen";
++    return NavisAndroidExtensionTabTopology.isDirectWindow(this.window) ? "normal" : "fullscreen";
+   }
+ 
+   *getTabs() {
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+       for (const nativeTab of NavisAndroidExtensionTabTopology.nativeTabs(
+-        this.extension.privateBrowsingAllowed
++        this.extension.privateBrowsingAllowed, this.id
+       )) {
+         const tab = this.extension.tabManager.getWrapper(nativeTab);
+         if (tab) {
+@@ -715,7 +726,7 @@
+     const { tabManager } = this.extension;
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+       const nativeTab = NavisAndroidExtensionTabTopology.activeNativeTab(
+-        this.extension.privateBrowsingAllowed
++        this.extension.privateBrowsingAllowed, this.id
+       );
+       return nativeTab ? tabManager.getWrapper(nativeTab) : null;
+     }
+@@ -725,7 +736,7 @@
+   getTabAtIndex(index) {
+     if (NavisAndroidExtensionTabTopology.isDirectWindow(this.window)) {
+       const entry = NavisAndroidExtensionTabTopology.entries(
+-        this.extension.privateBrowsingAllowed
++        this.extension.privateBrowsingAllowed, this.id
+       )[index];
+       const nativeTab = entry
+         ? NavisAndroidExtensionTabTopology.nativeTab(entry.tabId)
+@@ -797,20 +808,12 @@
+ 
+   *getAll(context) {
+     if (NavisAndroidExtensionTabTopology.ready) {
+-      if (
+-        !NavisAndroidExtensionTabTopology.hasVisibleTabs(
+-          this.extension.privateBrowsingAllowed
+-        )
+-      ) {
+-        return;
+-      }
+-      const window = NavisAndroidExtensionTabTopology.representativeWindow(
+-        this.extension.privateBrowsingAllowed
+-      );
+-      if (window && this.canAccessWindow(window, context)) {
+-        const wrapped = this.getWrapper(window);
+-        if (wrapped) {
+-          yield wrapped;
++      for (const product of NavisAndroidExtensionTabTopology.windows(this.extension.privateBrowsingAllowed)) {
++        const window = NavisAndroidExtensionTabTopology.representativeWindow(
++          this.extension.privateBrowsingAllowed, product.windowId);
++        if (window && this.canAccessWindow(window, context)) {
++          const wrapped = this.getWrapper(window);
++          if (wrapped) yield wrapped;
+         }
+       }
+       return;
+diff --git a/mobile/shared/components/extensions/ext-tabs.js b/mobile/shared/components/extensions/ext-tabs.js
+--- a/mobile/shared/components/extensions/ext-tabs.js
++++ b/mobile/shared/components/extensions/ext-tabs.js
+@@ -455,16 +455,10 @@
+           cookieStoreId = cookieStoreId ? cookieStoreId.toString() : undefined;
+ 
+           if (NavisAndroidExtensionTabBridge.isDirectRuntime()) {
+-            if (
+-              windowId !== null &&
+-              windowId !== undefined &&
+-              windowId !== WINDOW_ID_CURRENT &&
+-              windowId !== NavisAndroidExtensionTabTopology.windowId
+-            ) {
+-              throw new ExtensionError(
+-                `Invalid Navis product window ID: ${windowId}`
+-              );
+-            }
++            const owner = windowId == null || windowId === WINDOW_ID_CURRENT
++              ? windowTracker.getCurrentWindow(context) : windowTracker.getWindow(windowId, context);
++            if (!owner) throw new ExtensionError("The destination window is unavailable");
++            const productWindowId = windowTracker.getId(owner);
+             if (
+               cookieStoreId ||
+               discarded === true ||
+@@ -477,7 +471,7 @@
+             }
+             const result = await NavisAndroidExtensionTabBridge.create(
+               context.extension.id,
+-              { active, index, url: url ?? "about:blank" }
++              { active, index, url: url ?? "about:blank", windowId: productWindowId }
+             );
+             return tabManager.convert(result.nativeTab);
+           }
+diff --git a/mobile/shared/components/extensions/ext-windows.js b/mobile/shared/components/extensions/ext-windows.js
+--- a/mobile/shared/components/extensions/ext-windows.js
++++ b/mobile/shared/components/extensions/ext-windows.js
+@@ -1,86 +1,128 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+- * You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ "use strict";
+-
+-function unavailableMutation(name) {
+-  return new ExtensionError(
+-    `windows.${name} is unavailable: Navis Android owns one product window`
+-  );
+-}
+-
+-this.windows = class extends ExtensionAPI {
+-  getAPI(context) {
+-    const { windowManager } = context.extension;
+-
+-    function convert(window, getInfo) {
+-      if (!window || !context.canAccessWindow(window)) {
+-        throw new ExtensionError("The Navis product window is unavailable");
++{
++  const { NavisAndroidExtensionTabTopology: topology } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionTabTopology.sys.mjs");
++  const { NavisAndroidExtensionWindowBridge: bridge } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidWebExtensionHost.sys.mjs");
++  const WINDOW_ID_NONE = -1;
++  function checkOptions(options, create) {
++    for (const name of ["left", "top", "width", "height", "state"]) {
++      if (options[name] != null) throw new ExtensionError("Android has no window geometry/state mutation provider");
++    }
++    if (options.focused === false) throw new ExtensionError("Android cannot create or focus a window in the background");
++    if (options.drawAttention) throw new ExtensionError("Android has no window attention provider");
++    if (options.titlePreface) throw new ExtensionError("Navis does not expose title prefaces");
++    if (create && (options.tabId != null || options.cookieStoreId != null ||
++        (options.type != null && options.type !== "normal"))) {
++      throw new ExtensionError("Navis creates normal windows without adopting tabs or container stores");
++    }
++  }
++  function urls(context, input) {
++    if (input == null) return [];
++    const values = Array.isArray(input) ? input : [input];
++    if (values.length < 1 || values.length > 128) throw new ExtensionError("A window accepts 1 to 128 URLs");
++    return values.map(value => {
++      if (typeof value !== "string" || value.length > 16 * 1024 || /[\x00-\x1f\x7f]/u.test(value)) {
++        throw new ExtensionError("Invalid window URL");
+       }
+-      return windowManager.convert(window, getInfo);
++      const uri = context.uri.resolve(value);
++      if (uri.length > 16 * 1024 || !context.checkLoadURL(uri, { dontReportErrors: true })) {
++        throw new ExtensionError("The extension cannot load this URL");
++      }
++      return uri;
++    });
++  }
++  this.windows = class extends ExtensionAPIPersistent {
++    registerWindowEvent(name, fire) {
++      const extension = this.extension;
++      let previousFocus;
++      const unregister = topology.onWindowEvent(event => {
++        if (extension.hasShutdown) return;
++        if (name === "onFocusChanged") {
++          if (event.type !== "FOCUSED") return;
++          const entry = event.next.windows.find(window => window.windowId === event.windowId);
++          const visible = entry && (!entry.privateMode || extension.privateBrowsingAllowed) ? entry.windowId : WINDOW_ID_NONE;
++          if (visible !== previousFocus) { previousFocus = visible; fire.async(visible); }
++          return;
++        }
++        const kind = name === "onCreated" ? "CREATED" : "REMOVED";
++        if (event.type !== kind) return;
++        const snapshot = event.type === "REMOVED" ? event.previous : event.next;
++        const entry = snapshot.windows.find(window => window.windowId === event.windowId);
++        if (!entry || (entry.privateMode && !extension.privateBrowsingAllowed)) return;
++        if (event.type === "REMOVED") fire.async(event.windowId);
++        else {
++          const window = topology.representativeWindow(Boolean(extension.privateBrowsingAllowed), event.windowId);
++          if (window && extension.canAccessWindow(window)) fire.async(extension.windowManager.convert(window));
++        }
++      });
++      return { unregister, convert(nextFire) { fire = nextFire; } };
+     }
+-
+-    return {
+-      windows: {
+-        onCreated: new EventManager({
+-          context,
+-          name: "windows.onCreated",
+-          register: () => () => {},
+-        }).api(),
+-
+-        onRemoved: new EventManager({
+-          context,
+-          name: "windows.onRemoved",
+-          register: () => () => {},
+-        }).api(),
+-
+-        onFocusChanged: new EventManager({
+-          context,
+-          name: "windows.onFocusChanged",
+-          register: () => () => {},
+-        }).api(),
+-
+-        get(windowId, getInfo) {
+-          return Promise.resolve(
+-            convert(windowTracker.getWindow(windowId, context), getInfo)
+-          );
+-        },
+-
+-        getCurrent(getInfo) {
+-          return Promise.resolve(
+-            convert(windowTracker.getCurrentWindow(context), getInfo)
+-          );
++    PERSISTENT_EVENTS = Object.fromEntries(["onCreated", "onRemoved", "onFocusChanged"].map(name =>
++      [name, ({ fire }) => this.registerWindowEvent(name, fire)]));
++    getAPI(context) {
++      const { extension } = context;
++      const { windowManager } = extension;
++      const checkContext = () => {
++        if (extension.hasShutdown || context.unloaded || (context.incognito && !extension.privateBrowsingAllowed)) {
++          throw new ExtensionError("The extension window context is unavailable");
++        }
++      };
++      const convert = (window, info) => {
++        checkContext();
++        if (!window || !context.canAccessWindow(window)) throw new ExtensionError("The Navis product window is unavailable");
++        return windowManager.convert(window, info);
++      };
++      const owner = () => {
++        const window = windowTracker.getCurrentWindow(context);
++        convert(window);
++        return windowTracker.getId(window);
++      };
++      const target = id => {
++        const window = windowTracker.getWindow(id, context);
++        convert(window);
++        return windowTracker.getId(window);
++      };
++      return { windows: {
++        ...Object.fromEntries(Object.keys(this.PERSISTENT_EVENTS).map(event =>
++          [event, new EventManager({ context, module: "windows", event, extensionApi: this }).api()])),
++        async get(id, info) { return convert(windowTracker.getWindow(id, context), info); },
++        async getCurrent(info) { return convert(windowTracker.getCurrentWindow(context), info); },
++        async getLastFocused(info) {
++          const id = topology.lastFocusedWindow(Boolean(extension.privateBrowsingAllowed))?.windowId;
++          const window = id == null ? null : topology.representativeWindow(Boolean(extension.privateBrowsingAllowed), id);
++          return convert(window, info);
+         },
+-
+-        getLastFocused(getInfo) {
+-          return Promise.resolve(
+-            convert(windowTracker.getTopWindow(context), getInfo)
+-          );
+-        },
+-
+-        getAll(getInfo) {
++        async getAll(info) {
++          checkContext();
+           return Array.from(windowManager.getAll(context))
+-            .filter(
+-              window =>
+-                !getInfo?.windowTypes ||
+-                getInfo.windowTypes.includes(window.type)
+-            )
+-            .map(window => window.convert(getInfo));
+-        },
+-
+-        create() {
+-          return Promise.reject(unavailableMutation("create"));
+-        },
+-
+-        update() {
+-          return Promise.reject(unavailableMutation("update"));
++            .filter(window => !info?.windowTypes?.length || info.windowTypes.includes(window.type))
++            .map(window => window.convert(info));
+         },
+-
+-        remove() {
+-          return Promise.reject(unavailableMutation("remove"));
++        async create(options = {}) {
++          checkContext(); checkOptions(options, true);
++          if (options.incognito && !extension.privateBrowsingAllowed) throw new ExtensionError("Private-window access is not allowed");
++          const properties = { urls: urls(context, options.url), privateMode: options.incognito === true };
++          const result = await bridge.command(extension.id, "CREATE", owner(), properties);
++          return convert(result.nativeWindow, { populate: true });
++        },
++        async update(id, options) {
++          checkContext(); checkOptions(options, false);
++          const windowId = target(id);
++          if (options.focused === true) {
++            const result = await bridge.command(extension.id, "FOCUS", owner(), { windowId });
++            return convert(result.nativeWindow);
++          }
++          return convert(windowTracker.getWindow(windowId, context));
++        },
++        async remove(id) {
++          checkContext();
++          await bridge.command(extension.id, "REMOVE", owner(), { windowId: target(id) });
+         },
+-      },
+-    };
+-  }
+-};
++      } };
++    }
++  };
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs b/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs
+@@ -14,6 +14,10 @@
+   windowId: 0,
+   activeTabId: null,
+   tabs: Object.freeze([]),
++  windows: Object.freeze([]),
++  focusedWindowId: null,
++  lastFocusedWindowId: null,
++  focusOrder: Object.freeze([]),
+ });
+ let resolveReady;
+ const ready = new Promise(resolve => {
+@@ -21,6 +25,9 @@
+ });
+ const nativeTabs = new Map();
+ const pendingEvents = [];
++const windowListeners = new Set();
++const removedWindowListeners = new Set();
++const pendingWindowEvents = [];
+ 
+ function positiveInteger(value, label) {
+   if (!Number.isSafeInteger(value) || value <= 0) {
+@@ -41,22 +48,67 @@
+     throw new TypeError("Invalid Android extension tab topology");
+   }
+   const ids = new Set();
++  const indexes = new Map();
+   return Object.freeze(
+-    snapshot.tabs.map((candidate, index) => {
++    snapshot.tabs.map(candidate => {
+       const tabId = positiveInteger(candidate?.tabId, "topology tab ID");
++      const windowId = positiveInteger(candidate?.windowId ?? snapshot.windowId, "tab owner window");
++      const index = indexes.get(windowId) || 0;
+       if (ids.has(tabId) || candidate?.index !== index) {
+         throw new TypeError("Invalid Android extension tab order");
+       }
+       ids.add(tabId);
++      indexes.set(windowId, index + 1);
+       return Object.freeze({
+         tabId,
+         index,
+         privateMode: candidate?.privateMode === true,
++        windowId,
+       });
+     })
+   );
+ }
+ 
++function windowById(snapshot, windowId) {
++  return snapshot.windows.find(window => window.windowId === windowId) || null;
++}
++
++function snapshotWindows(snapshot, tabs) {
++  const values = snapshot.windows ?? [{ windowId: snapshot.windowId, activeTabId: snapshot.activeTabId }];
++  if (!Array.isArray(values) || values.length > 64) throw new TypeError("Invalid Android window topology");
++  const ids = new Set();
++  let focused = null;
++  const windows = values.map(value => {
++    const windowId = positiveInteger(value?.windowId, "product window ID");
++    const activeTabId = nullableTabId(value.activeTabId, "selected tab ID");
++    if (ids.has(windowId) || (activeTabId !== null &&
++        !tabs.some(tab => tab.tabId === activeTabId && tab.windowId === windowId))) {
++      throw new TypeError("Invalid Android window selection");
++    }
++    ids.add(windowId);
++    if (value.focused === true) {
++      if (focused !== null) throw new TypeError("Multiple Android windows have input focus");
++      focused = windowId;
++    }
++    const bounds = {};
++    for (const name of ["left", "top", "width", "height"]) {
++      const number = value[name] ?? 0;
++      if (!Number.isSafeInteger(number) || ((name === "width" || name === "height") && number < 0)) {
++        throw new TypeError("Invalid Android window bounds");
++      }
++      bounds[name] = number;
++    }
++    return Object.freeze({ windowId, activeTabId, privateMode: value.privateMode === true,
++      focused: value.focused === true, ...bounds });
++  });
++  if (tabs.some(tab => !ids.has(tab.windowId)) ||
++      nullableTabId(snapshot.focusedWindowId, "focused window ID") !== focused ||
++      (snapshot.lastFocusedWindowId && !ids.has(snapshot.lastFocusedWindowId))) {
++    throw new TypeError("Android window topology has an unknown owner");
++  }
++  return Object.freeze(windows);
++}
++
+ function entryById(snapshot, tabId) {
+   return snapshot.tabs.find(entry => entry.tabId === tabId) || null;
+ }
+@@ -72,7 +124,7 @@
+   if (
+     (type === "CREATED" && (oldEntry || !newEntry)) ||
+     (type === "REMOVED" && (!oldEntry || newEntry)) ||
+-    (type === "ACTIVATED" && (!newEntry || next.activeTabId !== tabId)) ||
++    (type === "ACTIVATED" && (!newEntry || windowById(next, newEntry.windowId)?.activeTabId !== tabId)) ||
+     (type === "MOVED" && (!oldEntry || !newEntry))
+   ) {
+     throw new TypeError("Android extension tab event disagrees with topology");
+@@ -87,7 +139,7 @@
+   if (
+     type === "ACTIVATED" &&
+     previousTabId !== null &&
+-    previous.activeTabId !== previousTabId
++    windowById(previous, newEntry.windowId)?.activeTabId !== previousTabId
+   ) {
+     throw new TypeError("Android extension activation predecessor is invalid");
+   }
+@@ -96,7 +148,8 @@
+     tabId,
+     previousTabId,
+     revision: next.revision,
+-    windowId: next.windowId,
++    windowId: (newEntry || oldEntry).windowId,
++    isWindowClosing: type === "REMOVED" && candidate.isWindowClosing === true,
+     previous,
+     next,
+   });
+@@ -117,16 +170,27 @@
+   while (pendingEvents.length && isNativeReady(pendingEvents[0])) {
+     notify(pendingEvents.shift());
+   }
++  for (let index = 0; index < pendingWindowEvents.length;) {
++    const event = pendingWindowEvents[index];
++    if (event.type === "CREATED" && current.windows.some(window => window.windowId === event.windowId) &&
++        !current.tabs.some(tab => tab.windowId === event.windowId && nativeTabs.has(tab.tabId))) {
++      index++;
++      continue;
++    }
++    pendingWindowEvents.splice(index, 1);
++    if (event.type === "CREATED" && !windowById(current, event.windowId)) continue;
++    for (const listener of windowListeners) listener(event);
++  }
+ }
+ 
+-function filteredEntries(snapshot, includePrivate) {
+-  return includePrivate
+-    ? snapshot.tabs
+-    : snapshot.tabs.filter(entry => !entry.privateMode);
++function filteredEntries(snapshot, includePrivate, windowId = null) {
++  return snapshot.tabs.filter(entry => (includePrivate || !entry.privateMode) &&
++    (windowId === null || entry.windowId === windowId));
+ }
+ 
+ function filteredIndex(snapshot, tabId, includePrivate) {
+-  return filteredEntries(snapshot, includePrivate).findIndex(
++  const owner = entryById(snapshot, tabId)?.windowId;
++  return filteredEntries(snapshot, includePrivate, owner).findIndex(
+     entry => entry.tabId === tabId
+   );
+ }
+@@ -184,13 +248,40 @@
+     return current.activeTabId;
+   },
+ 
++  get focusedWindowId() { return current.focusedWindowId; },
++  get lastFocusedWindowId() { return current.lastFocusedWindowId; },
++  lastFocusedWindow(includePrivate = true) {
++    return current.focusOrder.map(id => windowById(current, id)).find(window =>
++      window && (includePrivate || !window.privateMode)) || null;
++  },
++  window(windowId) { return windowById(current, windowId); },
++  windows(includePrivate = true) {
++    return current.windows.filter(window => includePrivate || !window.privateMode);
++  },
++  onWindowRemoved(callback) {
++    removedWindowListeners.add(callback);
++    return () => removedWindowListeners.delete(callback);
++  },
++  onWindowEvent(callback) {
++    windowListeners.add(callback);
++    return () => windowListeners.delete(callback);
++  },
++  selectedNativeTab(tabId) {
++    const entry = entryById(current, tabId);
++    return Boolean(entry && windowById(current, entry.windowId)?.activeTabId === tabId);
++  },
++
+   applySnapshot(snapshot) {
+     const revision = positiveInteger(snapshot?.revision, "topology revision");
+     if (revision <= current.revision) {
+       throw new TypeError("Android extension tab topology is not monotonic");
+     }
+-    const windowId = positiveInteger(snapshot?.windowId, "topology window ID");
+     const tabs = snapshotEntries(snapshot);
++    const windows = snapshotWindows(snapshot, tabs);
++    const windowId = windows.length ? positiveInteger(snapshot?.windowId, "topology window ID") : 0;
++    if (windows.length && !windows.some(window => window.windowId === windowId)) {
++      throw new TypeError("Unknown current Android window");
++    }
+     const activeTabId = nullableTabId(
+       snapshot?.activeTabId,
+       "active topology tab ID"
+@@ -198,26 +289,22 @@
+     if (activeTabId !== null && !tabs.some(entry => entry.tabId === activeTabId)) {
+       throw new TypeError("Active Android extension tab is absent from topology");
+     }
+-    const next = Object.freeze({ revision, windowId, activeTabId, tabs });
++    const focusOrder = snapshot.focusOrder ?? (snapshot.lastFocusedWindowId ? [snapshot.lastFocusedWindowId] : []);
++    if (!Array.isArray(focusOrder) || new Set(focusOrder).size !== focusOrder.length ||
++        focusOrder.some(id => !windows.some(window => window.windowId === id)) ||
++        (focusOrder[0] ?? null) !== nullableTabId(snapshot.lastFocusedWindowId, "last focused window")) {
++      throw new TypeError("Invalid Android window focus history");
++    }
++    const next = Object.freeze({ revision, windowId, activeTabId, tabs, windows,
++      focusOrder: Object.freeze([...focusOrder]),
++      focusedWindowId: nullableTabId(snapshot.focusedWindowId, "focused window"),
++      lastFocusedWindowId: nullableTabId(snapshot.lastFocusedWindowId, "last focused window") });
+     const events = snapshot?.events ?? [];
+     if (!Array.isArray(events) || events.length > MAX_TABS * 2) {
+       throw new TypeError("Invalid Android extension tab event list");
+     }
+     const validated = events.map(event => validateEvent(event, current, next));
+ 
+-    if (current.windowId && current.windowId !== windowId) {
+-      if (validated.length) {
+-        throw new TypeError("A replacement Android product window must reset topology");
+-      }
+-      pendingEvents.length = 0;
+-      const nextIds = new Set(tabs.map(entry => entry.tabId));
+-      for (const tabId of nativeTabs.keys()) {
+-        if (!nextIds.has(tabId)) {
+-          nativeTabs.delete(tabId);
+-        }
+-      }
+-    }
+-
+     // A tab may have been created and removed before its render host became
+     // observable. Do not let an undeliverable stale create block later events.
+     const removedIds = new Set(
+@@ -233,7 +320,20 @@
+       }
+     }
+ 
++    const previous = current;
+     current = next;
++    for (const window of windows) {
++      if (!windowById(previous, window.windowId)) pendingWindowEvents.push(Object.freeze({
++        type: "CREATED", windowId: window.windowId, previous, next }));
++    }
++    for (const window of previous.windows) {
++      if (!windowById(next, window.windowId)) {
++        for (const listener of removedWindowListeners) listener(window.windowId);
++        pendingWindowEvents.push(Object.freeze({ type: "REMOVED", windowId: window.windowId, previous, next }));
++      }
++    }
++    if (previous.focusedWindowId !== next.focusedWindowId) pendingWindowEvents.push(Object.freeze({
++      type: "FOCUSED", windowId: next.focusedWindowId ?? -1, previous, next }));
+     pendingEvents.push(...validated);
+     resolveReady();
+     flushEvents();
+@@ -264,21 +364,22 @@
+     return entryById(current, tabId);
+   },
+ 
+-  entries(includePrivate = true) {
+-    return filteredEntries(current, includePrivate);
++  entries(includePrivate = true, windowId = null) {
++    return filteredEntries(current, includePrivate, windowId);
+   },
+ 
+   visibleIndex(tabId, includePrivate = true, snapshot = current) {
+     return filteredIndex(snapshot, tabId, includePrivate);
+   },
+ 
+-  productCreateIndex(requestedIndex, includePrivate = true) {
++  productCreateIndex(requestedIndex, includePrivate = true, windowId = current.windowId) {
++    const fullEntries = filteredEntries(current, true, windowId);
+     if (requestedIndex === null || requestedIndex === undefined) {
+-      return current.tabs.length;
++      return fullEntries.length;
+     }
+     return insertionIndex(
+-      current.tabs,
+-      filteredEntries(current, includePrivate),
++      fullEntries,
++      filteredEntries(current, includePrivate, windowId),
+       requestedIndex
+     );
+   },
+@@ -288,8 +389,8 @@
+     if (!moving || (!includePrivate && moving.privateMode)) {
+       throw new TypeError("The extension cannot move this tab");
+     }
+-    const fullEntries = current.tabs.filter(entry => entry !== moving);
+-    const visibleEntries = filteredEntries(current, includePrivate).filter(
++    const fullEntries = filteredEntries(current, true, moving.windowId).filter(entry => entry !== moving);
++    const visibleEntries = filteredEntries(current, includePrivate, moving.windowId).filter(
+       entry => entry !== moving
+     );
+     return insertionIndex(fullEntries, visibleEntries, requestedIndex);
+@@ -299,40 +400,41 @@
+     return entryById(current, tabId) ? nativeTabs.get(tabId) || null : null;
+   },
+ 
+-  nativeTabs(includePrivate = true) {
+-    return filteredEntries(current, includePrivate)
++  nativeTabs(includePrivate = true, windowId = null) {
++    return filteredEntries(current, includePrivate, windowId)
+       .map(entry => nativeTabs.get(entry.tabId))
+       .filter(Boolean);
+   },
+ 
+-  activeNativeTab(includePrivate = true) {
+-    const entry = entryById(current, current.activeTabId);
++  activeNativeTab(includePrivate = true, windowId = current.windowId) {
++    const entry = entryById(current, windowById(current, windowId)?.activeTabId);
+     if (!entry || (!includePrivate && entry.privateMode)) {
+       return null;
+     }
+     return nativeTabs.get(entry.tabId) || null;
+   },
+ 
+-  representativeWindow(includePrivate = true) {
+-    const active = this.activeNativeTab(includePrivate);
++  representativeWindow(includePrivate = true, windowId = current.windowId) {
++    if (!includePrivate && windowById(current, windowId)?.privateMode) return null;
++    const active = this.activeNativeTab(includePrivate, windowId);
+     if (active) {
+       return active.browser.documentGlobal;
+     }
+-    return this.nativeTabs(includePrivate)[0]?.browser?.documentGlobal || null;
++    return this.nativeTabs(includePrivate, windowId)[0]?.browser?.documentGlobal || null;
+   },
+ 
+-  hasVisibleTabs(includePrivate = true) {
+-    return filteredEntries(current, includePrivate).length > 0;
++  hasVisibleTabs(includePrivate = true, windowId = null) {
++    return filteredEntries(current, includePrivate, windowId).length > 0;
+   },
+ 
+-  allVisibleTabsPrivate(includePrivate = true) {
+-    const visible = filteredEntries(current, includePrivate);
++  allVisibleTabsPrivate(includePrivate = true, windowId = null) {
++    const visible = filteredEntries(current, includePrivate, windowId);
+     return visible.length > 0 && visible.every(entry => entry.privateMode);
+   },
+ 
+   /** Projects an internal event without exposing private IDs or positions. */
+   projectEvent(event, includePrivate = true) {
+-    if (!event || event.windowId !== current.windowId) {
++    if (!event) {
+       return null;
+     }
+     const oldEntry = entryById(event.previous, event.tabId);
+@@ -346,6 +448,7 @@
+       tabId: event.tabId,
+       windowId: event.windowId,
+       isPrivate: entry.privateMode,
++      isWindowClosing: event.type === "REMOVED" && (event.isWindowClosing || !windowById(event.next, event.windowId)),
+     };
+     if (event.type === "CREATED" || event.type === "ACTIVATED") {
+       const nativeTab = nativeTabs.get(event.tabId);
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -66,6 +66,7 @@
+ const OPTIONAL_PERMISSION_TOPIC = "webextension-optional-permission-prompt";
+ const PROFILE_SHUTDOWN_TOPIC = "profile-before-change";
+ const DIRECT_TAB_COMMAND = "NavisAndroid:Extensions:TabCommand";
++const DIRECT_WINDOW_COMMAND = "NavisAndroid:Extensions:WindowCommand";
+ const DIRECT_POPUP_REQUESTED = "NavisAndroid:Extensions:PopupRequested";
+ const DIRECT_OPTIONAL_PERMISSION_REQUESTED =
+   "NavisAndroid:Extensions:OptionalPermissionRequested";
+@@ -102,6 +103,7 @@
+   "proxy",
+   "scripting",
+   "search",
++  "sessions",
+   "storage",
+   "tabs",
+   "topSites",
+@@ -606,6 +608,7 @@
+   if (!addonHasAction(addon)) {
+     return Object.freeze({
+       actionTitle: "",
++      actionSourceTabId: 0,
+       actionBadgeText: "",
+       actionBadgeTextColor: null,
+       actionBadgeBackgroundColor: null,
+@@ -618,15 +621,18 @@
+   let values = {};
+   let kind = extension?.manifest?.page_action ? "PAGE" : "BROWSER";
+   let actionAvailable = false;
++  let actionSourceTabId = 0;
+   try {
+     const resolved = actionForExtension(extension);
+     kind = resolved?.kind || kind;
+     actionAvailable = Boolean(resolved?.action);
+     const candidateTab = extension?.tabManager?.activeTab;
+     const nativeTab = activeAccessibleTab(extension);
++    actionSourceTabId = Number.isSafeInteger(nativeTab?.id) && nativeTab.id > 0 ? nativeTab.id : 0;
+     if (candidateTab && !nativeTab) {
+       return Object.freeze({
+         actionTitle: boundedString(addon.name, 512),
++        actionSourceTabId: 0,
+         actionBadgeText: "",
+         actionBadgeTextColor: null,
+         actionBadgeBackgroundColor: null,
+@@ -639,6 +645,7 @@
+   } catch {}
+   return Object.freeze({
+     actionTitle: boundedString(values.title || addon.name, 512),
++    actionSourceTabId,
+     actionBadgeText: boundedString(values.badgeText, 64),
+     actionBadgeTextColor: androidArgb(values.badgeTextColor),
+     actionBadgeBackgroundColor: androidArgb(values.badgeBackgroundColor),
+@@ -806,8 +813,15 @@
+           return {};
+         case "NavisAndroid:Extensions:ActiveTabChanged":
+           await this.#ensureInitialized();
+-          this.#dismissPopup();
+-          this.#revokeAllGrants();
++          if (data?.tabId !== undefined) {
++            if (!Number.isSafeInteger(data.tabId) || data.tabId <= 0) {
++              throw installError("Invalid previous tab identity", "invalid-tab");
++            }
++            this.#onTabClosed(data.tabId);
++          } else {
++            this.#dismissPopup();
++            this.#revokeAllGrants();
++          }
+           return {};
+         case "NavisAndroid:Extensions:TabClosed":
+           await this.#ensureInitialized();
+@@ -1718,9 +1732,10 @@
+     if (!action || typeof action.triggerClickOrPopup !== "function") {
+       throw installError("The extension action is unavailable", "action-unavailable");
+     }
+-    const activeTab = activeAccessibleTab(extension);
++    const activeTab = directTabById(sourceTabId);
+     if (
+-      !activeTab ||
++      !activeTab || !extension.tabManager.canAccessTab(activeTab) ||
++      !lazy.NavisAndroidExtensionTabTopology.selectedNativeTab(sourceTabId) ||
+       !Number.isSafeInteger(sourceTabId) ||
+       sourceTabId <= 0 ||
+       activeTab.id !== sourceTabId ||
+@@ -2122,7 +2137,7 @@
+       this.#dismissPopup();
+       throw installError("The popup source is not accessible", "popup-source-inaccessible");
+     }
+-    if (extension.tabManager.activeTab !== this.#popup.nativeTab) {
++    if (!lazy.NavisAndroidExtensionTabTopology.selectedNativeTab(this.#popup.nativeTab.id)) {
+       this.#dismissPopup();
+       throw installError("The popup source tab is no longer active", "popup-source-inactive");
+     }
+@@ -2145,6 +2160,7 @@
+     this.#popup = Object.freeze({ ...this.#popup, targetBrowser: browser });
+     try {
+       ownerTab.setPopup(true);
++      ownerTab.sourceTabId = this.#popup.nativeTab.id;
+       browser.setAttribute("webextension-view-type", "popup");
+     } catch {
+       throw installError("Could not assign popup view type", "popup-viewtype-failed");
+@@ -2230,7 +2246,13 @@
+   const includePrivate = Boolean(extension.privateBrowsingAllowed);
+   const request = { extensionId, operation, ...properties };
+   if (operation === "CREATE") {
+-    const activeTab = extension.tabManager.activeTab;
++    const windowId = properties.windowId ?? lazy.NavisAndroidExtensionTabTopology.windowId;
++    const window = lazy.NavisAndroidExtensionTabTopology.window(windowId);
++    if (!window || (!includePrivate && window.privateMode)) {
++      throw installError("The extension cannot access this window", "tab-unavailable");
++    }
++    request.windowId = windowId;
++    const activeTab = lazy.NavisAndroidExtensionTabTopology.activeNativeTab(includePrivate, windowId);
+     request.privateMode = Boolean(
+       activeTab &&
+         extension.tabManager.canAccessTab(activeTab) &&
+@@ -2238,19 +2260,20 @@
+     );
+     request.index = lazy.NavisAndroidExtensionTabTopology.productCreateIndex(
+       properties.index,
+-      includePrivate
++      includePrivate, windowId
+     );
+   } else {
+     const nativeTab = directTabById(properties.tabId);
+     if (!nativeTab || !extension.tabManager.canAccessTab(nativeTab)) {
+       throw installError("The extension cannot access this tab", "tab-unavailable");
+     }
++    request.windowId = lazy.NavisAndroidExtensionTabTopology.entry(nativeTab.id).windowId;
+     if (operation === "MOVE") {
+       if (
+         properties.windowId !== undefined &&
+         properties.windowId !== null &&
+         properties.windowId !== -2 &&
+-        properties.windowId !== lazy.NavisAndroidExtensionTabTopology.windowId
++        properties.windowId !== request.windowId
+       ) {
+         throw installError("Navis Android cannot move tabs between windows", "tab-unavailable");
+       }
+@@ -2259,7 +2282,6 @@
+         properties.index,
+         includePrivate
+       );
+-      delete request.windowId;
+     }
+   }
+   const dispatcher = lazy.EventDispatcher.byName(DISPATCHER_NAME);
+@@ -2273,7 +2295,7 @@
+   if (
+     !Number.isSafeInteger(tabId) ||
+     tabId <= 0 ||
+-    windowId !== lazy.NavisAndroidExtensionTabTopology.windowId ||
++    windowId !== request.windowId ||
+     !Number.isSafeInteger(index) ||
+     index < 0
+   ) {
+@@ -2292,9 +2314,10 @@
+   const entry = lazy.NavisAndroidExtensionTabTopology.entry(tabId);
+   if (
+     !entry ||
++    entry.windowId !== windowId ||
+     entry.index !== index ||
+     entry.privateMode !== Boolean(response.privateMode) ||
+-    (entry.tabId === lazy.NavisAndroidExtensionTabTopology.activeTabId) !==
++    lazy.NavisAndroidExtensionTabTopology.selectedNativeTab(entry.tabId) !==
+       Boolean(response.active)
+   ) {
+     throw installError("The product returned a stale tab", "tab-unavailable");
+@@ -2319,8 +2342,8 @@
+     return lazy.NavisAndroidExtensionTabTopology.isDirectTab(nativeTab);
+   },
+ 
+-  create(extensionId, { url = null, active = true, index = null } = {}) {
+-    const properties = { active: Boolean(active) };
++  create(extensionId, { url = null, active = true, index = null, windowId = null } = {}) {
++    const properties = { active: Boolean(active), windowId };
+     if (url !== null) {
+       properties.url = url;
+     }
+@@ -2354,6 +2377,59 @@
+   },
+ });
+ 
++/** Source and target are real product IDs; no mutation targets an arbitrary chrome window. */
++export const NavisAndroidExtensionWindowBridge = Object.freeze({
++  async command(extensionId, operation, sourceWindowId, properties = {}) {
++    const topology = lazy.NavisAndroidExtensionTabTopology;
++    const extension = lazy.ExtensionParent.GlobalManager.getExtension(extensionId);
++    if (!extension || extension.hasShutdown || !topology.ready ||
++        !["CREATE", "FOCUS", "REMOVE"].includes(operation)) {
++      throw installError("The extension window owner is unavailable", "window-unavailable");
++    }
++    const accessible = id => {
++      const entry = Number.isSafeInteger(id) && id > 0 ? topology.window(id) : null;
++      return entry && (!entry.privateMode || extension.privateBrowsingAllowed) ? entry : null;
++    };
++    if (!accessible(sourceWindowId)) throw installError("The source window is unavailable", "window-unavailable");
++    const request = { extensionId, operation, sourceWindowId };
++    if (operation === "CREATE") {
++      if (typeof properties.privateMode !== "boolean" ||
++          (properties.privateMode && !extension.privateBrowsingAllowed) ||
++          !Array.isArray(properties.urls) || properties.urls.length > 128 ||
++          properties.urls.some(uri => typeof uri !== "string" || !uri || uri.length > 16 * 1024 || /[\x00-\x1f\x7f]/u.test(uri))) {
++        throw installError("Invalid window creation properties", "window-unavailable");
++      }
++      request.privateMode = properties.privateMode;
++      request.urls = [...properties.urls];
++    } else {
++      if (!accessible(properties.windowId)) throw installError("The target window is unavailable", "window-unavailable");
++      request.windowId = properties.windowId;
++    }
++    const response = await lazy.EventDispatcher.byName(DISPATCHER_NAME).sendRequestForResult(DIRECT_WINDOW_COMMAND, request);
++    if (extension.hasShutdown || lazy.ExtensionParent.GlobalManager.getExtension(extensionId) !== extension) {
++      throw installError("The extension changed during the window command", "window-unavailable");
++    }
++    const id = response?.windowId;
++    if (!Number.isSafeInteger(id) || id <= 0 || (operation !== "CREATE" && id !== request.windowId)) {
++      throw installError("Invalid window command result", "window-unavailable");
++    }
++    if (operation === "REMOVE") {
++      if (response.removed !== true || topology.window(id)) {
++        throw installError("The window close was cancelled or did not complete", "window-unavailable");
++      }
++      return Object.freeze({ windowId: id, removed: true });
++    }
++    const actual = accessible(id);
++    const nativeWindow = topology.representativeWindow(Boolean(extension.privateBrowsingAllowed), id);
++    if (!actual || !nativeWindow || response.removed !== false ||
++        (operation === "CREATE" && actual.privateMode !== request.privateMode) ||
++        topology.focusedWindowId !== id) {
++      throw installError("The window did not reach its requested state", "window-unavailable");
++    }
++    return Object.freeze({ windowId: id, removed: false, nativeWindow });
++  },
++});
++
+ export const NavisAndroidWebExtensionHost = new AndroidWebExtensionHost();
+ 
+ export const NavisAndroidExtensionPhaseACompatibility = Object.freeze({
+

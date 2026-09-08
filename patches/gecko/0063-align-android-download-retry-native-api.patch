@@ -1,0 +1,61 @@
+diff --git a/mobile/android/components/geckoview/GeckoViewStreamListener.cpp b/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
+--- a/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
++++ b/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
+@@ -4,13 +4,14 @@
+ 
+ #include "GeckoViewStreamListener.h"
+ 
++#include "mozilla/OriginAttributes.h"
+ #include "mozilla/fallible.h"
+-#include "mozilla/Unused.h"
+ #include "nsIAsyncVerifyRedirectCallback.h"
+ #include "nsIChannelEventSink.h"
+ #include "nsIHttpChannel.h"
+ #include "nsIHttpHeaderVisitor.h"
+ #include "nsIInputStream.h"
++#include "nsILoadInfo.h"
+ #include "nsIReferrerInfo.h"
+ #include "nsIUploadChannel.h"
+ #include "nsINSSErrorsService.h"
+@@ -245,24 +246,31 @@
+     nsCOMPtr<nsIUploadChannel> uploadChannel = do_QueryInterface(channel);
+     nsCOMPtr<nsIInputStream> uploadStream;
+     nsAutoCString authorization;
+-    Unused << httpChannel->GetRequestHeader("Authorization"_ns, authorization);
+-    auto originAttributes = loadInfo->GetOriginAttributes();
++    const nsresult authorizationRv =
++        httpChannel->GetRequestHeader("Authorization"_ns, authorization);
++    const bool noAuthorization =
++        authorizationRv == NS_ERROR_NOT_AVAILABLE ||
++        (NS_SUCCEEDED(authorizationRv) && authorization.IsEmpty());
++    const auto originAttributes = loadInfo->GetOriginAttributes();
+     nsAutoCString originSuffix;
+     originAttributes.CreateSuffix(originSuffix);
++    nsAutoCString referrer;
++    nsCOMPtr<nsIReferrerInfo> referrerInfo;
++    bool referrerKnown = NS_SUCCEEDED(
++        httpChannel->GetReferrerInfo(getter_AddRefs(referrerInfo)));
++    if (referrerKnown && referrerInfo) {
++      referrerKnown =
++          NS_SUCCEEDED(referrerInfo->GetComputedReferrerSpec(referrer));
++    }
+     const bool bodylessGet =
+         NS_SUCCEEDED(httpChannel->GetRequestMethod(method)) &&
+         method.EqualsLiteral("GET") && uploadChannel &&
+-        NS_SUCCEEDED(uploadChannel->GetUploadStream(getter_AddRefs(uploadStream))) &&
+-        !uploadStream && authorization.IsEmpty() &&
++        NS_SUCCEEDED(
++            uploadChannel->GetUploadStream(getter_AddRefs(uploadStream))) &&
++        !uploadStream && noAuthorization && referrerKnown &&
+         originAttributes.mUserContextId == 0 &&
+         originAttributes.mFirstPartyDomain.IsEmpty() &&
+         originAttributes.mPartitionKey.IsEmpty();
+-    nsAutoCString referrer;
+-    nsCOMPtr<nsIReferrerInfo> referrerInfo;
+-    if (NS_SUCCEEDED(httpChannel->GetReferrerInfo(getter_AddRefs(referrerInfo))) &&
+-        referrerInfo) {
+-      Unused << referrerInfo->GetComputedReferrerSpec(referrer);
+-    }
+     rv = builder->NavisDownloadRetryMetadata(method, bodylessGet, referrer,
+                                              originSuffix);
+     NS_ENSURE_SUCCESS(rv, rv);

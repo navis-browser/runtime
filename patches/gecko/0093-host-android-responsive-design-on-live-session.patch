@@ -1,0 +1,517 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -83,6 +83,7 @@
+ let targetBridge;
+ let targetDispatcher;
+ let devToolsHost;
++let responsiveTarget;
+ let faviconBridge;
+ const pendingWindowSetups = new Set();
+ let sessionRestoreGeneration = 0;
+@@ -191,6 +192,12 @@
+       }
+       case "NavisAndroid:Query": {
+         Promise.resolve().then(async () => {
++          if (devToolsHost) {
++            if (typeof data?.payload !== "string" || data.payload.length > 1024) {
++              throw new TypeError("Invalid developer-tools query payload");
++            }
++            return devToolsHost.query(data.operation, JSON.parse(data.payload));
++          }
+           if (!PRODUCT_QUERIES.has(data?.operation) ||
+               typeof data?.payload !== "string" || data.payload.length > 65536) {
+             throw new TypeError("Unknown or invalid Navis product query");
+@@ -1106,6 +1113,7 @@
+         return;
+       }
+       active = next;
++      responsiveTarget?.selectionChanged();
+       if (!active) NavisAndroidContextMenus.close();
+       NavisAndroidCommandRegistry.refreshHost(window);
+       if (active) {
+@@ -1134,6 +1142,9 @@
+       "resource://gre/modules/NavisAndroidDevTools.sys.mjs"
+     );
+     devToolsHost = createNavisAndroidDevTools(window);
++    // The tools Session exposes only its dedicated viewport/close queries,
++    // never ordinary browser/product navigation commands.
++    dispatcher.registerListener(commandListener, ["NavisAndroid:Query"]);
+     devToolsHost.open(Number(tools[2]), tools[3]).then(() => {
+       if (!shuttingDown) dispatcher.dispatch("NavisAndroid:HostReady", {});
+     }).catch(error => {
+@@ -1163,6 +1174,12 @@
+   // WindowTracker/TabTracker. It is not a GeckoView Tab or ModuleManager.
+   window.tab = createNavisNativeTab(browser);
+   if (!window.tab.isPopup) {
++    const { createNavisAndroidResponsiveTarget } = ChromeUtils.importESModule(
++      "resource://gre/modules/NavisAndroidResponsive.sys.mjs");
++    responsiveTarget = createNavisAndroidResponsiveTarget(window, browser, window.tab);
++    window.navisResponsiveTarget = responsiveTarget;
++  }
++  if (!window.tab.isPopup) {
+     NavisAndroidExtensionTabTopology.registerNativeTab(window.tab);
+   }
+   targetBridge = createNavisTargetBridge(
+@@ -1213,7 +1230,7 @@
+       ),
+   });
+   Services.obs.notifyObservers(window, "navis-android-window-created");
+-  document.documentElement.appendChild(browser);
++  document.documentElement.appendChild(responsiveTarget?.container || browser);
+   browser.preserveLayers(true);
+   browser.docShellIsActive = true;
+ 
+@@ -1231,6 +1248,7 @@
+   browser.addEventListener("pagetitlechanged", pageTitles);
+   browser.addEventListener("DOMWindowClose", onPopupWindowClose);
+ 
++  responsiveTarget?.markReady();
+   NavisAndroidStartup.markChromeReady(window);
+   dispatcher.dispatch("NavisAndroid:HostReady", {
+     browsingContextId: browser.browsingContext.id,
+@@ -1250,10 +1268,14 @@
+   if (devToolsHost) {
+     devToolsHost.close();
+     devToolsHost = null;
++    dispatcher.unregisterListener(commandListener, ["NavisAndroid:Query"]);
+     dispatcher = null;
+     return;
+   }
+   NavisAndroidWebExtensionHost.onNativeTabClosed(window.tab);
++  responsiveTarget?.destroy();
++  responsiveTarget = null;
++  window.navisResponsiveTarget = null;
+   if (!window.tab?.isPopup) {
+     NavisAndroidExtensionTabTopology.unregisterNativeTab(window.tab);
+   }
+diff --git a/mobile/shared/chrome/navis/host.xhtml b/mobile/shared/chrome/navis/host.xhtml
+--- a/mobile/shared/chrome/navis/host.xhtml
++++ b/mobile/shared/chrome/navis/host.xhtml
+@@ -4,6 +4,7 @@
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ 
+ <?csp default-src chrome: resource:; img-src chrome: resource: data:; ?>
++<?xml-stylesheet href="chrome://navis-android/content/host.css" type="text/css"?>
+ 
+ <window
+   id="navis-android-host"
+diff --git a/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+@@ -14,6 +14,19 @@
+   let client;
+   let commands;
+   let closed = false;
++  let target;
++  let targetHost;
++  let originalZoom;
++  let viewportOperation = null;
++  let closing;
++
++  async function restoreViewport() {
++    await targetHost?.restore();
++    if (target?.browsingContext && !target.documentGlobal?.closed && originalZoom !== undefined) {
++      target.fullZoom = originalZoom;
++    }
++  }
++
+   return {
+     async open(targetSessionId, tool) {
+       if (!Number.isSafeInteger(targetSessionId) || targetSessionId <= 0 ||
+@@ -22,7 +35,7 @@
+       }
+       const targetWindow = [...Services.wm.getEnumerator("navigator:navis-android")]
+         .find(candidate => candidate.tab?.id === targetSessionId && !candidate.tab.isPopup);
+-      const target = targetWindow?.browser;
++      target = targetWindow?.browser;
+       if (!target?.browsingContext || targetWindow.closed) {
+         throw new Error("The inspected tab has closed");
+       }
+@@ -32,6 +45,14 @@
+       if (PrivateBrowsingUtils.isBrowserPrivate(target) !== PrivateBrowsingUtils.isWindowPrivate(window)) {
+         throw new Error("Developer tools privacy context must match the inspected tab");
+       }
++      targetHost = targetWindow.navisResponsiveTarget;
++      if (!targetHost || targetHost.tab !== targetWindow.tab) {
++        throw new Error("The inspected Session has no owned viewport container");
++      }
++      // A previous Activity may still be finishing its tool host. Do not take
++      // an emulated zoom as this replacement host's baseline.
++      await targetHost.restore();
++      originalZoom = target.fullZoom;
+       const { ensureNavisAndroidLocales } = ChromeUtils.importESModule(
+         "resource://gre/modules/NavisAndroidLocales.sys.mjs"
+       );
+@@ -97,14 +118,55 @@
+       window.document.title = "Developer tools";
+       console.info("NavisAndroid DevTools ready", { targetSessionId, tool, transport: "pipe" });
+     },
++    async query(operation, data) {
++      if (!data || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length > 1) {
++        throw new TypeError("Invalid developer-tools operation");
++      }
++      if (operation === "devtools:close") {
++        await this.close();
++        return { restored: true };
++      }
++      if (operation !== "devtools:viewport" || closed || !toolbox ||
++          !target?.browsingContext || target.documentGlobal?.closed) {
++        throw new Error("Developer-tools viewport is unavailable");
++      }
++      if (viewportOperation) throw new Error("A viewport operation is already pending");
++      const action = data.command;
++      if (!["responsive-toggle", "zoom-in", "zoom-out", "reset-zoom"].includes(action)) {
++        throw new TypeError("Unknown viewport command");
++      }
++      const pending = Promise.resolve().then(() => action === "responsive-toggle"
++        ? targetHost.toggle() : targetHost.zoom(action));
++      viewportOperation = pending;
++      try { return await pending; }
++      finally { if (viewportOperation === pending) viewportOperation = null; }
++    },
+     close() {
+-      if (closed) return;
++      if (closing) return closing;
+       closed = true;
+-      // Toolbox destruction releases its commands/client and target actors.
+-      const cleanup = toolbox ? toolbox.destroy() : commands ? commands.destroy() : client?.close();
+-      Promise.resolve(cleanup).catch(Cu.reportError);
+-      frame?.remove();
+-      frame = null;
++      closing = (async () => {
++        try {
++          // A toolbar close must not race an in-flight RDM initialize. Keep the
++          // actual target view alive until Gecko has removed all emulation.
++          await viewportOperation?.catch(() => {});
++          await restoreViewport();
++        } catch (error) {
++          closed = false;
++          closing = null;
++          throw error;
++        }
++        try {
++          // Toolbox destruction releases its own commands/client, not the
++          // unrelated browser Session or a global active tab.
++          const cleanup = toolbox ? toolbox.destroy() : commands ? commands.destroy() : client?.close();
++          await cleanup;
++        } finally {
++          frame?.remove();
++          frame = null;
++        }
++      })();
++      closing.catch(Cu.reportError);
++      return closing;
+     },
+   };
+ }
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -12,6 +12,7 @@
+         "NavisAndroidGeckoProducer.sys.mjs",
+         "NavisAndroidLocales.sys.mjs",
+         "NavisAndroidPresentation.sys.mjs",
++        "NavisAndroidResponsive.sys.mjs",
+         "NavisAndroidTargetBridge.sys.mjs",
+     ]
+     EXTRA_JS_MODULES.navis += [
+diff --git a/mobile/shared/chrome/navis/jar.mn b/mobile/shared/chrome/navis/jar.mn
+--- a/mobile/shared/chrome/navis/jar.mn
++++ b/mobile/shared/chrome/navis/jar.mn
+@@ -7,3 +7,4 @@
+ 
+   content/host.xhtml
+   content/host.js
++  content/host.css
+diff --git a/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs b/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
+@@ -0,0 +1,242 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++let browserLifecycleDetached = false;
++
++function manager() {
++  const { require } = ChromeUtils.importESModule(
++    "resource://devtools/shared/loader/Loader.sys.mjs");
++  const { gDevToolsBrowser } = require("devtools/client/framework/devtools-browser");
++  if (!browserLifecycleDetached) {
++    // As on desktop, use the shared stylesheet service, not Firefox's window
++    // startup/shutdown ownership. Navis closes its own toolbox and RDM clients.
++    for (const topic of ["browser-delayed-startup-finished", "quit-application", "devtools:loader:destroy"]) {
++      try { Services.obs.removeObserver(gDevToolsBrowser, topic); } catch {}
++    }
++    browserLifecycleDetached = true;
++  }
++  return require("devtools/client/responsive/manager");
++}
++
++/** Events identify the actual Navis tab, including its remoteness/close owner. */
++class TabEvents {
++  listeners = new Map();
++  addEventListener(type, listener, options = {}) {
++    if (!listener || options?.signal?.aborted) return;
++    if (!this.listeners.has(type)) this.listeners.set(type, new Map());
++    const entries = this.listeners.get(type);
++    if (entries.has(listener)) return;
++    const entry = { once: Boolean(options?.once), signal: options?.signal };
++    entry.abort = () => this.removeEventListener(type, listener);
++    entries.set(listener, entry);
++    entry.signal?.addEventListener("abort", entry.abort, { once: true });
++  }
++  removeEventListener(type, listener) {
++    const entry = this.listeners.get(type)?.get(listener);
++    entry?.signal?.removeEventListener("abort", entry.abort);
++    this.listeners.get(type)?.delete(listener);
++  }
++  emit(type, tab) {
++    const event = Object.freeze({ type, target: tab, currentTarget: tab });
++    for (const [listener, entry] of [...(this.listeners.get(type) || [])]) {
++      if (entry.once) this.removeEventListener(type, listener);
++      try {
++        if (typeof listener === "function") listener.call(tab, event);
++        else listener.handleEvent(event);
++      } catch (error) { Cu.reportError(error); }
++    }
++  }
++  clear() {
++    for (const [type, entries] of this.listeners) {
++      for (const listener of [...entries.keys()]) this.removeEventListener(type, listener);
++    }
++    this.listeners.clear();
++  }
++}
++
++/**
++ * Real target-side host contract. Construct before the browser's FIRST DOM
++ * insertion: moving a live remote browser would discard its page/session state.
++ * The container owns the existing browser, never a screenshot or second tab.
++ */
++export function createNavisAndroidResponsiveTarget(window, browser, tab) {
++  if (window.document.documentURI !== "chrome://navis-android/content/host.xhtml" ||
++      browser.documentGlobal !== window || tab.browser !== browser || tab.isPopup ||
++      browser.isConnected || window.gBrowser) {
++    throw new Error("Responsive target requires an uninserted owned Navis browser");
++  }
++  const document = window.document;
++  const container = document.createXULElement("vbox");
++  container.className = "navis-android-browser-container browserContainer";
++  const stack = document.createXULElement("stack");
++  stack.className = "navis-android-browser-stack browserStack";
++  browser.classList.add("navis-android-content-browser");
++  stack.append(browser);
++  container.append(stack);
++  const events = new TabEvents();
++  const selections = new TabEvents();
++  let closed = false;
++  let ready = false;
++  let notificationBox;
++  let responsiveManager;
++  let zoomBeforeResponsive;
++
++  Object.defineProperties(tab, {
++    tagName: { value: "tab" },
++    ownerDocument: { get: () => document },
++    documentGlobal: { get: () => window },
++    selected: { get: () => tab.getActive() },
++    addEventListener: { value: events.addEventListener.bind(events) },
++    removeEventListener: { value: events.removeEventListener.bind(events) },
++  });
++  const checkBrowser = candidate => {
++    if (closed || candidate !== browser || browser.documentGlobal !== window) {
++      throw new Error("The responsive target no longer belongs to this host");
++    }
++    return browser;
++  };
++  window.gBrowser = Object.freeze({
++    get selectedTab() { return closed ? null : tab; },
++    set selectedTab(candidate) {
++      if (candidate !== tab || closed) throw new Error("Cannot select another Session through this render host");
++      browser.focus();
++    },
++    get selectedBrowser() { return closed ? null : browser; },
++    get tabs() { return closed ? [] : [tab]; },
++    get browsers() { return closed ? [] : [browser]; },
++    tabContainer: selections,
++    getBrowserForTab(candidate) {
++      if (candidate !== tab) throw new Error("The tab belongs to another Session");
++      return checkBrowser(browser);
++    },
++    getTabForBrowser(candidate) { checkBrowser(candidate); return tab; },
++    getBrowserContainer(candidate) { checkBrowser(candidate); return container; },
++    getNotificationBox(candidate) {
++      checkBrowser(candidate);
++      // Use Gecko's actual visible notification widget, not a no-op facade.
++      if (!notificationBox) {
++        notificationBox = new window.MozElements.NotificationBox(element => container.prepend(element));
++      }
++      return notificationBox;
++    },
++  });
++  window.gFissionBrowser = true;
++  window.gBrowserInit = Object.freeze({
++    get delayedStartupFinished() { return ready && !closed; },
++    isAdoptingTab: () => false,
++  });
++  const media = window.matchMedia("(prefers-color-scheme: dark)");
++  const updateTheme = () => {
++    const pref = Services.prefs.getStringPref("devtools.theme", "auto");
++    document.documentElement.setAttribute("devtoolstheme",
++      pref === "dark" || (pref === "auto" && media.matches) ? "dark" : "light");
++  };
++  media.addEventListener("change", updateTheme);
++  Services.prefs.addObserver("devtools.theme", updateTheme);
++  updateTheme();
++  const remotenessChanged = () => events.emit("TabRemotenessChange", tab);
++  browser.addEventListener("XULFrameLoaderCreated", remotenessChanged);
++  const restoreResponsiveZoom = ({ tab: changedTab }) => {
++    if (changedTab !== tab || zoomBeforeResponsive === undefined) return;
++    if (!closed && browser.browsingContext) browser.fullZoom = zoomBeforeResponsive;
++    zoomBeforeResponsive = undefined;
++  };
++
++  async function closeResponsive() {
++    if (!responsiveManager?.isActiveForTab(tab)) return;
++    let finished;
++    const completion = new Promise(resolve => { finished = resolve; });
++    const onClosed = ({ tab: changedTab }) => { if (changedTab === tab) finished(); };
++    responsiveManager.on("off", onClosed);
++    try {
++      await responsiveManager.closeIfNeeded(window, tab, { trigger: "toolbox" });
++      // The upstream toolbar may already be destroying this UI. In that case
++      // closeIfNeeded returns early: only its actual "off" confirms cleanup.
++      if (responsiveManager.isActiveForTab(tab)) await completion;
++    } finally { responsiveManager.off("off", onClosed); }
++  }
++
++  async function rollbackFailedOpen() {
++    const ui = responsiveManager?.getResponsiveUIForTab(tab);
++    if (!ui) return;
++    // Upstream initialized is resolved only after success. Calling its normal
++    // destroy after initialize rejects would wait forever. Undo only resources
++    // this failed transaction actually acquired, including the real actor
++    // clients (which own UA/DPR/touch overrides); do not report a tab discard.
++    if (ui.networkFront) await ui.updateNetworkThrottling();
++    await ui.commands?.destroy();
++    events.removeEventListener("TabBrowserDiscarded", ui);
++    events.removeEventListener("TabClose", ui);
++    window.removeEventListener("unload", ui);
++    window.removeEventListener("FullZoomChange", ui);
++    for (const type of ["mousedown", "mousemove", "mouseup"]) browser.removeEventListener(type, ui);
++    ui.resizeToolbarObserver?.disconnect();
++    ui.rdmFrame?.contentWindow?.removeEventListener("message", ui);
++    ui.rdmFrame?.contentWindow?.destroy?.();
++    ui.rdmFrame?.remove();
++    ui.screenBox?.remove();
++    if (browser.browsingContext) {
++      browser.leaveResponsiveMode();
++      window.InspectorUtils.setVerticalClipping(browser.browsingContext, 0);
++      window.InspectorUtils.setDynamicToolbarMaxHeight(browser.browsingContext, 0);
++    }
++    container.classList.remove("responsive-mode");
++    for (const name of ["--rdm-width", "--rdm-height", "--rdm-zoom"]) stack.style.removeProperty(name);
++    for (const name of ["top", "visibility"]) browser.style.removeProperty(name);
++    responsiveManager.activeTabs.delete(tab);
++    responsiveManager.removeMenuCheckListenerFor(window);
++    responsiveManager.emit("off", { tab });
++  }
++
++  return Object.freeze({
++    container,
++    tab,
++    markReady() { ready = true; },
++    selectionChanged() { if (!closed) selections.emit("TabSelect", tab); },
++    async toggle() {
++      checkBrowser(browser);
++      if (!ready || browser.navisNativePresentation !== false || !browser.browsingContext) {
++        throw new Error("Responsive Design needs a live web document");
++      }
++      if (!responsiveManager) {
++        responsiveManager = manager();
++        responsiveManager.on("off", restoreResponsiveZoom);
++      }
++      if (responsiveManager.isActiveForTab(tab)) await closeResponsive();
++      else {
++        zoomBeforeResponsive = browser.fullZoom;
++        try { await responsiveManager.openIfNeeded(window, tab, { trigger: "toolbox" }); }
++        catch (error) { await rollbackFailedOpen(); throw error; }
++      }
++      return { responsive: responsiveManager.isActiveForTab(tab), zoom: browser.fullZoom };
++    },
++    zoom(command) {
++      checkBrowser(browser);
++      if (!ready || browser.navisNativePresentation !== false) throw new Error("The target has no web viewport");
++      const current = browser.fullZoom;
++      const next = command === "zoom-in" ? current + 0.1 : command === "zoom-out" ? current - 0.1 :
++        command === "reset-zoom" ? 1 : NaN;
++      if (!Number.isFinite(next)) throw new TypeError("Unknown viewport zoom command");
++      browser.fullZoom = Math.min(2, Math.max(0.25, Math.round(next * 100) / 100));
++      return { zoom: browser.fullZoom };
++    },
++    async restore() {
++      await closeResponsive();
++    },
++    destroy() {
++      if (closed) return;
++      events.emit("TabClose", tab);
++      responsiveManager?.off("off", restoreResponsiveZoom);
++      if (responsiveManager?.isActiveForTab(tab)) {
++        responsiveManager.closeIfNeeded(window, tab, { reason: "unload" }).catch(Cu.reportError);
++      }
++      closed = true;
++      events.clear();
++      selections.clear();
++      browser.removeEventListener("XULFrameLoaderCreated", remotenessChanged);
++      media.removeEventListener("change", updateTheme);
++      Services.prefs.removeObserver("devtools.theme", updateTheme);
++    },
++  });
++}
+diff --git a/mobile/shared/chrome/navis/host.css b/mobile/shared/chrome/navis/host.css
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/chrome/navis/host.css
+@@ -0,0 +1,39 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++.navis-android-browser-container {
++  display: flex;
++  flex: 1;
++  min-width: 0;
++  min-height: 0;
++  flex-direction: column;
++  position: relative;
++  --browser-stack-z-index-rdm-toolbar: 3;
++}
++
++.navis-android-browser-stack {
++  display: grid;
++  flex: 1;
++  min-width: 0;
++  min-height: 0;
++}
++
++.navis-android-content-browser {
++  grid-area: 1 / 1;
++  width: 100%;
++  min-width: 0;
++  min-height: 0;
++}
++
++/* Same host constraint as Navis Desktop. Gecko's original RDM stylesheet
++ * controls grid/scale and handles; normal browser flex must not override it. */
++.browserContainer.responsive-mode > .browserStack > :is(browser, .rdm-screen-box) {
++  width: var(--rdm-width) !important;
++  height: var(--rdm-height) !important;
++  min-width: 0 !important;
++  min-height: 0 !important;
++  max-width: none !important;
++  max-height: none !important;
++  flex: none !important;
++}

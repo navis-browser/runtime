@@ -1,0 +1,159 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+@@ -184,7 +184,7 @@
+   // Surface callbacks. Sample before drawing, but send no JNI for unchanged
+   // geometry and never resume the compositor from this animation path.
+   private void updateScreenBounds(final boolean force) {
+-    if (mReleased || mFailed) return;
++    if (mReleased || mFailed || mSession.isClosed()) return;
+     final int width = mSurfaceView.getWidth();
+     final int height = mSurfaceView.getHeight();
+     if (width <= 0 || height <= 0 || !mSurfaceView.getHolder().getSurface().isValid()) return;
+@@ -217,7 +217,7 @@
+   // readiness, and compositor resume alone does not resize Gecko's chrome
+   // widget. Replay both the Surface and layout bounds at either readiness edge.
+   private void refreshSurface() {
+-    if (mReleased || mFailed) return;
++    if (mReleased || mFailed || mSession.isClosed()) return;
+     final SurfaceHolder holder = mSurfaceView.getHolder();
+     final int width = mSurfaceView.getWidth();
+     final int height = mSurfaceView.getHeight();
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -48,6 +48,7 @@
+   private static final long NEW_WINDOW_TIMEOUT_MS = 10_000;
+ 
+   private static final String EVENT_HOST_READY = "NavisAndroid:HostReady";
++  private static final String EVENT_POPUP_CLOSE = "NavisAndroid:PopupClose";
+   private static final String EVENT_LOCATION = "NavisAndroid:Location";
+   private static final String EVENT_TITLE = "NavisAndroid:Title";
+   private static final String EVENT_FAVICON = "NavisAndroid:Favicon";
+@@ -273,6 +274,7 @@
+   private boolean mFullscreen;
+   private CompletableFuture<Boolean> mNewWindowOpenResult;
+   private boolean mDevToolsWindow;
++  private String mPopupTargetToken;
+   private boolean mProductActive;
+   private long mWebAuthnContextId;
+ 
+@@ -339,6 +341,7 @@
+     mDispatcher.registerUiThreadListener(
+         mEventListener,
+         EVENT_HOST_READY,
++        EVENT_POPUP_CLOSE,
+         EVENT_LOCATION,
+         EVENT_TITLE,
+         EVENT_FAVICON,
+@@ -472,6 +475,8 @@
+       throw new IllegalArgumentException("restoredState exceeds the 1 MiB character limit");
+     }
+     mOpenRequested = true;
++    mPopupTargetToken = engineWindowToken != null && engineWindowToken.startsWith("popup-")
++        ? engineWindowToken.substring("popup-".length()) : null;
+     NativeWindow.open(
+         mWindow,
+         mCompositor,
+@@ -728,6 +733,11 @@
+     mInput.setScrollFactor(factor);
+   }
+ 
++  // Popup layout may run while a script-initiated native close is still in flight.
++  boolean isClosed() {
++    return mClosed;
++  }
++
+   @Override
+   public void close() {
+     ThreadUtils.assertOnUiThread();
+@@ -754,6 +764,9 @@
+     }
+ 
+     switch (event) {
++      case EVENT_POPUP_CLOSE:
++        handlePopupCloseRequest(message);
++        break;
+       case EVENT_HOST_READY:
+         if (mDevToolsWindow && message.getString("error") != null) {
+           failNewWindowOpen(message.getString("error"));
+@@ -1312,6 +1325,15 @@
+     mDelegate.onSessionClosed(mSessionId);
+   }
+ 
++  private void handlePopupCloseRequest(final GeckoBundle message) {
++    // This dispatcher belongs to one Session. A stale or ordinary content host
++    // cannot close a different popup, even after the platform selects a new tab.
++    if (mPopupTargetToken != null
++        && mPopupTargetToken.equals(message.getString("targetToken"))) {
++      close();
++    }
++  }
++
+   private void completeNewWindowOpen(final boolean opened) {
+     if (mNewWindowOpenResult == null) {
+       return;
+@@ -1357,6 +1379,7 @@
+     mDispatcher.unregisterUiThreadListener(
+         mEventListener,
+         EVENT_HOST_READY,
++        EVENT_POPUP_CLOSE,
+         EVENT_LOCATION,
+         EVENT_TITLE,
+         EVENT_FAVICON,
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -844,6 +844,23 @@
+ 
+ const pageTitles = new AndroidPageTitles();
+ 
++function onPopupWindowClose(event) {
++  // BrowserElementParent forwards top-level remote window.close() as a chrome
++  // CustomEvent on this exact embedder. It is not isTrusted: checking that flag
++  // would drop Gecko's own forwarding. Content cannot dispatch on this element.
++  if (shuttingDown || !dispatcher || !browser ||
++      event.type !== "DOMWindowClose" || event.target !== browser ||
++      !window.tab?.isPopup) return;
++  const match = /^navis-android-session-([1-9][0-9]*):popup-([0-9a-f]{32})$/.exec(window.name);
++  if (!match || !Number.isSafeInteger(Number(match[1])) ||
++      Number(match[1]) !== window.tab.id) return;
++  event.preventDefault();
++  event.stopPropagation();
++  // Close the owning native Session, which delivers onSessionClosed to its
++  // surface. Never close a globally active tab/popup or a chrome window directly.
++  dispatcher.dispatch("NavisAndroid:PopupClose", { targetToken: match[2] });
++}
++
+ const progressListener = {
+   QueryInterface: ChromeUtils.generateQI([
+     "nsIWebProgressListener",
+@@ -1065,6 +1082,12 @@
+   // Popup windows carry their transaction token in the native window name. Mark them before
+   // WindowTracker observes this chrome window so they can never surface as a normal extension tab.
+   let isPopup = Boolean(match[2]);
++  if (isPopup) {
++    // nsFrameLoader propagates this to each remote/non-remote WindowOuter.
++    // Set it before browser insertion, including future remoteness changes, so
++    // popup-local navigation history does not block its own window.close().
++    contentBrowser.setAttribute("allowscriptstoclose", "true");
++  }
+   return {
+     id,
+     browser: contentBrowser,
+@@ -1206,6 +1229,7 @@
+       Ci.nsIWebProgress.NOTIFY_SECURITY
+   );
+   browser.addEventListener("pagetitlechanged", pageTitles);
++  browser.addEventListener("DOMWindowClose", onPopupWindowClose);
+ 
+   NavisAndroidStartup.markChromeReady(window);
+   dispatcher.dispatch("NavisAndroid:HostReady", {
+@@ -1270,6 +1294,7 @@
+   if (browser) {
+     browser.removeProgressListener(progressListener);
+     browser.removeEventListener("pagetitlechanged", pageTitles);
++    browser.removeEventListener("DOMWindowClose", onPopupWindowClose);
+   }
+   window.browserDOMWindow = null;
+   window.browser = null;

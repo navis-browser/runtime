@@ -1,0 +1,387 @@
+diff --git a/mobile/shared/components/extensions/ext-windows.js b/mobile/shared/components/extensions/ext-windows.js
+--- a/mobile/shared/components/extensions/ext-windows.js
++++ b/mobile/shared/components/extensions/ext-windows.js
+@@ -9,11 +9,17 @@
+     "resource://gre/modules/NavisAndroidWebExtensionHost.sys.mjs");
+   const WINDOW_ID_NONE = -1;
+   function checkOptions(options, create) {
+-    for (const name of ["left", "top", "width", "height", "state"]) {
+-      if (options[name] != null) throw new ExtensionError("Android has no window geometry/state mutation provider");
++    for (const name of ["left", "top", "width", "height"]) {
++      if (options[name] != null && options.state != null && options.state !== "normal") {
++        throw new ExtensionError("Window geometry cannot be combined with a non-normal state");
++      }
++    }
++    if (options.state != null && !["normal", "minimized", "maximized", "fullscreen"].includes(options.state)) {
++      throw new ExtensionError("This Android window cannot enter the requested window state");
++    }
++    if (options.state === "minimized" && options.focused === true) {
++      throw new ExtensionError("A minimized window cannot be focused");
+     }
+-    if (options.focused === false) throw new ExtensionError("Android cannot create or focus a window in the background");
+-    if (options.drawAttention) throw new ExtensionError("Android has no window attention provider");
+     if (options.titlePreface) throw new ExtensionError("Navis does not expose title prefaces");
+     if (create && (options.tabId != null || options.cookieStoreId != null ||
+         (options.type != null && options.type !== "normal"))) {
+@@ -105,22 +111,31 @@
+         async create(options = {}) {
+           checkContext(); checkOptions(options, true);
+           if (options.incognito && !extension.privateBrowsingAllowed) throw new ExtensionError("Private-window access is not allowed");
+-          const properties = { urls: urls(context, options.url), privateMode: options.incognito === true };
+-          const result = await bridge.command(extension.id, "CREATE", owner(), properties);
++          const properties = { urls: urls(context, options.url), privateMode: options.incognito === true,
++            focused: options.focused ?? options.state !== "minimized" };
++          if (options.state != null) properties.state = options.state;
++          for (const name of ["left", "top", "width", "height"]) {
++            if (options[name] != null) properties[name] = name === "width" || name === "height" ? Math.max(100, options[name]) : options[name];
++          }
++          const result = await bridge.command(extension.id, "CREATE", owner(), properties, context);
+           return convert(result.nativeWindow, { populate: true });
+         },
+         async update(id, options) {
+           checkContext(); checkOptions(options, false);
+           const windowId = target(id);
+-          if (options.focused === true) {
+-            const result = await bridge.command(extension.id, "FOCUS", owner(), { windowId });
++          if (["focused", "state", "drawAttention", "left", "top", "width", "height"].some(name => options[name] != null)) {
++            const properties = { windowId };
++            for (const name of ["focused", "state", "drawAttention", "left", "top", "width", "height"]) {
++              if (options[name] != null) properties[name] = name === "width" || name === "height" ? Math.max(100, options[name]) : options[name];
++            }
++            const result = await bridge.command(extension.id, "UPDATE", owner(), properties, context);
+             return convert(result.nativeWindow);
+           }
+           return convert(windowTracker.getWindow(windowId, context));
+         },
+         async remove(id) {
+           checkContext();
+-          await bridge.command(extension.id, "REMOVE", owner(), { windowId: target(id) });
++          await bridge.command(extension.id, "REMOVE", owner(), { windowId: target(id) }, context);
+         },
+       } };
+     }
+diff --git a/mobile/shared/components/extensions/ext-android.js b/mobile/shared/components/extensions/ext-android.js
+--- a/mobile/shared/components/extensions/ext-android.js
++++ b/mobile/shared/components/extensions/ext-android.js
+@@ -694,7 +694,7 @@
+   }
+ 
+   get state() {
+-    return NavisAndroidExtensionTabTopology.isDirectWindow(this.window) ? "normal" : "fullscreen";
++    return NavisAndroidExtensionTabTopology.isDirectWindow(this.window) ? this.productWindow?.state ?? "normal" : "fullscreen";
+   }
+ 
+   *getTabs() {
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -46,6 +46,7 @@
+ const COMMANDS = Object.freeze([
+   "NavisAndroid:Extensions:Initialize",
+   "NavisAndroid:Extensions:Inventory",
++  "NavisAndroid:Extensions:AuthorizeWindowCommand",
+   "NavisAndroid:Extensions:PrepareLocalInstall",
+   "NavisAndroid:Extensions:ConfirmLocalInstall",
+   "NavisAndroid:Extensions:CancelLocalInstall",
+@@ -752,6 +753,11 @@
+       }
+       return;
+     }
++    if (event === "NavisAndroid:Extensions:AuthorizeWindowCommand") {
++      callback?.onSuccess({ allowed: !this.#closed &&
++        NavisAndroidExtensionWindowBridge.authorize(data?.token, data?.windowId ?? null) });
++      return;
++    }
+     if (!callback) {
+       if (event === "NavisAndroid:Extensions:Shutdown") {
+         this.#stop();
+@@ -2378,12 +2384,34 @@
+ });
+ 
+ /** Source and target are real product IDs; no mutation targets an arbitrary chrome window. */
+-export const NavisAndroidExtensionWindowBridge = Object.freeze({
+-  async command(extensionId, operation, sourceWindowId, properties = {}) {
++export const NavisAndroidExtensionWindowBridge = (() => {
++  const pending = new Map();
++  const live = entry => entry && !entry.extension.hasShutdown && !entry.context?.unloaded &&
++    lazy.ExtensionParent.GlobalManager.getExtension(entry.request.extensionId) === entry.extension;
++  const accessible = (entry, id) => {
++    const window = Number.isSafeInteger(id) && id > 0 ? lazy.NavisAndroidExtensionTabTopology.window(id) : null;
++    return window && (!window.privateMode || entry.extension.privateBrowsingAllowed) ? window : null;
++  };
++  return Object.freeze({
++  authorize(token, targetWindowId) {
++    const entry = typeof token === "string" ? pending.get(token) : null;
++    if (!live(entry) || !accessible(entry, entry.request.sourceWindowId)) return false;
++    if (entry.request.operation !== "CREATE") {
++      return targetWindowId === entry.request.windowId && !!accessible(entry, targetWindowId);
++    }
++    if (entry.request.privateMode && !entry.extension.privateBrowsingAllowed) return false;
++    if (targetWindowId === null) return entry.createdId === null;
++    const actual = accessible(entry, targetWindowId);
++    if (!actual || entry.existingIds.has(targetWindowId) || actual.privateMode !== entry.request.privateMode ||
++        (entry.createdId !== null && entry.createdId !== targetWindowId)) return false;
++    entry.createdId = targetWindowId;
++    return true;
++  },
++  async command(extensionId, operation, sourceWindowId, properties = {}, context = null) {
+     const topology = lazy.NavisAndroidExtensionTabTopology;
+     const extension = lazy.ExtensionParent.GlobalManager.getExtension(extensionId);
+     if (!extension || extension.hasShutdown || !topology.ready ||
+-        !["CREATE", "FOCUS", "REMOVE"].includes(operation)) {
++        context?.unloaded || pending.size >= 128 || !["CREATE", "FOCUS", "UPDATE", "REMOVE"].includes(operation)) {
+       throw installError("The extension window owner is unavailable", "window-unavailable");
+     }
+     const accessible = id => {
+@@ -2392,6 +2420,41 @@
+     };
+     if (!accessible(sourceWindowId)) throw installError("The source window is unavailable", "window-unavailable");
+     const request = { extensionId, operation, sourceWindowId };
++    // Gecko clears this metadata when the synchronous API call returns. Capture it before await.
++    request.userActivation = context?.callContextData?.isHandlingUserInput === true;
++    for (const name of ["left", "top", "width", "height"]) {
++      if (properties[name] == null) continue;
++      const value = properties[name];
++      const dimension = name === "width" || name === "height";
++      if (!["CREATE", "UPDATE"].includes(operation) || (properties.state != null && properties.state !== "normal") ||
++          !Number.isInteger(value) || (dimension ? value < 100 || value > 32768 : Math.abs(value) > 1000000)) {
++        throw installError("Invalid window launch bounds", "window-unavailable");
++      }
++      request[name] = value;
++    }
++    if (operation === "UPDATE" && ["left", "top", "width", "height"].some(name => request[name] != null)) {
++      // Geometry belongs to a normal Task, not browser immersive or API maximized presentation.
++      request.state = "normal";
++    }
++    for (const name of ["focused", "drawAttention"]) {
++      if (properties[name] != null) {
++        if (typeof properties[name] !== "boolean" || !["CREATE", "UPDATE"].includes(operation) ||
++            (name === "drawAttention" && operation === "CREATE")) {
++          throw installError("Invalid window presentation properties", "window-unavailable");
++        }
++        request[name] = properties[name];
++      }
++    }
++    if (properties.state != null) {
++      if (!["CREATE", "UPDATE"].includes(operation) || !["normal", "minimized", "maximized", "fullscreen"].includes(properties.state) ||
++          (properties.state === "minimized" && properties.focused === true)) {
++        throw installError("Invalid window state", "window-unavailable");
++      }
++      request.state = properties.state;
++    }
++    if (request.state === "maximized" && !request.userActivation) {
++      throw installError("Task maximization requires a user input handler", "window-unavailable");
++    }
+     if (operation === "CREATE") {
+       if (typeof properties.privateMode !== "boolean" ||
+           (properties.privateMode && !extension.privateBrowsingAllowed) ||
+@@ -2405,8 +2468,22 @@
+       if (!accessible(properties.windowId)) throw installError("The target window is unavailable", "window-unavailable");
+       request.windowId = properties.windowId;
+     }
++    if (request.state === "normal" && request.windowId != null &&
++        accessible(request.windowId)?.state === "maximized" && !request.userActivation) {
++      throw installError("Task restoration requires a user input handler", "window-unavailable");
++    }
++    const originalGeometryFocus = operation === "UPDATE" && request.focused == null &&
++      ["left", "top", "width", "height"].some(name => request[name] != null)
++      ? topology.focusedWindowId === request.windowId : null;
++    const token = Services.uuid.generateUUID().toString().replace(/[{}-]/g, "");
++    request.authorizationToken = token;
++    request.extensionName = String(extension.name || "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 256);
++    const entry = { request, extension, context, createdId: null,
++      existingIds: new Set(topology.windows(true).map(window => window.windowId)) };
++    pending.set(token, entry);
++    try {
+     const response = await lazy.EventDispatcher.byName(DISPATCHER_NAME).sendRequestForResult(DIRECT_WINDOW_COMMAND, request);
+-    if (extension.hasShutdown || lazy.ExtensionParent.GlobalManager.getExtension(extensionId) !== extension) {
++    if (!live(entry)) {
+       throw installError("The extension changed during the window command", "window-unavailable");
+     }
+     const id = response?.windowId;
+@@ -2423,12 +2500,22 @@
+     const nativeWindow = topology.representativeWindow(Boolean(extension.privateBrowsingAllowed), id);
+     if (!actual || !nativeWindow || response.removed !== false ||
+         (operation === "CREATE" && actual.privateMode !== request.privateMode) ||
+-        topology.focusedWindowId !== id) {
++        (operation === "CREATE" && entry.existingIds.has(id)) ||
++        (request.state != null && actual.state !== request.state) ||
++        ((operation === "FOCUS" || request.focused === true) && topology.focusedWindowId !== id) ||
++        ((request.focused === false || request.state === "minimized") && topology.focusedWindowId === id) ||
++        (originalGeometryFocus !== null && (topology.focusedWindowId === id) !== originalGeometryFocus) ||
++        (request.drawAttention === true && response.attention !== true)) {
+       throw installError("The window did not reach its requested state", "window-unavailable");
+     }
++    if (["left", "top", "width", "height"].some(name => request[name] != null && actual[name] !== request[name])) {
++      throw installError("Android did not apply the requested window bounds", "window-unavailable");
++    }
+     return Object.freeze({ windowId: id, removed: false, nativeWindow });
++    } finally { pending.delete(token); }
+   },
+-});
++  });
++})();
+ 
+ export const NavisAndroidWebExtensionHost = new AndroidWebExtensionHost();
+ 
+diff --git a/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs b/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidExtensionTabTopology.sys.mjs
+@@ -98,8 +98,13 @@
+       }
+       bounds[name] = number;
+     }
++    const state = value.state ?? "normal";
++    if (!["normal", "minimized", "maximized", "fullscreen"].includes(state) ||
++        (state === "minimized" && value.focused === true)) {
++      throw new TypeError("Invalid Android window state");
++    }
+     return Object.freeze({ windowId, activeTabId, privateMode: value.privateMode === true,
+-      focused: value.focused === true, ...bounds });
++      focused: value.focused === true, state, ...bounds });
+   });
+   if (tabs.some(tab => !ids.has(tab.windowId)) ||
+       nullableTabId(snapshot.focusedWindowId, "focused window ID") !== focused ||
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensions.java
+@@ -80,6 +80,8 @@
+       "NavisAndroid:Extensions:Initialize";
+   private static final String COMMAND_INVENTORY =
+       "NavisAndroid:Extensions:Inventory";
++  private static final String COMMAND_AUTHORIZE_WINDOW =
++      "NavisAndroid:Extensions:AuthorizeWindowCommand";
+   private static final String COMMAND_PREPARE_LOCAL_INSTALL =
+       "NavisAndroid:Extensions:PrepareLocalInstall";
+   private static final String COMMAND_CONFIRM_LOCAL_INSTALL =
+@@ -134,7 +136,8 @@
+     MOVE
+   }
+ 
+-  public enum WindowOperation { CREATE, FOCUS, REMOVE }
++  public enum WindowOperation { CREATE, FOCUS, UPDATE, REMOVE }
++  public enum WindowState { NORMAL, MINIMIZED, MAXIMIZED, FULLSCREEN }
+ 
+   public enum TabTopologyEventType {
+     CREATED,
+@@ -503,10 +506,17 @@
+     public final boolean privateMode;
+     public final boolean focused;
+     public final int left, top, width, height;
++    public final String state;
+ 
+     public WindowTopologyEntry(final long windowId, final Long activeTabId,
+         final boolean privateMode, final boolean focused,
+         final int left, final int top, final int width, final int height) {
++      this(windowId, activeTabId, privateMode, focused, left, top, width, height, "normal");
++    }
++
++    public WindowTopologyEntry(final long windowId, final Long activeTabId,
++        final boolean privateMode, final boolean focused,
++        final int left, final int top, final int width, final int height, final String state) {
+       if (windowId <= 0 || (activeTabId != null && activeTabId <= 0) || width < 0 || height < 0) {
+         throw new IllegalArgumentException("Invalid Android window topology");
+       }
+@@ -518,6 +528,11 @@
+       this.top = top;
+       this.width = width;
+       this.height = height;
++      if (!("normal".equals(state) || "minimized".equals(state) || "maximized".equals(state) || "fullscreen".equals(state)) ||
++          ("minimized".equals(state) && focused)) {
++        throw new IllegalArgumentException("Invalid Android window state");
++      }
++      this.state = state;
+     }
+ 
+     private GeckoBundle toBundle() {
+@@ -530,6 +545,7 @@
+       value.putInt("top", top);
+       value.putInt("width", width);
+       value.putInt("height", height);
++      value.putString("state", state);
+       return value;
+     }
+   }
+@@ -764,6 +780,11 @@
+     public final Long windowId;
+     public final Boolean privateMode;
+     public final List<String> urls;
++    public final Boolean focused, drawAttention;
++    public final WindowState state;
++    public final String authorizationToken, extensionName;
++    public final Integer left, top, width, height;
++    public final boolean userActivation;
+ 
+     private WindowCommand(final GeckoBundle value) {
+       extensionId = boundedRequiredString(value, "extensionId", 256);
+@@ -773,6 +794,31 @@
+       windowId = value.containsKey("windowId") ? Long.valueOf(value.getLong("windowId", -1)) : null;
+       privateMode = value.containsKey("privateMode") ? Boolean.valueOf(value.getBoolean("privateMode", false)) : null;
+       final String[] candidates = value.getStringArray("urls");
++      focused = value.containsKey("focused") ? Boolean.valueOf(value.getBoolean("focused", false)) : null;
++      drawAttention = value.containsKey("drawAttention") ? Boolean.valueOf(value.getBoolean("drawAttention", false)) : null;
++      final String stateName = value.getString("state", null);
++      state = stateName == null ? null : parseEnum(WindowState.class, stateName.toUpperCase(Locale.ROOT));
++      authorizationToken = boundedRequiredString(value, "authorizationToken", 32);
++      extensionName = boundedString(value, "extensionName", 256);
++      userActivation = value.getBoolean("userActivation", false);
++      left = value.containsKey("left") ? Integer.valueOf(value.getInt("left", 0)) : null;
++      top = value.containsKey("top") ? Integer.valueOf(value.getInt("top", 0)) : null;
++      width = value.containsKey("width") ? Integer.valueOf(value.getInt("width", 0)) : null;
++      height = value.containsKey("height") ? Integer.valueOf(value.getInt("height", 0)) : null;
++      if ((left != null || top != null || width != null || height != null) &&
++          ((operation != WindowOperation.CREATE && operation != WindowOperation.UPDATE) || (state != null && state != WindowState.NORMAL) ||
++              (left != null && (left < -1000000 || left > 1000000)) ||
++              (top != null && (top < -1000000 || top > 1000000)) ||
++              (width != null && (width < 100 || width > 32768)) ||
++              (height != null && (height < 100 || height > 32768)))) {
++        throw new IllegalArgumentException("Invalid window launch bounds");
++      }
++      if (!authorizationToken.matches("[0-9a-f]{32}") || (state == WindowState.MINIMIZED && Boolean.TRUE.equals(focused)) ||
++          ((operation == WindowOperation.FOCUS || operation == WindowOperation.REMOVE) &&
++              (focused != null || state != null || drawAttention != null)) ||
++          (operation == WindowOperation.CREATE && drawAttention != null)) {
++        throw new IllegalArgumentException("Invalid window presentation request");
++      }
+       if (sourceWindowId <= 0 || sourceWindowId > 9_007_199_254_740_991L ||
+           (windowId != null && (windowId <= 0 || windowId > 9_007_199_254_740_991L)) ||
+           (candidates != null && candidates.length > 128)) {
+@@ -799,15 +845,21 @@
+   public static final class WindowResult {
+     public final long windowId;
+     public final boolean removed;
++    public final boolean attention;
+     public WindowResult(final long windowId, final boolean removed) {
++      this(windowId, removed, false);
++    }
++    public WindowResult(final long windowId, final boolean removed, final boolean attention) {
+       if (windowId <= 0 || windowId > 9_007_199_254_740_991L) throw new IllegalArgumentException("Invalid window result");
+       this.windowId = windowId;
+       this.removed = removed;
++      this.attention = attention;
+     }
+     private GeckoBundle toBundle() {
+       final GeckoBundle result = new GeckoBundle(2);
+       result.putLong("windowId", windowId);
+       result.putBoolean("removed", removed);
++      result.putBoolean("attention", attention);
+       return result;
+     }
+   }
+@@ -922,6 +974,16 @@
+     return inventoryQuery(COMMAND_INVENTORY, null);
+   }
+ 
++  public CompletionStage<Boolean> authorizeWindowCommand(final String token, final Long windowId) {
++    if (token == null || !token.matches("[0-9a-f]{32}") || (windowId != null && windowId <= 0)) {
++      return failedFuture(new IllegalArgumentException("Invalid window authorization request"));
++    }
++    final GeckoBundle request = new GeckoBundle(2);
++    request.putString("token", token);
++    if (windowId != null) request.putLong("windowId", windowId);
++    return queryBundle(COMMAND_AUTHORIZE_WINDOW, request).thenApply(value -> value.getBoolean("allowed", false));
++  }
++
+   /**
+    * Takes ownership of {@code source} immediately and closes it on every terminal path.
+    *

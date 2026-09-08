@@ -1,0 +1,373 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs b/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
+@@ -79,7 +79,9 @@
+   let closed = false;
+   let ready = false;
+   let notificationBox;
++  let notificationOwner;
+   let responsiveManager;
++  let responsiveUICleanup;
+   let zoomBeforeResponsive;
+ 
+   Object.defineProperties(tab, {
+@@ -116,7 +118,10 @@
+       checkBrowser(candidate);
+       // Use Gecko's actual visible notification widget, not a no-op facade.
+       if (!notificationBox) {
+-        notificationBox = new window.MozElements.NotificationBox(element => container.prepend(element));
++        const { createNavisResponsiveNotifications } = ChromeUtils.importESModule(
++          "resource://gre/modules/NavisAndroidResponsiveUI.sys.mjs");
++        notificationOwner = createNavisResponsiveNotifications(window, browser, container);
++        notificationBox = notificationOwner.box;
+       }
+       return notificationBox;
+     },
+@@ -138,7 +143,10 @@
+   const remotenessChanged = () => events.emit("TabRemotenessChange", tab);
+   browser.addEventListener("XULFrameLoaderCreated", remotenessChanged);
+   const restoreResponsiveZoom = ({ tab: changedTab }) => {
+-    if (changedTab !== tab || zoomBeforeResponsive === undefined) return;
++    if (changedTab !== tab) return;
++    responsiveUICleanup?.();
++    responsiveUICleanup = null;
++    if (zoomBeforeResponsive === undefined) return;
+     if (!closed && browser.browsingContext) browser.fullZoom = zoomBeforeResponsive;
+     zoomBeforeResponsive = undefined;
+   };
+@@ -206,7 +214,12 @@
+       if (responsiveManager.isActiveForTab(tab)) await closeResponsive();
+       else {
+         zoomBeforeResponsive = browser.fullZoom;
+-        try { await responsiveManager.openIfNeeded(window, tab, { trigger: "toolbox" }); }
++        try {
++          const ui = await responsiveManager.openIfNeeded(window, tab, { trigger: "toolbox" });
++          const { bindNavisAndroidResponsiveUI } = ChromeUtils.importESModule(
++            "resource://gre/modules/NavisAndroidResponsiveUI.sys.mjs");
++          responsiveUICleanup = await bindNavisAndroidResponsiveUI(window, ui);
++        }
+         catch (error) { await rollbackFailedOpen(); throw error; }
+       }
+       return { responsive: responsiveManager.isActiveForTab(tab), zoom: browser.fullZoom };
+@@ -226,6 +239,9 @@
+     },
+     destroy() {
+       if (closed) return;
++      responsiveUICleanup?.();
++      responsiveUICleanup = null;
++      notificationOwner?.destroy();
+       events.emit("TabClose", tab);
+       responsiveManager?.off("off", restoreResponsiveZoom);
+       if (responsiveManager?.isActiveForTab(tab)) {
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -13,6 +13,7 @@
+         "NavisAndroidLocales.sys.mjs",
+         "NavisAndroidPresentation.sys.mjs",
+         "NavisAndroidResponsive.sys.mjs",
++        "NavisAndroidResponsiveUI.sys.mjs",
+         "NavisAndroidTargetBridge.sys.mjs",
+     ]
+     EXTRA_JS_MODULES.navis += [
+diff --git a/mobile/shared/chrome/navis/host.css b/mobile/shared/chrome/navis/host.css
+--- a/mobile/shared/chrome/navis/host.css
++++ b/mobile/shared/chrome/navis/host.css
+@@ -2,6 +2,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++@import url("chrome://global/skin/design-system/tokens-platform.css");
++
+ .navis-android-browser-container {
+   display: flex;
+   flex: 1;
+@@ -37,3 +39,34 @@
+   max-height: none !important;
+   flex: none !important;
+ }
++
++:root .browserContainer.responsive-mode > .rdm-toolbar.navis-android-responsive-ui {
++  top: var(--navis-notice-height, 0px);
++  height: var(--navis-rdm-toolbar-height) !important;
++}
++:root .browserContainer.responsive-mode > .rdm-toolbar.navis-android-responsive-ui:is(.navis-responsive-popup-open, .device-modal-opened) {
++  height: calc(100% - var(--navis-notice-height, 0px)) !important;
++}
++.browserContainer.responsive-mode:has(> .navis-android-responsive-ui) > .browserStack {
++  grid-template-rows: calc(var(--navis-rdm-toolbar-height) + 5px) [margin-top-offset] var(--rdm-height) [below-browser] 1fr;
++}
++.notificationbox-stack {
++  flex: none;
++  width: 100%;
++  min-width: 0;
++  font: 14px/1.5 sans-serif;
++  color: CanvasText;
++  color-scheme: light dark;
++}
++.navis-responsive-reload {
++  min-height: 36px;
++  padding: 4px 12px;
++  font: inherit;
++  border: 1px solid var(--border-color);
++  border-radius: var(--border-radius-small);
++  color: var(--button-text-color);
++  background: var(--button-background-color);
++  cursor: pointer;
++}
++.navis-responsive-reload:hover { background: var(--button-background-color-hover); }
++.navis-responsive-reload:focus-visible { outline: 2px solid var(--focus-outline-color); }
+diff --git a/mobile/shared/chrome/navis/jar.mn b/mobile/shared/chrome/navis/jar.mn
+--- a/mobile/shared/chrome/navis/jar.mn
++++ b/mobile/shared/chrome/navis/jar.mn
+@@ -8,3 +8,4 @@
+   content/host.xhtml
+   content/host.js
+   content/host.css
++  content/responsive.css
+diff --git a/toolkit/themes/mobile/global/jar.mn b/toolkit/themes/mobile/global/jar.mn
+--- a/toolkit/themes/mobile/global/jar.mn
++++ b/toolkit/themes/mobile/global/jar.mn
+@@ -10,3 +10,14 @@
+    skin/classic/global/aboutNetworking.css
+    skin/classic/global/aboutSupport.css
+    skin/classic/global/icons/edit-copy.svg                  (../../shared/icons/edit-copy.svg)
++
++# Navis uses Gecko's actual notification widget, including its close button.
++# Do not import the desktop browser theme; provide only this widget's assets.
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++   skin/classic/global/design-system/tokens-shared.css      (../../shared/design-system/dist/tokens-shared.css)
++   skin/classic/global/design-system/tokens-platform.css    (../../shared/design-system/dist/tokens-platform.css)
++   skin/classic/global/icons/info-filled.svg                (../../shared/icons/info-filled.svg)
++   skin/classic/global/icons/close.svg                      (../../shared/icons/close.svg)
++   skin/classic/global/icons/check-filled.svg               (../../shared/icons/check-filled.svg)
++   skin/classic/global/icons/warning.svg                    (../../shared/icons/warning.svg)
++#endif
+diff --git a/devtools/client/shared/widgets/tooltip/HTMLTooltip.js b/devtools/client/shared/widgets/tooltip/HTMLTooltip.js
+--- a/devtools/client/shared/widgets/tooltip/HTMLTooltip.js
++++ b/devtools/client/shared/widgets/tooltip/HTMLTooltip.js
+@@ -510,6 +510,25 @@
+    *        Optional, vertical offset between the anchor and the tooltip.
+    */
+   async show(anchor, options) {
++    // A Navis Android RDM toolbar lives in a short chrome iframe. Its real
++    // HTML fallback needs the target-side overlay viewport before measuring.
++    // Ordinary web documents and desktop/XUL popups never enter this path.
++    if (!this._navisPopupViewportRelease && !this.useXulWrapper &&
++        this.doc.nodePrincipal?.isSystemPrincipal && Services.appinfo?.OS === "Android") {
++      const owner = this.doc.defaultView?.frameElement?.navisResponsivePopupHost;
++      if (owner) this._navisPopupViewportRelease = owner.acquire(this.doc);
++    }
++    try { await this._showInViewport(anchor, options); }
++    catch (error) { this._releaseNavisPopupViewport(); throw error; }
++  }
++
++  _releaseNavisPopupViewport() {
++    const release = this._navisPopupViewportRelease;
++    this._navisPopupViewportRelease = null;
++    release?.();
++  }
++
++  async _showInViewport(anchor, options) {
+     const { left, top } = this._updateContainerBounds(anchor, options);
+     const isTooltipVisible = this.isVisible();
+ 
+@@ -820,6 +839,7 @@
+     }
+ 
+     if (!this.isVisible()) {
++      this._releaseNavisPopupViewport();
+       this.emit("hidden");
+       return;
+     }
+@@ -854,6 +874,7 @@
+       this._anchor.classList.remove("tooltip-anchor");
+       this._anchor = null;
+     }
++    this._releaseNavisPopupViewport();
+   }
+ 
+   removeEventListeners() {
+@@ -875,6 +896,7 @@
+    * tooltip container from the document.
+    */
+   destroy() {
++    this._releaseNavisPopupViewport();
+     this.hide();
+     this.removeEventListeners();
+     this.container.remove();
+diff --git a/mobile/shared/modules/navis/NavisAndroidResponsiveUI.sys.mjs b/mobile/shared/modules/navis/NavisAndroidResponsiveUI.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidResponsiveUI.sys.mjs
+@@ -0,0 +1,136 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/** Adapt only layout/overlay ownership; original RDM controls and events remain. */
++export async function bindNavisAndroidResponsiveUI(window, ui) {
++  const frame = ui.rdmFrame;
++  const document = frame.contentDocument;
++  const container = ui.browserContainerEl;
++  const toolbar = document.getElementById("toolbar");
++  if (!toolbar || !document.nodePrincipal.isSystemPrincipal || frame.documentGlobal !== window) {
++    throw new Error("Responsive toolbar does not belong to this chrome host");
++  }
++  const stylesheet = document.createElement("link");
++  stylesheet.rel = "stylesheet";
++  stylesheet.href = "chrome://navis-android/content/responsive.css";
++  let discard;
++  const loaded = new Promise((resolve, reject) => {
++    discard = () => reject(new Error("Responsive toolbar closed while styling"));
++    document.defaultView.addEventListener("unload", discard, { once: true });
++    stylesheet.addEventListener("load", resolve, { once: true });
++    stylesheet.addEventListener("error", () => reject(new Error("Responsive layout stylesheet failed")), { once: true });
++  });
++  document.head.append(stylesheet);
++  try { await loaded; }
++  catch (error) { stylesheet.remove(); throw error; }
++  finally { document.defaultView.removeEventListener("unload", discard); }
++  if (!frame.isConnected || ui.destroying) { stylesheet.remove(); throw new Error("Responsive toolbar closed"); }
++  let closed = false;
++  let height = 0;
++  const leases = new Set();
++  const measure = () => {
++    if (closed || !frame.isConnected) return;
++    const next = Math.ceil(toolbar.getBoundingClientRect().height);
++    if (next > 0 && next !== height) {
++      height = next;
++      container.style.setProperty("--navis-rdm-toolbar-height", `${height}px`);
++    }
++  };
++  const popupHost = Object.freeze({
++    acquire(ownerDocument) {
++      if (closed || ownerDocument !== document || frame.contentDocument !== document || !frame.isConnected) {
++        throw new Error("Responsive popup belongs to an obsolete document");
++      }
++      const lease = {};
++      leases.add(lease);
++      frame.classList.add("navis-responsive-popup-open");
++      // Expand before HTMLTooltip measures; its original dismissal still owns
++      // outside-click, keyboard and focus behavior.
++      return () => {
++        if (!leases.delete(lease) || closed) return;
++        if (!leases.size) frame.classList.remove("navis-responsive-popup-open");
++      };
++    },
++  });
++  frame.navisResponsivePopupHost = popupHost;
++  frame.classList.add("navis-android-responsive-ui");
++  const observer = new window.ResizeObserver(measure);
++  observer.observe(toolbar);
++  measure();
++  return () => {
++    if (closed) return;
++    closed = true;
++    observer.disconnect();
++    leases.clear();
++    if (frame.navisResponsivePopupHost === popupHost) delete frame.navisResponsivePopupHost;
++    frame.classList.remove("navis-responsive-popup-open", "navis-android-responsive-ui");
++    container.style.removeProperty("--navis-rdm-toolbar-height");
++    stylesheet.remove();
++  };
++}
++
++/** Real NotificationBox, with explicit reload and document-scoped lifetime. */
++export function createNavisResponsiveNotifications(window, browser, container) {
++  let closed = false;
++  let documentEpoch = 0;
++  let noticeHeight = 0;
++  const resize = new window.ResizeObserver(entries => {
++    if (closed) return;
++    for (const entry of entries) {
++      const next = Math.ceil(entry.target.getBoundingClientRect().height);
++      if (next !== noticeHeight) {
++        noticeHeight = next;
++        container.style.setProperty("--navis-notice-height", `${next}px`);
++      }
++    }
++  });
++  const box = new window.MozElements.NotificationBox(element => {
++    if (closed) return;
++    container.prepend(element);
++    resize.observe(element);
++  });
++  const append = box.appendNotification.bind(box);
++  box.appendNotification = async (value, options, ...args) => {
++    if (closed) throw new Error("Responsive notification host is closed");
++    const epoch = documentEpoch;
++    const notification = await append(value, options, ...args);
++    if (closed || epoch !== documentEpoch) { box.removeNotification(notification, true); return notification; }
++    if (value !== "devtools-responsive") return notification;
++    // Upstream first-use explanation, not proof this document needs a reload.
++    // Preserve its text and offer a deliberate action without discarding edits.
++    const button = window.document.createElement("button");
++    button.type = "button";
++    button.className = "navis-responsive-reload";
++    button.setAttribute("slot", "actions");
++    button.textContent = Services.strings.createBundle("chrome://devtools/locale/toolbox.properties")
++      .GetStringFromName("toolbox.debugTargetInfo.reload");
++    button.addEventListener("click", () => {
++      if (closed || epoch !== documentEpoch || !browser.browsingContext || browser.navisNativePresentation !== false) return;
++      // Keep Gecko's beforeunload / request / container behavior. Clear only
++      // when a new document commits, not merely because this button was pressed.
++      browser.reload();
++    });
++    notification.append(button);
++    return notification;
++  };
++  const progress = {
++    QueryInterface: ChromeUtils.generateQI(["nsIWebProgressListener", "nsISupportsWeakReference"]),
++    onLocationChange(webProgress, _request, _location, flags) {
++      if (closed || !webProgress.isTopLevel || flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT) return;
++      documentEpoch++;
++      const notice = box.getNotificationWithValue("devtools-responsive");
++      if (notice) box.removeNotification(notice, true);
++    },
++  };
++  browser.addProgressListener(progress, Ci.nsIWebProgress.NOTIFY_LOCATION);
++  return Object.freeze({ box, destroy() {
++    if (closed) return;
++    closed = true;
++    documentEpoch++;
++    resize.disconnect();
++    container.style.removeProperty("--navis-notice-height");
++    try { browser.removeProgressListener(progress); }
++    finally { box.removeAllNotifications(true); }
++  } });
++}
+diff --git a/mobile/shared/chrome/navis/responsive.css b/mobile/shared/chrome/navis/responsive.css
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/chrome/navis/responsive.css
+@@ -0,0 +1,29 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* Owned Navis Android iframe only: same controls, fonts, colors and handlers. */
++@media (max-width: 520px) {
++  #toolbar, #toolbar:not(.left-aligned) {
++    display: flex;
++    flex-wrap: wrap;
++    align-items: center;
++    justify-content: start;
++    gap: 2px;
++    padding: 2px;
++    background-image: none;
++  }
++  #toolbar-center-controls, #toolbar-end-controls { display: contents; }
++  #toolbar .devtools-separator { display: none; }
++  #toolbar::before { content: ""; order: 3; flex-basis: 100%; height: 0; }
++  #toolbar #device-selector { order: 0; flex: 1; min-width: 100px; max-width: none; margin-inline-start: 0; }
++  #toolbar .viewport-dimension { order: 1; flex: none; }
++  #toolbar #rotate-button { order: 2; flex: none; }
++  #toolbar #device-pixel-ratio-menu { order: 4; flex: none; }
++  #toolbar #network-throttling { order: 5; flex: 1; min-width: 70px; }
++  #toolbar #touch-simulation-button { order: 6; flex: none; }
++  #toolbar #screenshot-button { order: 7; flex: none; }
++  #toolbar #settings-button { order: 8; flex: none; }
++  #toolbar #exit-button { order: 9; flex: none; }
++  #toolbar #user-agent-label { order: 10; flex: 1 0 100%; margin: 0; }
++}

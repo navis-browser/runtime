@@ -1261,3 +1261,467 @@ diff --git a/toolkit/mozapps/extensions/internal/moz.build b/toolkit/mozapps/ext
      if CONFIG["MOZ_LOCAL_ML"]:
          EXTRA_JS_MODULES.addons += ["ModelHubProvider.sys.mjs"]
  
+diff --git a/dom/media/platforms/PDMFactory.cpp b/dom/media/platforms/PDMFactory.cpp
+index 6af74f901df0..f9dd4e6be1fe 100644
+--- a/dom/media/platforms/PDMFactory.cpp
++++ b/dom/media/platforms/PDMFactory.cpp
+@@ -819,7 +819,7 @@ already_AddRefed<PlatformDecoderModule> PDMFactory::GetDecoderModule(
+ void PDMFactory::SetCDMProxy(CDMProxy* aProxy) {
+   MOZ_ASSERT(aProxy);
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+   if (IsWidevineKeySystem(aProxy->KeySystem()) &&
+       AndroidDecoderModule::IsJavaDecoderModuleAllowed()) {
+     mEMEPDM = AndroidDecoderModule::Create(aProxy);
+diff --git a/dom/media/platforms/android/AndroidDecoderModule.cpp b/dom/media/platforms/android/AndroidDecoderModule.cpp
+index 13585c467ba8..632079ef4656 100644
+--- a/dom/media/platforms/android/AndroidDecoderModule.cpp
++++ b/dom/media/platforms/android/AndroidDecoderModule.cpp
+@@ -18,6 +18,10 @@
+ #include "nsPromiseFlatString.h"
+ #include "prlog.h"
+ 
++#ifdef MOZ_EME_API
++#  include "mozilla/MediaDrmCDMProxy.h"
++#endif
++
+ #undef LOG
+ #define LOG(arg, ...)                                                         \
+   MOZ_LOG_FMT(sAndroidDecoderModuleLog, mozilla::LogLevel::Debug,             \
+@@ -57,7 +61,11 @@ nsCString TranslateMimeType(const nsACString& aMimeType) {
+ }
+ 
+ AndroidDecoderModule::AndroidDecoderModule(CDMProxy* aProxy) {
+-  mProxy = static_cast<MediaDrmCDMProxy*>(aProxy);
++#ifdef MOZ_EME_API
++  mProxy = aProxy;
++#else
++  MOZ_ASSERT(!aProxy);
++#endif
+ }
+ 
+ /* static */ bool AndroidDecoderModule::AreSupportedMimeTypesReady() {
+@@ -336,12 +344,18 @@ already_AddRefed<MediaDataDecoder> AndroidDecoderModule::CreateVideoDecoder(
+   }
+ 
+   nsString drmStubId;
++#ifdef MOZ_EME_API
+   if (mProxy) {
+-    drmStubId = mProxy->GetMediaDrmStubId();
++    drmStubId =
++        static_cast<MediaDrmCDMProxy*>(mProxy.get())->GetMediaDrmStubId();
+   }
++  CDMProxy* proxy = mProxy.get();
++#else
++  CDMProxy* proxy = nullptr;
++#endif
+ 
+   RefPtr<MediaDataDecoder> decoder =
+-      RemoteDataDecoder::CreateVideoDecoder(aParams, drmStubId, mProxy);
++      RemoteDataDecoder::CreateVideoDecoder(aParams, drmStubId, proxy);
+   return decoder.forget();
+ }
+ 
+@@ -358,11 +372,17 @@ already_AddRefed<MediaDataDecoder> AndroidDecoderModule::CreateAudioDecoder(
+       config.mMimeType.get(), config.mRate, config.mChannels);
+ 
+   nsString drmStubId;
++#ifdef MOZ_EME_API
+   if (mProxy) {
+-    drmStubId = mProxy->GetMediaDrmStubId();
++    drmStubId =
++        static_cast<MediaDrmCDMProxy*>(mProxy.get())->GetMediaDrmStubId();
+   }
++  CDMProxy* proxy = mProxy.get();
++#else
++  CDMProxy* proxy = nullptr;
++#endif
+   RefPtr<MediaDataDecoder> decoder =
+-      RemoteDataDecoder::CreateAudioDecoder(aParams, drmStubId, mProxy);
++      RemoteDataDecoder::CreateAudioDecoder(aParams, drmStubId, proxy);
+   return decoder.forget();
+ }
+ 
+diff --git a/dom/media/platforms/android/AndroidDecoderModule.h b/dom/media/platforms/android/AndroidDecoderModule.h
+index 6ffbcf34e8e0..52488760f2c2 100644
+--- a/dom/media/platforms/android/AndroidDecoderModule.h
++++ b/dom/media/platforms/android/AndroidDecoderModule.h
+@@ -7,9 +7,12 @@
+ 
+ #include "MediaCodecsSupport.h"
+ #include "PlatformDecoderModule.h"
+-#include "mozilla/MediaDrmCDMProxy.h"
+ #include "mozilla/StaticPtr.h"  // for StaticAutoPtr
+ 
++#ifdef MOZ_EME_API
++#  include "mozilla/CDMProxy.h"
++#endif
++
+ namespace mozilla {
+ 
+ class AndroidDecoderModule : public PlatformDecoderModule {
+@@ -61,7 +64,9 @@ class AndroidDecoderModule : public PlatformDecoderModule {
+   static bool AreSupportedMimeTypesReady();
+   static bool IsSupportedCodecsReady();
+ 
+-  RefPtr<MediaDrmCDMProxy> mProxy;
++#ifdef MOZ_EME_API
++  RefPtr<CDMProxy> mProxy;
++#endif
+   // SW compatible MIME type strings
+   static inline StaticAutoPtr<nsTArray<nsCString>> sSupportedSwMimeTypes
+       MOZ_GUARDED_BY(sMutex);
+diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.cpp
+index e812f981e91d..7d4c30be706c 100644
+--- a/dom/media/eme/KeySystemConfig.cpp
++++ b/dom/media/eme/KeySystemConfig.cpp
+@@ -16,7 +16,7 @@
+ #  include "PDMFactory.h"
+ #  include "WMFDecoderModule.h"
+ #endif
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+ #  include "AndroidDecoderModule.h"
+ #  include "mozilla/java/MediaDrmProxyWrappers.h"
+ #  include "nsMimeTypes.h"
+@@ -31,6 +31,7 @@ namespace mozilla {
+ /* static */
+ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
+ #ifdef MOZ_WIDGET_ANDROID
++#  ifdef MOZ_EME_API
+   // Check if we can use MediaDrm for this keysystem.
+   if (mozilla::java::MediaDrmProxy::IsSchemeSupported(
+           NS_ConvertUTF16toUTF8(aKeySystem))) {
+@@ -41,6 +42,7 @@ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
+     return HaveGMPFor(nsCString(CHROMIUM_CDM_API),
+                       {NS_ConvertUTF16toUTF8(aKeySystem)});
+   }
++#  endif
+ #else
+ #  ifdef MOZ_WMF_CDM
+   // Test only, pretend we have already installed CDMs.
+@@ -130,14 +132,15 @@ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
+   config->mPersistentState = Requirement::Optional;
+   config->mDistinctiveIdentifier = Requirement::NotAllowed;
+   config->mSessionTypes.AppendElement(SessionType::Temporary);
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+   config->mSessionTypes.AppendElement(SessionType::PersistentLicense);
+ #endif
+   config->mAudioRobustness.AppendElement(u"SW_SECURE_CRYPTO"_ns);
+   config->mVideoRobustness.AppendElement(u"SW_SECURE_CRYPTO"_ns);
+   config->mVideoRobustness.AppendElement(u"SW_SECURE_DECODE"_ns);
+ 
+-#if defined(MOZ_WIDGET_ANDROID)
++#ifdef MOZ_WIDGET_ANDROID
++#  ifdef MOZ_EME_API
+   // MediaDrm.isCryptoSchemeSupported only allows passing
+   // "video/mp4" or "video/webm" for mimetype string.
+   // See
+@@ -185,6 +188,7 @@ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
+       }
+     }
+   }
++#  endif
+ #else
+ #  if defined(XP_WIN)
+   // Widevine CDM doesn't include an AAC decoder. So if WMF can't
+diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySystemAccess.cpp
+index 58158272ebca..850ec04803a0 100644
+--- a/dom/media/eme/MediaKeySystemAccess.cpp
++++ b/dom/media/eme/MediaKeySystemAccess.cpp
+@@ -32,7 +32,7 @@
+ #  include "PDMFactory.h"
+ #  include "WMFDecoderModule.h"
+ #endif
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+ #  include "mozilla/java/MediaDrmProxyWrappers.h"
+ #endif
+ 
+@@ -158,7 +158,7 @@ MediaKeySystemStatus MediaKeySystemAccess::GetKeySystemStatus(
+         return MediaKeySystemStatus::Cdm_disabled;
+       }
+       return EnsureCDMInstalled(keySystem, SecureLevel::Software, aOutMessage);
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+     } else if (Preferences::GetBool("media.mediadrm-widevinecdm.visible",
+                                     false)) {
+       bool supported =
+diff --git a/dom/media/eme/MediaKeys.cpp b/dom/media/eme/MediaKeys.cpp
+index 6b7f54395612..813b5661e2a6 100644
+--- a/dom/media/eme/MediaKeys.cpp
++++ b/dom/media/eme/MediaKeys.cpp
+@@ -27,7 +27,7 @@
+ #include "nsPrintfCString.h"
+ #include "nsServiceManagerUtils.h"
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+ #  include "AndroidDecoderModule.h"
+ #  include "mozilla/MediaDrmCDMProxy.h"
+ #  include "mozilla/RemoteCDMProxy.h"
+@@ -439,7 +439,7 @@ already_AddRefed<CDMProxy> MediaKeys::CreateCDMProxy() {
+   EME_LOG("MediaKeys[{}]::CreateCDMProxy(), isHardwareDecryptionSupported={}",
+           fmt::ptr(this), isHardwareDecryptionSupported);
+   RefPtr<CDMProxy> proxy;
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+   if (IsWidevineKeySystem(mKeySystem)) {
+     if (AndroidDecoderModule::IsJavaDecoderModuleAllowed()) {
+       proxy = new MediaDrmCDMProxy(
+diff --git a/dom/media/ipc/RemoteCDMProxy.cpp b/dom/media/ipc/RemoteCDMProxy.cpp
+index 948e7a9fc136..139ee87357b1 100644
+--- a/dom/media/ipc/RemoteCDMProxy.cpp
++++ b/dom/media/ipc/RemoteCDMProxy.cpp
+@@ -8,7 +8,7 @@
+ #include "mozilla/RemoteDecodeUtils.h"
+ #include "mozilla/dom/MediaKeySession.h"
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+ #  include "mozilla/MediaDrmProvisioningHelper.h"
+ #endif
+ 
+@@ -42,7 +42,7 @@ void RemoteCDMProxy::OnProvision(
+     const RemoteCDMProvisionRequestIPDL& aRequest,
+     PRemoteCDMChild::ProvisionResolver&& aResolver) {
+   LOGD("[{}] RemoteCDMProxy::OnProvision", fmt::ptr(this));
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+   auto helper =
+       MakeRefPtr<MediaDrmProvisioningHelper>(aRequest, std::move(aResolver));
+   helper->Provision();
+diff --git a/dom/media/ipc/RemoteMediaManagerParent.cpp b/dom/media/ipc/RemoteMediaManagerParent.cpp
+index ebb5c567a519..d9c15e630dbe 100644
+--- a/dom/media/ipc/RemoteMediaManagerParent.cpp
++++ b/dom/media/ipc/RemoteMediaManagerParent.cpp
+@@ -33,7 +33,7 @@
+ #  include "MFCDMParent.h"
+ #endif
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+ #  include "mozilla/MediaDrmRemoteCDMParent.h"
+ #endif
+ 
+@@ -279,7 +279,7 @@ already_AddRefed<PMFCDMParent> RemoteMediaManagerParent::AllocPMFCDMParent(
+ 
+ already_AddRefed<PRemoteCDMParent>
+ RemoteMediaManagerParent::AllocPRemoteCDMParent(const nsAString& aKeySystem) {
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+   return MakeAndAddRef<MediaDrmRemoteCDMParent>(aKeySystem);
+ #else
+   return nullptr;
+diff --git a/dom/media/platforms/ffmpeg/FFmpegAudioDecoder.cpp b/dom/media/platforms/ffmpeg/FFmpegAudioDecoder.cpp
+index 1c45d95efe7f..d9b04e64cfda 100644
+--- a/dom/media/platforms/ffmpeg/FFmpegAudioDecoder.cpp
++++ b/dom/media/platforms/ffmpeg/FFmpegAudioDecoder.cpp
+@@ -454,7 +454,8 @@ MediaResult FFmpegAudioDecoder<LIBAV_VER>::DoDecode(MediaRawData* aSample,
+   mLib->av_init_packet(packet);
+ #endif
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX)
++#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX) && \
++    defined(MOZ_EME_API)
+   MediaResult ret = MaybeAttachCryptoInfo(aSample, packet);
+   if (NS_FAILED(ret)) {
+     return ret;
+diff --git a/dom/media/platforms/ffmpeg/FFmpegDataDecoder.cpp b/dom/media/platforms/ffmpeg/FFmpegDataDecoder.cpp
+index 106cebbb3ca2..30dfbe894329 100644
+--- a/dom/media/platforms/ffmpeg/FFmpegDataDecoder.cpp
++++ b/dom/media/platforms/ffmpeg/FFmpegDataDecoder.cpp
+@@ -20,7 +20,8 @@
+ #include "mozilla/TaskQueue.h"
+ #include "prsystem.h"
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION)
++#if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION) && \
++    defined(MOZ_EME_API)
+ #  include "mozilla/MediaDrmRemoteCDMParent.h"
+ #endif
+ 
+@@ -45,7 +46,8 @@ FFmpegDataDecoder<LIBAV_VER>::FFmpegDataDecoder(const FFmpegLibWrapper* aLib,
+   MOZ_ASSERT(aLib);
+   MOZ_COUNT_CTOR(FFmpegDataDecoder);
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION)
++#if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION) && \
++    defined(MOZ_EME_API)
+   if (aCDM) {
+     if (PRemoteCDMParent* parentCDM = aCDM->AsPRemoteCDMParent()) {
+       mCDM = static_cast<MediaDrmRemoteCDMParent*>(parentCDM);
+@@ -122,7 +124,8 @@ MediaResult FFmpegDataDecoder<LIBAV_VER>::InitSWDecoder(
+   return InitDecoder(codec, aOptions);
+ }
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX)
++#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX) && \
++    defined(MOZ_EME_API)
+ /* static */
+ void FFmpegDataDecoder<LIBAV_VER>::CryptoInfoAddRef(void* aCryptoInfo) {
+   reinterpret_cast<MediaDrmCryptoInfo*>(aCryptoInfo)->AddRef();
+@@ -253,7 +256,8 @@ MediaResult FFmpegDataDecoder<LIBAV_VER>::InitDecoder(AVCodec* aCodec,
+   }
+ #endif
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX)
++#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX) && \
++    defined(MOZ_EME_API)
+   ret = MaybeAttachCDM();
+   if (NS_FAILED(ret)) {
+     ReleaseCodecContext();
+diff --git a/dom/media/platforms/ffmpeg/FFmpegDataDecoder.h b/dom/media/platforms/ffmpeg/FFmpegDataDecoder.h
+index 4a27236733fc..815c3e5f8dad 100644
+--- a/dom/media/platforms/ffmpeg/FFmpegDataDecoder.h
++++ b/dom/media/platforms/ffmpeg/FFmpegDataDecoder.h
+@@ -13,7 +13,8 @@
+ #include "FFmpegLibs.h"
+ 
+ namespace mozilla {
+-#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX)
++#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX) && \
++    defined(MOZ_EME_API)
+ class MediaDrmCrypto;
+ class MediaDrmRemoteCDMParent;
+ #endif
+@@ -66,7 +67,8 @@ class FFmpegDataDecoder<LIBAV_VER>
+   MediaResult DoDecode(MediaRawData* aSample, bool* aGotFrame,
+                        DecodedData& aResults);
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX)
++#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX) && \
++    defined(MOZ_EME_API)
+   static void CryptoInfoAddRef(void* aCryptoInfo);
+   static void CryptoInfoRelease(void* aCryptoInfo);
+   MediaResult MaybeAttachCryptoInfo(MediaRawData* aSample, AVPacket* aPacket);
+@@ -81,7 +83,8 @@ class FFmpegDataDecoder<LIBAV_VER>
+   AVCodecParserContext* mCodecParser;
+   AVFrame* mFrame;
+   RefPtr<MediaByteBuffer> mExtraData;
+-#if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION)
++#if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION) && \
++    defined(MOZ_EME_API)
+   RefPtr<MediaDrmCrypto> mCrypto;
+   RefPtr<MediaDrmRemoteCDMParent> mCDM;
+ #endif
+diff --git a/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp b/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
+index 325c1e2149fb..51727d209bd1 100644
+--- a/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
++++ b/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
+@@ -117,7 +117,9 @@
+ 
+ #if defined(MOZ_WIDGET_ANDROID) && defined(FFVPX_VERSION)
+ #  include "AnnexB.h"
+-#  include "mozilla/MediaDrmRemoteCDMParent.h"
++#  ifdef MOZ_EME_API
++#    include "mozilla/MediaDrmRemoteCDMParent.h"
++#  endif
+ #endif
+ 
+ #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
+@@ -806,7 +808,7 @@ void FFmpegVideoDecoder<LIBAV_VER>::PtsCorrectionContext::Reset() {
+ bool FFmpegVideoDecoder<LIBAV_VER>::ShouldDisableHWDecoding(
+     bool aDisableHardwareDecoding) const {
+ #  ifdef MOZ_WIDGET_ANDROID
+-#    ifdef FFVPX_VERSION
++#    if defined(FFVPX_VERSION) && defined(MOZ_EME_API)
+   // We only support decrypt and decode with MediaCodec.
+   if (mCDM) {
+     FFMPEG_LOG("CDM requires platform decoder");
+@@ -1558,7 +1560,8 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::DoDecode(
+         aId, flag);
+   });
+ 
+-#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX)
++#if defined(MOZ_WIDGET_ANDROID) && defined(USING_MOZFFVPX) && \
++    defined(MOZ_EME_API)
+   MediaResult ret = MaybeAttachCryptoInfo(aSample, packet);
+   if (NS_FAILED(ret)) {
+     return ret;
+@@ -3123,7 +3126,7 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::InitMediaCodecDecoder() {
+     return ret;
+   }
+ 
+-#  ifdef USING_MOZFFVPX
++#  if defined(USING_MOZFFVPX) && defined(MOZ_EME_API)
+   ret = MaybeAttachCDM();
+   if (NS_FAILED(ret)) {
+     FFMPEG_LOG("  failed to attach CDM.");
+diff --git a/dom/media/systemservices/MediaParent.cpp b/dom/media/systemservices/MediaParent.cpp
+index fe31248d9642..9b335ac90760 100644
+--- a/dom/media/systemservices/MediaParent.cpp
++++ b/dom/media/systemservices/MediaParent.cpp
+@@ -22,7 +22,7 @@
+ #include "nsNetCID.h"
+ #include "nsNetUtil.h"
+ #include "nsThreadUtils.h"
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+ #  include "mozilla/MediaDrmRemoteCDMParent.h"
+ #endif
+ 
+@@ -495,7 +495,7 @@ mozilla::ipc::IPCResult Parent<Super>::RecvSanitizeOriginKeys(
+       NewRunnableFrom(
+           [this, that, profileDir, aSinceWhen, aOnlyPrivateBrowsing]() {
+             MOZ_ASSERT(!NS_IsMainThread());
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_EME_API)
+             // Collect all removed origin keys so we can revoke any
+             // per-origin MediaDRM provisioning. This includes keys that
+             // were only used by enumerateDevices and never for DRM;
+diff --git a/widget/android/moz.build b/widget/android/moz.build
+index 25b6911135d0..8c40ce7ba2ef 100644
+--- a/widget/android/moz.build
++++ b/widget/android/moz.build
+@@ -21,7 +21,12 @@ EXPORTS += [
+     "AndroidBridge.h",
+ ]
+ 
+-classes_with_WrapForJNI = [
++classes_with_WrapForJNI = []
++
++if CONFIG["MOZ_EME_API"]:
++    classes_with_WrapForJNI += ["MediaDrmProxy"]
++
++classes_with_WrapForJNI += [
+     "AndroidGamepadManager",
+     "AndroidVsync",
+     "Base64Utils",
+@@ -63,7 +68,6 @@ classes_with_WrapForJNI = [
+     "HardwareCodecCapabilityUtils",
+     "Image",
+     "ImageDecoder",
+-    "MediaDrmProxy",
+     "MozLog",
+     "PanZoomController",
+     "Sample",
+diff --git a/dom/media/platforms/android/RemoteDataDecoder.h b/dom/media/platforms/android/RemoteDataDecoder.h
+index dd81e22d4ba6..f0c1c5790316 100644
+--- a/dom/media/platforms/android/RemoteDataDecoder.h
++++ b/dom/media/platforms/android/RemoteDataDecoder.h
+@@ -6,6 +6,7 @@
+ #define RemoteDataDecoder_h_
+ 
+ #include "AndroidDecoderModule.h"
++#include "MediaCodec.h"
+ #include "SurfaceTexture.h"
+ #include "TimeUnits.h"
+ #include "mozilla/Maybe.h"
+diff --git a/mobile/android/installer/package-manifest.in b/mobile/android/installer/package-manifest.in
+index b16d2c3df257..e244c91a8368 100644
+--- a/mobile/android/installer/package-manifest.in
++++ b/mobile/android/installer/package-manifest.in
+@@ -83,8 +83,10 @@
+ @BINPATH@/@DLL_PREFIX@crashtools@DLL_SUFFIX@
+ #endif
+ 
++#ifdef MOZ_EME_API
+ ; GMP clearkey plugin
+ @BINPATH@/@DLL_PREFIX@clearkey@DLL_SUFFIX@
++#endif
+ 
+ [browser]
+ ; [Base Browser Files]

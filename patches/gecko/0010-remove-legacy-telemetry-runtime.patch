@@ -1178,7 +1178,7 @@ diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/m
 index 74d738e46fe5..333333333333 100644
 --- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
 +++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
-@@ -3101,6 +3101,8 @@ export var XPIProvider = {
+@@ -3101,7 +3101,9 @@ export var XPIProvider = {
      try {
        Services.appinfo.annotateCrashReport("Add-ons", data);
      } catch (e) {}
@@ -1189,3 +1189,152 @@ index 74d738e46fe5..333333333333 100644
 +    }
    },
  
+diff --git a/toolkit/components/satchel/integrations/FirefoxRelay.sys.mjs b/toolkit/components/satchel/integrations/FirefoxRelay.sys.mjs
+--- a/toolkit/components/satchel/integrations/FirefoxRelay.sys.mjs
++++ b/toolkit/components/satchel/integrations/FirefoxRelay.sys.mjs
+@@ -8,7 +8,6 @@ import {
+   ParentAutocompleteOption,
+ } from "resource://gre/modules/LoginHelper.sys.mjs";
+ import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+-import { TelemetryUtils } from "resource://gre/modules/TelemetryUtils.sys.mjs";
+ import { showConfirmation } from "resource://gre/modules/FillHelpers.sys.mjs";
+ 
+ const lazy = {};
+@@ -1098,7 +1097,7 @@ export var FirefoxRelay = {
+     // allows us to link users' interaction on different UI component (Ex. autocomplete, notification)
+     // We can use flowID to build the Funnel Diagram
+     // This value need to always be regenerated in the entry point of an user
+     // action so we overwrite the previous one.
+-    gFlowId = TelemetryUtils.generateUUID();
++    gFlowId = Services.uuid.generateUUID().toString().slice(1, -1);
+ 
+     if (this.implementation.autocompleteItemsAsync) {
+       for await (const item of this.implementation.autocompleteItemsAsync(
+diff --git a/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
+--- a/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
+@@ -4,6 +4,7 @@
+ 
+ import { GeckoViewModule } from "resource://gre/modules/GeckoViewModule.sys.mjs";
+ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = {};
+ 
+@@ -478,10 +479,12 @@ class StateTracker extends Tracker {
+       success: aIsSuccess,
+     });
+ 
+-    lazy.BrowserTelemetryUtils.recordSiteOriginTelemetry(
+-      Services.wm.getEnumerator("navigator:geckoview"),
+-      true
+-    );
++    if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      lazy.BrowserTelemetryUtils.recordSiteOriginTelemetry(
++        Services.wm.getEnumerator("navigator:geckoview"),
++        true
++      );
++    }
+   }
+ 
+   onStateChange(aWebProgress, aRequest, aStateFlags, aStatus) {
+diff --git a/devtools/client/shared/telemetry.js b/devtools/client/shared/telemetry.js
+--- a/devtools/client/shared/telemetry.js
++++ b/devtools/client/shared/telemetry.js
+@@ -13,9 +13,14 @@
+ const {
+   getNthPathExcluding,
+ } = require("resource://devtools/shared/platform/stack.js");
+-const { TelemetryEnvironment } = ChromeUtils.importESModule(
+-  "resource://gre/modules/TelemetryEnvironment.sys.mjs"
++const { AppConstants } = ChromeUtils.importESModule(
++  "resource://gre/modules/AppConstants.sys.mjs"
+ );
++const TelemetryEnvironment = AppConstants.MOZ_OBSERVABILITY_RUNTIME
++  ? ChromeUtils.importESModule(
++      "resource://gre/modules/TelemetryEnvironment.sys.mjs"
++    ).TelemetryEnvironment
++  : null;
+ const WeakMapMap = require("resource://devtools/client/shared/WeakMapMap.js");
+ 
+ // Object to be shared among all instances.
+@@ -49,6 +54,10 @@ class Telemetry {
+   }
+ 
+   get osNameAndVersion() {
++    if (!TelemetryEnvironment) {
++      return "Unknown OS";
++    }
++
+     const osInfo = TelemetryEnvironment.currentEnvironment.system.os;
+ 
+     if (!osInfo) {
+diff --git a/toolkit/mozapps/extensions/AddonManager.sys.mjs b/toolkit/mozapps/extensions/AddonManager.sys.mjs
+--- a/toolkit/mozapps/extensions/AddonManager.sys.mjs
++++ b/toolkit/mozapps/extensions/AddonManager.sys.mjs
+@@ -92,7 +92,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   Extension: "resource://gre/modules/Extension.sys.mjs",
+   ObjectUtils: "resource://gre/modules/ObjectUtils.sys.mjs",
+   RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
+-  TelemetryUtils: "resource://gre/modules/TelemetryUtils.sys.mjs",
+   isGatedPermissionType:
+     "resource://gre/modules/addons/siteperms-addon-utils.sys.mjs",
+   isKnownPublicSuffix:
+@@ -193,6 +192,11 @@ const GMP_PROVIDER_REGISTERED_TOPIC = "gmp-provider-registered";
+ // The maximum length of strings collected in the Glean addons.activeAddons/activeTheme/activeGMPlugins
+ // metrics properties (e.g. description).
+ const MAX_ADDON_STRING_LENGTH = 100;
++const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
++
++function millisecondsToDays(milliseconds) {
++  return Math.floor(milliseconds / MILLISECONDS_PER_DAY);
++}
+ 
+ const UNNAMED_PROVIDER = "<unnamed-provider>";
+ function providerName(aProvider) {
+@@ -5235,9 +5239,7 @@ export class EnvironmentAddonBuilder {
+           ),
+           scope: addon.scope,
+           type: addon.type,
+-          updateDay: lazy.TelemetryUtils.millisecondsToDays(
+-            updateDate.getTime()
+-          ),
++          updateDay: millisecondsToDays(updateDate.getTime()),
+           isSystem: addon.isSystem,
+           isWebExtension: addon.isWebExtension,
+           multiprocessCompatible: true,
+@@ -5264,9 +5266,7 @@ export class EnvironmentAddonBuilder {
+             appDisabled: addon.appDisabled,
+             foreignInstall: this.enforceBoolean(addon.foreignInstall),
+             hasBinaryComponents: false,
+-            installDay: lazy.TelemetryUtils.millisecondsToDays(
+-              installDate.getTime()
+-            ),
++            installDay: millisecondsToDays(installDate.getTime()),
+             signedState: addon.signedState,
+             signedTypes: JSON.stringify(addon.signedTypes),
+             quarantineIgnoredByApp: this.enforceBoolean(
+@@ -5324,10 +5324,8 @@ export class EnvironmentAddonBuilder {
+         scope: theme.scope,
+         foreignInstall: this.enforceBoolean(theme.foreignInstall),
+         hasBinaryComponents: false,
+-        installDay: lazy.TelemetryUtils.millisecondsToDays(
+-          installDate.getTime()
+-        ),
+-        updateDay: lazy.TelemetryUtils.millisecondsToDays(updateDate.getTime()),
++        installDay: millisecondsToDays(installDate.getTime()),
++        updateDay: millisecondsToDays(updateDate.getTime()),
+         signedState: theme.signedState,
+         signedTypes: JSON.stringify(theme.signedTypes),
+       };
+@@ -5400,6 +5398,10 @@ AMTelemetry = {
+   // init the telemetry event category and start listening for the events related to the
+   // addons installation and management.
+   onStartup() {
++    if (!AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      return;
++    }
++
+     if (this.telemetrySetupDone) {
+       return;
+     }

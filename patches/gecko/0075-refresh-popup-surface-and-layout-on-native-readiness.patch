@@ -1,0 +1,77 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+@@ -147,9 +147,22 @@
+     if (!changed || mReleased) {
+       return;
+     }
++    refreshSurface();
++  }
++
++  // Match the ordinary Navis render host: a Surface can precede native/window
++  // readiness, and compositor resume alone does not resize Gecko's chrome
++  // widget. Replay both the Surface and layout bounds at either readiness edge.
++  private void refreshSurface() {
++    if (mReleased || mFailed) return;
++    final SurfaceHolder holder = mSurfaceView.getHolder();
++    final int width = mSurfaceView.getWidth();
++    final int height = mSurfaceView.getHeight();
++    if (width <= 0 || height <= 0 || !holder.getSurface().isValid()) return;
++    mSession.onSurfaceChanged(0, 0, width, height, holder.getSurface());
+     final int[] location = new int[2];
+-    getLocationInWindow(location);
+-    mSession.onBoundsChanged(location[0], location[1], getWidth(), getHeight());
++    mSurfaceView.getLocationInWindow(location);
++    mSession.onBoundsChanged(location[0], location[1], width, height);
+   }
+ 
+   @Override
+@@ -164,15 +177,13 @@
+   private final class SurfaceCallback implements SurfaceHolder.Callback {
+     @Override
+     public void surfaceCreated(final SurfaceHolder holder) {
+-      // The dimensions are delivered by surfaceChanged immediately on normal Android paths.
++      refreshSurface();
+     }
+ 
+     @Override
+     public void surfaceChanged(
+         final SurfaceHolder holder, final int format, final int width, final int height) {
+-      if (!mReleased && width > 0 && height > 0 && holder.getSurface().isValid()) {
+-        mSession.onSurfaceChanged(0, 0, width, height, holder.getSurface());
+-      }
++      refreshSurface();
+     }
+ 
+     @Override
+@@ -263,7 +274,9 @@
+ 
+   private final class SessionDelegate implements NavisAndroidSession.Delegate {
+     @Override
+-    public void onNativeWindowReady(final long sessionId) {}
++    public void onNativeWindowReady(final long sessionId) {
++      refreshSurface();
++    }
+ 
+     @Override
+     public void onHostReady(final long sessionId) {
+@@ -329,13 +342,17 @@
+     public void onSecurityChanged(final long sessionId, final int securityState) {}
+ 
+     @Override
+-    public void onCompositorAttached(final long sessionId) {}
++    public void onCompositorAttached(final long sessionId) {
++      refreshSurface();
++    }
+ 
+     @Override
+     public void onCompositorDetached(final long sessionId) {}
+ 
+     @Override
+-    public void onNewSurfaceRequired(final long sessionId) {}
++    public void onNewSurfaceRequired(final long sessionId) {
++      refreshSurface();
++    }
+ 
+     @Override
+     public void onSessionError(final long sessionId, final String message) {

@@ -48,10 +48,17 @@ function getSelectedSetting() {
 }
 
 export function initializeDesktopLocale() {
-  processLocale ??= resolveDesktopLocale(
-    getSelectedSetting(),
-    getSystemLocale()
-  );
+  if (processLocale === null) {
+    processLocale = resolveDesktopLocale(
+      getSelectedSetting(),
+      getSystemLocale(),
+    );
+    // Navis-owned UI reads processLocale, while upstream Gecko surfaces such
+    // as DevTools read LocaleService. Keep both on one frozen process choice;
+    // the packaged zh-CN resources become available during AddonManager
+    // startup and LocaleService renegotiates before DevTools is loaded.
+    Services.locale.requestedLocales = [processLocale];
+  }
   return processLocale;
 }
 

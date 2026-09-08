@@ -1,0 +1,412 @@
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+index b63d6a7..399beff 100644
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -123,7 +123,6 @@ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+         "qrcode",
+         "reader",
+         "reportbrokensite",
+-        "search",
+         "shell",
+         "thumbnails",
+         "timermanager",
+diff --git a/toolkit/components/search/moz.build b/toolkit/components/search/moz.build
+index 2ef3908..f189485 100644
+--- a/toolkit/components/search/moz.build
++++ b/toolkit/components/search/moz.build
+@@ -18,7 +18,6 @@ MOZ_SRC_FILES += [
+     "OpenSearchParser.sys.mjs",
+     "PolicySearchEngine.sys.mjs",
+     "SearchEngine.sys.mjs",
+-    "SearchEngineSelector.sys.mjs",
+     "SearchService.sys.mjs",
+     "SearchSettings.sys.mjs",
+     "SearchShortcuts.sys.mjs",
+@@ -28,13 +27,10 @@ MOZ_SRC_FILES += [
+     "UserSearchEngine.sys.mjs",
+ ]
+ 
+-EXTRA_JS_MODULES += [
+-    "SearchSuggestions.sys.mjs",
+-]
+-
+-XPCOM_MANIFESTS += [
+-    "components.conf",
+-]
++if not CONFIG["MOZ_NAVIS_CORE"]:
++    MOZ_SRC_FILES += ["SearchEngineSelector.sys.mjs"]
++    EXTRA_JS_MODULES += ["SearchSuggestions.sys.mjs"]
++    XPCOM_MANIFESTS += ["components.conf"]
+ 
+ TESTING_JS_MODULES += [
+     "tests/SearchTestUtils.sys.mjs",
+diff --git a/toolkit/components/search/SearchService.sys.mjs b/toolkit/components/search/SearchService.sys.mjs
+index 2d0f0d1..94347d5 100644
+--- a/toolkit/components/search/SearchService.sys.mjs
++++ b/toolkit/components/search/SearchService.sys.mjs
+@@ -5,8 +5,10 @@
+ /* eslint no-shadow: error, mozilla/no-aArgs: error */
+ 
+ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = XPCOMUtils.declareLazy({
++  NAVIS_SEARCH_CATALOGUE: "resource://gre/modules/NavisSearchPolicy.sys.mjs",
+   AddonManager: "resource://gre/modules/AddonManager.sys.mjs",
+   AppProvidedConfigEngine:
+     "moz-src:///toolkit/components/search/ConfigSearchEngine.sys.mjs",
+@@ -540,6 +542,9 @@ export const SearchService = new (class SearchService {
+    * long enough.
+    */
+   async runBackgroundChecks() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     await this.init();
+     await this.#migrateLegacyEngines();
+     await this.#checkWebExtensionEngines();
+@@ -763,6 +768,11 @@ export const SearchService = new (class SearchService {
+    *   An Extension object containing data about the extension.
+    */
+   async addEngineFromExtension(extension) {
++    // Navis extensions consume the product search API; they do not install a
++    // second catalogue through Firefox chrome_settings_overrides.
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     // Treat add-on upgrade and downgrades the same - either way, the search
+     // engine gets updated, not added. Generally, we don't expect a downgrade,
+     // but just in case...
+@@ -1557,6 +1567,9 @@ export const SearchService = new (class SearchService {
+    *
+    */
+   #doPreInitWork() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     // We need to catch the region being updated during initialization so we
+     // start listening straight away.
+     if (!this.#earlyObserversAdded) {
+@@ -1672,6 +1685,9 @@ export const SearchService = new (class SearchService {
+    *
+    */
+   #doPostInitWork() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     this.#maybeStartOpenSearchUpdateTimer();
+ 
+     if (this.#startupRemovedExtensions.size) {
+@@ -1832,7 +1848,8 @@ export const SearchService = new (class SearchService {
+         : this.#searchDefault
+     );
+ 
+-    if (Services.policies?.status == Ci.nsIEnterprisePolicies.ACTIVE) {
++    if (!AppConstants.MOZ_NAVIS_CORE &&
++        Services.policies?.status == Ci.nsIEnterprisePolicies.ACTIVE) {
+       let activePolicies = Services.policies.getActivePolicies();
+       if (activePolicies.SearchEngines) {
+         let policyDefault =
+@@ -1881,6 +1898,36 @@ export const SearchService = new (class SearchService {
+    *   The refined search configuration for this user.
+    */
+   async #loadEngines(settings, refinedConfig) {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      // Keep Gecko's user-engine loader, settings, ordering, default fallback,
++      // observers and atomic persistence. Only product catalogue policy differs.
++      await this.#loadEnginesFromSettings({
++        ...settings,
++        engines: (settings.engines ?? []).filter(engine =>
++          engine._loadPath === "[user]" && engine._metaData?.["navis-provider-id"]
++        ),
++      }, []);
++      for (const provider of lazy.NAVIS_SEARCH_CATALOGUE) {
++        if ([...this._engines.values()].some(engine =>
++          engine.getAttr("navis-provider-id") === provider.id)) {
++          continue;
++        }
++        const engine = new lazy.UserSearchEngine({ formInfo: {
++          name: provider.name, url: provider.template,
++          suggestUrl: provider.suggestionTemplate || undefined,
++        } });
++        engine.setAttr("navis-provider-id", provider.id);
++        engine.setAttr("navis-display-name", provider.name);
++        engine.setAttr("order", this._engines.size + 1);
++        this.#addEngineToStore(engine);
++      }
++      this.#searchDefault = [...this._engines.values()].find(engine =>
++        engine.getAttr("navis-provider-id") === "google").id;
++      this.#searchPrivateDefault = this.#searchDefault;
++      this._settings.setMetaDataAttribute("useSavedOrder", true);
++      this._settings.setMetaDataAttribute("appDefaultEngineId", this.#searchDefault);
++      return;
++    }
+     // Get user's current settings and search engine before we load engines from
+     // config. These values will be compared after engines are loaded.
+     let prevMetaData = { ...settings?.metaData };
+@@ -2168,6 +2215,9 @@ export const SearchService = new (class SearchService {
+    *   The reason reload engines is being called.
+    */
+   async #maybeReloadEngines(changeReason) {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     if (this.#maybeReloadDebounce) {
+       lazy.logConsole.debug("We're already waiting to reload engines.");
+       return;
+@@ -2803,6 +2853,9 @@ export const SearchService = new (class SearchService {
+   // This is prefixed with _ rather than # because it is
+   // called in test_remove_engine_notification_box.js
+   async _fetchEngineSelectorEngines() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return { engines: [] };
++    }
+     let searchEngineSelectorProperties = {
+       locale: Services.locale.appLocaleAsBCP47,
+       region: lazy.Region.home || "unknown",
+@@ -3030,6 +3083,9 @@ export const SearchService = new (class SearchService {
+    * Run during the background checks, or when the list of engines changes.
+    */
+   #updateEngineTotalsTelemetry() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     /** @type {(keyof typeof Glean.searchCounts.totals)[]} */
+     const SEARCH_COUNTS_TOTALS_LABELS = [
+       "addon",
+@@ -3421,7 +3477,7 @@ export const SearchService = new (class SearchService {
+       : this.appDefaultEngine;
+     if (
+       newCurrentEngine == appDefaultEngine &&
+-      !this.#lazyPrefs.experimentPrefValue
++      (AppConstants.MOZ_NAVIS_CORE || !this.#lazyPrefs.experimentPrefValue)
+     ) {
+       newId = "";
+     }
+@@ -3591,6 +3647,9 @@ export const SearchService = new (class SearchService {
+     newEngine,
+     changeReason = this.CHANGE_REASON.UNKNOWN
+   ) {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     let engineInfo;
+     // If we are toggling the separate private browsing settings, we might not
+     // have an engine to record.
+@@ -3624,6 +3683,9 @@ export const SearchService = new (class SearchService {
+    * telemetry.
+    */
+   #recordDefaultEngineTelemetryData() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     let engineInfo = this.#getEngineInfo(this.defaultEngine);
+ 
+     Glean.searchEngineDefault.providerId.set(engineInfo.providerId);
+@@ -3743,7 +3805,9 @@ export const SearchService = new (class SearchService {
+ 
+     Services.obs.addObserver(this, lazy.SearchUtils.TOPIC_ENGINE_MODIFIED);
+     Services.obs.addObserver(this, QUIT_APPLICATION_TOPIC);
+-    Services.obs.addObserver(this, TOPIC_LOCALES_CHANGE);
++    if (!AppConstants.MOZ_NAVIS_CORE) {
++      Services.obs.addObserver(this, TOPIC_LOCALES_CHANGE);
++    }
+ 
+     this._settings.addObservers();
+ 
+@@ -3800,10 +3864,14 @@ export const SearchService = new (class SearchService {
+ 
+     this._settings.removeObservers();
+ 
+-    Services.obs.removeObserver(this, lazy.Region.REGION_TOPIC);
++    if (!AppConstants.MOZ_NAVIS_CORE) {
++      Services.obs.removeObserver(this, lazy.Region.REGION_TOPIC);
++    }
+     Services.obs.removeObserver(this, lazy.SearchUtils.TOPIC_ENGINE_MODIFIED);
+     Services.obs.removeObserver(this, QUIT_APPLICATION_TOPIC);
+-    Services.obs.removeObserver(this, TOPIC_LOCALES_CHANGE);
++    if (!AppConstants.MOZ_NAVIS_CORE) {
++      Services.obs.removeObserver(this, TOPIC_LOCALES_CHANGE);
++    }
+     this.#observersAdded = false;
+     this.#earlyObserversAdded = false;
+   }
+@@ -3879,7 +3947,7 @@ export const SearchService = new (class SearchService {
+           }
+         });
+         break;
+-      case lazy.Region.REGION_TOPIC:
++      case AppConstants.MOZ_NAVIS_CORE ? "navis-unused-region-topic" : lazy.Region.REGION_TOPIC:
+         lazy.logConsole.debug("Region updated:", lazy.Region.home);
+         this.#maybeReloadEngines(this.CHANGE_REASON.REGION).catch(
+           console.error
+@@ -3940,6 +4008,9 @@ export const SearchService = new (class SearchService {
+    *   The name of the new default search engine.
+    */
+   _showSearchSettingsResetNotificationBox(newEngine) {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     lazy.BrowserUtils.callModulesFromCategory(
+       { categoryName: "search-service-notification" },
+       "search-settings-reset",
+diff --git a/toolkit/components/search/SearchSettings.sys.mjs b/toolkit/components/search/SearchSettings.sys.mjs
+index ef25823..85c0458 100644
+--- a/toolkit/components/search/SearchSettings.sys.mjs
++++ b/toolkit/components/search/SearchSettings.sys.mjs
+@@ -3,6 +3,7 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = XPCOMUtils.declareLazy({
+   AddonManager: "resource://gre/modules/AddonManager.sys.mjs",
+@@ -313,6 +314,7 @@ export class SearchSettings {
+    * Writes the settings to disk (no delay).
+    */
+   async _write() {
++    const previousCachedSettings = this.#cachedSettings;
+     if (this._batchTask) {
+       this._batchTask.disarm();
+     }
+@@ -396,6 +398,12 @@ export class SearchSettings {
+       );
+     } catch (ex) {
+       lazy.logConsole.error("_write: Could not write to settings file:", ex);
++      if (AppConstants.MOZ_NAVIS_CORE) {
++        // Navis mutations await this sole writer. A failed atomic write must
++        // reject, and must not make a later retry look already persisted.
++        this.#cachedSettings = previousCachedSettings;
++        throw ex;
++      }
+     }
+   }
+ 
+@@ -964,6 +972,9 @@ export class SearchSettings {
+   }
+ 
+   #migrateTo14() {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     // Bug 2046554 - Force the remove search engine enterprise policy to be
+     // re-applied, to ensure previously hidden engines are fully disabled. This
+     // is in case a user re-enabled them in version 152 when they were visible
+diff --git a/toolkit/components/search/ConfigSearchEngine.sys.mjs b/toolkit/components/search/ConfigSearchEngine.sys.mjs
+index 8dd225c..129f47c 100644
+--- a/toolkit/components/search/ConfigSearchEngine.sys.mjs
++++ b/toolkit/components/search/ConfigSearchEngine.sys.mjs
+@@ -406,7 +406,9 @@ export class ConfigSearchEngine extends SearchEngine {
+     ["searchForm", lazy.SearchUtils.URL_TYPE.SEARCH_FORM],
+     ["visualSearch", lazy.SearchUtils.URL_TYPE.VISUAL_SEARCH],
+   ]);
+-  static iconHandler = new IconHandler();
++  // Navis retains the class for engine-type checks, without Mozilla config or
++  // its eager Remote Settings icon subscription.
++  static iconHandler = AppConstants.MOZ_NAVIS_CORE ? null : new IconHandler();
+ 
+   /**
+    * Promises for the blob URL of the icon by icon width.
+@@ -458,6 +460,9 @@ export class ConfigSearchEngine extends SearchEngine {
+    *   The saved settings for the user.
+    */
+   constructor({ config, settings }) {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      throw new Error("Remote-configured search engines are not a Navis capability");
++    }
+     if (new.target === ConfigSearchEngine) {
+       throw new Error("Cannot instanciate abstract class ConfigSearchEngine");
+     }
+diff --git a/toolkit/components/search/UserSearchEngine.sys.mjs b/toolkit/components/search/UserSearchEngine.sys.mjs
+index 94809e3..1aafbd7 100644
+--- a/toolkit/components/search/UserSearchEngine.sys.mjs
++++ b/toolkit/components/search/UserSearchEngine.sys.mjs
+@@ -9,6 +9,7 @@ import {
+   EngineURL,
+ } from "moz-src:///toolkit/components/search/SearchEngine.sys.mjs";
+ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = XPCOMUtils.declareLazy({
+   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+@@ -138,6 +139,19 @@ export class UserSearchEngine extends SearchEngine {
+     return true;
+   }
+ 
++  /** Replace user-editable details only after Gecko validates every URL. */
++  updateWithFormInfo(formInfo) {
++    const nameOwner = lazy.SearchService.getEngineByName(formInfo.name.trim());
++    if (nameOwner && nameOwner !== this) {
++      throw new Error("Search engine name conflict");
++    }
++    const replacement = new UserSearchEngine({ formInfo });
++    this._name = replacement.name;
++    this._urls = replacement._urls;
++    this._queryCharset = replacement._queryCharset;
++    lazy.SearchUtils.notifyAction(this, lazy.SearchUtils.MODIFIED_TYPE.CHANGED);
++  }
++
+   /**
+    * Changes the url of the specified type.
+    * The HTTP method is determined by whether postData is null.
+@@ -194,6 +208,11 @@ export class UserSearchEngine extends SearchEngine {
+    * errors.
+    */
+   updateFavicon() {
++    // Android does not own desktop Places favicons. Product search engine icons
++    // are optional and must not introduce a network or Places dependency.
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      return;
++    }
+     let searchUrl = this.getURLOfType(lazy.SearchUtils.URL_TYPE.SEARCH);
+     let searchUrlOrigin = new URL(searchUrl.template).origin;
+ 
+diff --git a/toolkit/components/search/SearchSuggestionController.sys.mjs b/toolkit/components/search/SearchSuggestionController.sys.mjs
+index 54a8450..9010d74 100644
+--- a/toolkit/components/search/SearchSuggestionController.sys.mjs
++++ b/toolkit/components/search/SearchSuggestionController.sys.mjs
+@@ -3,12 +3,15 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ export const DEFAULT_FORM_HISTORY_PARAM = "searchbar-history";
+ const HTTP_OK = 200;
+ const REMOTE_TIMEOUT_DEFAULT = 500;
+ 
+ const lazy = XPCOMUtils.declareLazy({
++  NavisSearchService: "resource://gre/modules/NavisSearchService.sys.mjs",
++  isNavisSuggestionQuery: "resource://gre/modules/NavisSearchPolicy.sys.mjs",
+   ConfigSearchEngine:
+     "moz-src:///toolkit/components/search/ConfigSearchEngine.sys.mjs",
+   FormHistory: "resource://gre/modules/FormHistory.sys.mjs",
+@@ -282,6 +285,17 @@ export class SearchSuggestionController {
+     dedupeRemoteAndLocal = true,
+     fetchTrending = false,
+   }) {
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      // Consent belongs to the Profile's one search settings owner, even if a
++      // retained engine caller reaches this controller directly.
++      this.stop();
++      if (inPrivateBrowsing !== false ||
++          !lazy.NavisSearchService.snapshot.remoteSuggestionsEnabled ||
++          !lazy.isNavisSuggestionQuery(searchString) || fetchTrending) {
++        return Promise.resolve(null);
++      }
++      maxLocalResults = 0;
++    }
+     // There is no smart filtering from previous results here (as there is when
+     // looking through history/form data) because the result set returned by the
+     // server is different for every typed value - e.g. "ocean breathes" does
+@@ -336,7 +350,8 @@ export class SearchSuggestionController {
+     // Fetch remote results from Search Service, if requested.
+     if (
+       (searchString || fetchTrending) &&
+-      lazy.suggestionsEnabled &&
++      // Navis consent was checked above; GeckoView's default is not a second owner.
++      (AppConstants.MOZ_NAVIS_CORE || lazy.suggestionsEnabled) &&
+       (!inPrivateBrowsing || lazy.suggestionsInPrivateBrowsingEnabled) &&
+       maxRemoteResults &&
+       SearchSuggestionController.engineOffersSuggestions(engine, fetchTrending)

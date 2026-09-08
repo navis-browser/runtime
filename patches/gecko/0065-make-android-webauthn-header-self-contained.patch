@@ -1,0 +1,14 @@
+diff --git a/dom/webauthn/AndroidWebAuthnService.h b/dom/webauthn/AndroidWebAuthnService.h
+--- a/dom/webauthn/AndroidWebAuthnService.h
++++ b/dom/webauthn/AndroidWebAuthnService.h
+@@ -5,6 +5,10 @@
+ #ifndef mozilla_dom_AndroidWebAuthnService_h_
+ #define mozilla_dom_AndroidWebAuthnService_h_
+ 
++#include <android/log.h>
++
++#include "nsString.h"
++
+ #ifndef MOZ_NAVIS_ANDROID_RUNTIME
+ #  include "mozilla/java/WebAuthnTokenManagerNatives.h"
+ #endif

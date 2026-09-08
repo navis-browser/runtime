@@ -1,0 +1,163 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+@@ -20,9 +20,12 @@
+ public final class NavisAndroidExtensionProfile implements AutoCloseable {
+   private static final String COMMAND = "NavisAndroid:ExtensionProfile:Request";
+   private static final String CHANGED = "NavisAndroid:ExtensionProfile:BookmarksChanged";
++  private static final String HISTORY_CHANGED = "NavisAndroid:ExtensionProfile:HistoryChanged";
+   private static final Set<String> OPERATIONS = new HashSet<>(Arrays.asList(
+       "bookmarks:list", "bookmarks:create", "bookmarks:update", "bookmarks:move",
+-      "bookmarks:remove", "bookmarks:removeTree", "topSites:list"));
++      "bookmarks:remove", "bookmarks:removeTree", "topSites:list",
++      "history:search", "history:visits", "history:add", "history:deleteUrl",
++      "history:deleteRange", "history:deleteAll"));
+   public static final class Request {
+     public final String extensionId, operation, arguments;
+     public final boolean privateMode, privateBrowsingAllowed;
+@@ -79,5 +82,12 @@
+     data.putString("json", json);
+     mDispatcher.dispatch(CHANGED, data);
+   }
++  public void publishHistoryChange(final String json) {
++    ThreadUtils.assertOnUiThread();
++    if (mClosed) return;
++    final GeckoBundle data = new GeckoBundle(1);
++    data.putString("json", json);
++    mDispatcher.dispatch(HISTORY_CHANGED, data);
++  }
+   @Override public void close() {
+     ThreadUtils.assertOnUiThread();
+diff --git a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+@@ -5,9 +5,11 @@
+ const { ExtensionError } = ChromeUtils.importESModule("resource://gre/modules/ExtensionUtils.sys.mjs");
+ const dispatcher = EventDispatcher.byName("navis-android-extension-profile");
+ const CHANGED = "NavisAndroid:ExtensionProfile:BookmarksChanged";
++const HISTORY_CHANGED = "NavisAndroid:ExtensionProfile:HistoryChanged";
+ const OPERATIONS = new Map([
+   ...["list", "create", "update", "move", "remove", "removeTree"].map(name => [`bookmarks:${name}`, "bookmarks"]),
+   ["topSites:list", "topSites"],
++  ...["search", "visits", "add", "deleteUrl", "deleteRange", "deleteAll"].map(name => [`history:${name}`, "history"]),
+ ]);
+ function checkAccess(extension, permission, context = null) {
+   if (!extension || extension.hasShutdown || context?.unloaded ||
+@@ -85,4 +87,17 @@
+       convert(newFire) { fire = newFire; },
+     };
+   },
++  registerHistory(extension, event, fire) {
++    checkAccess(extension, "history");
++    const listener = { onEvent(_name, data) {
++      try { checkAccess(extension, "history"); } catch { return; }
++      const message = JSON.parse(data.json);
++      if (message.event === event) fire.async(message.detail);
++    } };
++    dispatcher.registerListener(listener, [HISTORY_CHANGED]);
++    return {
++      unregister() { dispatcher.unregisterListener(listener, [HISTORY_CHANGED]); },
++      convert(newFire) { fire = newFire; },
++    };
++  },
+ });
+diff --git a/mobile/shared/components/extensions/ext-android.json b/mobile/shared/components/extensions/ext-android.json
+--- a/mobile/shared/components/extensions/ext-android.json
++++ b/mobile/shared/components/extensions/ext-android.json
+@@ -1,4 +1,10 @@
+ {
++  "history": {
++    "url": "chrome://geckoview/content/ext-history.js",
++    "schema": "chrome://geckoview/content/schemas/history.json",
++    "scopes": ["addon_parent"],
++    "paths": [["history"]]
++  },
+   "bookmarks": {
+     "url": "chrome://geckoview/content/ext-bookmarks.js",
+     "schema": "chrome://geckoview/content/schemas/bookmarks.json",
+diff --git a/mobile/shared/components/extensions/jar.mn b/mobile/shared/components/extensions/jar.mn
+--- a/mobile/shared/components/extensions/jar.mn
++++ b/mobile/shared/components/extensions/jar.mn
+@@ -6,8 +6,10 @@
+     content/ext-android.js
+     content/ext-android.json
+     content/ext-bookmarks.js
++    content/ext-history.js
+     content/ext-topSites.js
+     content/schemas/bookmarks.json (../../../../browser/components/extensions/schemas/bookmarks.json)
++    content/schemas/history.json (../../../../browser/components/extensions/schemas/history.json)
+     content/schemas/top_sites.json (../../../../browser/components/extensions/schemas/top_sites.json)
+     content/ext-browserAction.js
+     content/ext-c-android.js
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -90,6 +90,7 @@
+   "dns",
+   "downloads",
+   "downloads.open",
++  "history",
+   "idle",
+   "management",
+   "notifications",
+diff --git a/mobile/shared/components/extensions/ext-history.js b/mobile/shared/components/extensions/ext-history.js
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/components/extensions/ext-history.js
+@@ -0,0 +1,56 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++{
++  const { NavisAndroidExtensionProfile: profile } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionProfile.sys.mjs");
++  const MAX_TIME = Number.MAX_SAFE_INTEGER;
++  function time(value, fallback) {
++    if (value == null) return fallback;
++    const millis = typeof value === "number" ? value : new Date(value).getTime();
++    if (!Number.isFinite(millis) || millis < 0 || millis > MAX_TIME) {
++      throw new ExtensionUtils.ExtensionError("Invalid history timestamp");
++    }
++    return Math.trunc(millis);
++  }
++  function range(start, end) {
++    if (start > end) throw new ExtensionUtils.ExtensionError("Invalid history range");
++    return { startTime: start, endTime: end };
++  }
++  function webURL(value) {
++    let uri;
++    try { uri = Services.io.newURI(value); } catch {
++      throw new ExtensionUtils.ExtensionError("Invalid history URL");
++    }
++    if (!uri.schemeIs("http") && !uri.schemeIs("https")) {
++      throw new ExtensionUtils.ExtensionError("Navis history accepts HTTP(S) addresses only");
++    }
++    return uri.spec;
++  }
++  this.history = class extends ExtensionAPIPersistent {
++    PERSISTENT_EVENTS = Object.fromEntries(["onVisited", "onVisitRemoved", "onTitleChanged"].map(
++      event => [event, ({ fire }) => profile.registerHistory(this.extension, event, fire)]));
++    getAPI(context) {
++      const call = (operation, args) => profile.request(this.extension, context, `history:${operation}`, args);
++      return { history: {
++        ...Object.fromEntries(Object.keys(this.PERSISTENT_EVENTS).map(event => [event,
++          new EventManager({ context, module: "history", event, extensionApi: this }).api()])),
++        async search(query) {
++          return call("search", { text: query.text,
++            ...range(time(query.startTime, Date.now() - 86400000), time(query.endTime, MAX_TIME)),
++            maxResults: Math.min(query.maxResults ?? 100, 500) });
++        },
++        async getVisits({ url }) { return call("visits", { url: webURL(url) }); },
++        async addUrl({ url, title = "", visitTime, transition = "link" }) {
++          await call("add", { url: webURL(url), title, visitTime: time(visitTime, Date.now()), transition });
++        },
++        async deleteUrl({ url }) { await call("deleteUrl", { url: webURL(url) }); },
++        async deleteRange({ startTime, endTime }) {
++          await call("deleteRange", range(time(startTime, 0), time(endTime, MAX_TIME)));
++        },
++        async deleteAll() { await call("deleteAll"); },
++      } };
++    }
++  };
++}

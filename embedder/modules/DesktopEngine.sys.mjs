@@ -8,8 +8,11 @@ import { DesktopExtensionTabs } from "resource://gre/modules/DesktopExtensionTab
 import { DesktopExtensionMenus } from "resource://gre/modules/DesktopExtensionMenus.sys.mjs";
 import {
   DESKTOP_SEARCH_PROVIDERS,
-  resolveDesktopAddressInput,
+  classifyAddressInput,
+  projectSelectionSearch,
 } from "resource://gre/modules/DesktopAddressInput.sys.mjs";
+import { NavisSearchService } from "resource://gre/modules/NavisSearchService.sys.mjs";
+import { rankLocalSuggestions } from "resource://gre/modules/NavisSuggestionPolicy.sys.mjs";
 import {
   getDesktopCleanLinksEnabled,
   prepareDesktopCleanLinks,
@@ -42,6 +45,21 @@ import {
 } from "resource:///modules/BrowserWindowTracker.sys.mjs";
 import { forgetDesktopWebAuthnPrompt } from "resource://gre/modules/DesktopWebAuthnPrompt.sys.mjs";
 import { clearTimeout, setTimeout } from "resource://gre/modules/Timer.sys.mjs";
+import {
+  readSearchProviders,
+  readDefaultSearchProvider,
+  readAppearanceSettings,
+  setAppearanceSetting,
+} from "resource://gre/modules/NavisSettingsPolicy.sys.mjs";
+import {
+  getDesktopDownloadLifecycle,
+  getDesktopDownloadAttention,
+  getDesktopDownloadSettings,
+  chooseDesktopDownloadDirectory,
+  updateDesktopDownloadSetting,
+} from "resource://gre/modules/DesktopDownloadPreferences.sys.mjs";
+import { getDesktopProfileManagement } from "resource://gre/modules/DesktopProfileManagement.sys.mjs";
+import { NavisProcessManager, getAdditionalSupportDiagnostics, getNavisLicenseText } from "resource://gre/modules/DesktopProductPages.sys.mjs";
 
 // An untitled Core navigation stays language-neutral. Platform supplies the
 // localized "New tab" presentation.
@@ -76,6 +94,7 @@ const GET_CORE_SESSION_ID = Symbol("get-core-session-id");
 const PREPARE_ATTACH_VIEW = Symbol("prepare-attach-view");
 const COMMIT_ATTACH_VIEW = Symbol("commit-attach-view");
 const COMMIT_DETACH_VIEW = Symbol("commit-detach-view");
+const PREPARE_BROWSER_TRANSFER = Symbol("prepare-browser-transfer");
 const SET_SESSION_CRASHED = Symbol("set-session-crashed");
 const BEGIN_CORE_NAVIGATION = Symbol("begin-core-navigation");
 const UPDATE_CORE_NAVIGATION = Symbol("update-core-navigation");
@@ -91,6 +110,7 @@ const QUEUE_EXTENSION_PERMISSION = Symbol("queue-extension-permission");
 const SEND_CREDENTIAL_FILL = Symbol("send-credential-fill");
 const FILL_CREDENTIAL = Symbol("fill-credential");
 const HANDLE_INTERNAL_PAGE_COMMAND = Symbol("handle-internal-page-command");
+const INSPECT_CONTEXT_TARGET = Symbol("inspect-context-target");
 const LIVE_ENGINE_SESSIONS = new Set();
 
 export const DESKTOP_EMBEDDER_API_VERSION = 2;
@@ -151,6 +171,7 @@ const CORE_NAVIGATION_UPDATE_METHODS = new Set([
 
 const RUNTIME_CAPABILITIES = Object.freeze({
   builtInExtensions: AppConstants.MOZ_WEBEXTENSIONS_RUNTIME,
+  developerTools: AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS,
   jpegXL: AppConstants.MOZ_JXL,
   mediaCapture: AppConstants.MOZ_WEBRTC,
   peerConnection: AppConstants.MOZ_WEBRTC,
@@ -180,7 +201,7 @@ const NAVIS_SITE_DATA_FLAGS = Object.freeze([
 const BOOKMARK_BAR_VISIBLE_PREF = "navis.bookmarks.bar.visible";
 const DEFAULT_SEARCH_PROVIDER_PREF = "navis.search.defaultProvider";
 const SEARCH_PROVIDER_BY_ID = new Map(
-  DESKTOP_SEARCH_PROVIDERS.map(provider => [provider.id, provider])
+  DESKTOP_SEARCH_PROVIDERS.map((provider) => [provider.id, provider]),
 );
 
 const HISTORY_VISIT_TOPIC = "desktop-embedder-history-visit";
@@ -237,6 +258,7 @@ const CONTEXT_MENU_COMMAND_GROUPS = Object.freeze({
   "spell-replace-2": "spelling",
   "spell-replace-3": "spelling",
   "spell-replace-4": "spelling",
+  "inspect-element": "developer",
 });
 const SESSION_DELEGATE_NAMES = new Set([
   "content",
@@ -294,7 +316,7 @@ function notifyBrowserStartupComplete(ownerWindow, extensionRuntimeReady) {
     // equivalent lifecycle boundary itself.
     Services.obs.notifyObservers(
       ownerWindow,
-      "browser-delayed-startup-finished"
+      "browser-delayed-startup-finished",
     );
   }
   if (!extensionsLateStartupNotified && !extensionsLateStartupScheduled) {
@@ -312,11 +334,11 @@ function notifyBrowserStartupComplete(ownerWindow, extensionRuntimeReady) {
         extensionsLateStartupNotified = true;
         Services.obs.notifyObservers(ownerWindow, "extensions-late-startup");
       })
-      .catch(error => {
+      .catch((error) => {
         extensionsLateStartupScheduled = false;
         console.error(
           "Desktop embedder could not signal extension late startup",
-          error
+          error,
         );
       });
   }
@@ -329,7 +351,7 @@ function notifyBrowserStartupComplete(ownerWindow, extensionRuntimeReady) {
     browserIdleStartupNotified = true;
     Services.obs.notifyObservers(
       ownerWindow?.closed ? null : ownerWindow,
-      "browser-idle-startup-tasks-finished"
+      "browser-idle-startup-tasks-finished",
     );
   });
 }
@@ -404,7 +426,7 @@ function contextMenuCoordinate(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function projectContextMenuItems(data, state) {
+function projectContextMenuItems(data, state, developerToolsAvailable = false) {
   const navigationItems = [
     Object.freeze({
       id: "back",
@@ -423,12 +445,15 @@ function projectContextMenuItems(data, state) {
     }),
   ];
   const contentItems = [];
-  const seen = new Set(navigationItems.map(item => item.id));
+  const seen = new Set(navigationItems.map((item) => item.id));
   if (Array.isArray(data?.items)) {
     for (const candidate of data.items.slice(0, 24)) {
       const id = typeof candidate?.id === "string" ? candidate.id : "";
       const group = CONTEXT_MENU_COMMAND_GROUPS[id];
       if (!group || candidate.group !== group || seen.has(id)) {
+        continue;
+      }
+      if (group === "developer" && !developerToolsAvailable) {
         continue;
       }
       const suggestion =
@@ -448,7 +473,7 @@ function projectContextMenuItems(data, state) {
           group,
           enabled: Boolean(candidate.enabled),
           ...(suggestion ? { suggestion } : {}),
-        })
+        }),
       );
     }
   }
@@ -458,13 +483,39 @@ function projectContextMenuItems(data, state) {
     data?.context?.media ||
     data?.context?.editable ||
     data?.context?.hasSelection ||
-    data?.context?.misspelled
+    data?.context?.misspelled,
   );
-  return Object.freeze(
-    contentFirst
-      ? [...contentItems, ...navigationItems]
-      : [...navigationItems, ...contentItems]
+  const developerItems = contentItems.filter(
+    (item) => item.group === "developer",
   );
+  const ordinaryItems = contentItems.filter(
+    (item) => item.group !== "developer",
+  );
+  return Object.freeze([
+    ...(contentFirst
+      ? [...ordinaryItems, ...navigationItems]
+      : [...navigationItems, ...ordinaryItems]),
+    ...developerItems,
+  ]);
+}
+
+function projectContentDomReference(value, browser) {
+  const browsingContextId = Number(value?.browsingContextId);
+  const id = Number(value?.id);
+  if (
+    !Number.isSafeInteger(browsingContextId) ||
+    browsingContextId <= 0 ||
+    !Number.isFinite(id) ||
+    id < 0 ||
+    id >= 1
+  ) {
+    return null;
+  }
+  const browsingContext = BrowsingContext.get(browsingContextId);
+  if (!browsingContext || browsingContext.top !== browser.browsingContext) {
+    return null;
+  }
+  return Object.freeze({ browsingContextId, id });
 }
 
 function indexContextMenuItems(items, result = new Map()) {
@@ -477,18 +528,21 @@ function indexContextMenuItems(items, result = new Map()) {
   return result;
 }
 
-function freezeSettingsPageState(runtime, outcome = "ready") {
+async function freezeSettingsPageState(runtime, outcome = "ready") {
   return Object.freeze({
     pageKey: "settings",
     outcome,
     search: Object.freeze({
       providers: runtime.searchProviders,
       defaultProvider: runtime.defaultSearchProvider,
+      remoteSuggestionsEnabled: runtime.remoteSuggestionsEnabled,
     }),
     locale: runtime.localeState,
     processIsolation: runtime.processIsolationState,
     cleanLinksEnabled: runtime.cleanLinksEnabled,
     bookmarkBarVisible: runtime.bookmarkBarVisible,
+    appearance: runtime.appearanceSettings,
+    downloads: await getDesktopDownloadSettings(),
     clearSiteDataAvailable: true,
   });
 }
@@ -496,7 +550,7 @@ function freezeSettingsPageState(runtime, outcome = "ready") {
 async function freezeExtensionsPageState(
   manager,
   outcome = "ready",
-  details = undefined
+  details = undefined,
 ) {
   return Object.freeze({
     pageKey: "extensions",
@@ -539,13 +593,13 @@ function formatSessionUptime() {
     const processStart = Services.startup.getStartupInfo().process.getTime();
     const totalSeconds = Math.max(
       0,
-      Math.floor((Date.now() - processStart) / 1000)
+      Math.floor((Date.now() - processStart) / 1000),
     );
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
     return [hours, minutes, seconds]
-      .map(value => String(value).padStart(2, "0"))
+      .map((value) => String(value).padStart(2, "0"))
       .join(":");
   } catch {
     return "";
@@ -575,7 +629,7 @@ function summarizeRemoteProcesses(processInfo) {
     let type = boundedDiagnosticValue(process.type, 64) || "other";
     if (type === "utility" && Array.isArray(process.utilityActors)) {
       const actors = process.utilityActors
-        .map(actor => boundedDiagnosticValue(actor?.actorName, 48))
+        .map((actor) => boundedDiagnosticValue(actor?.actorName, 48))
         .filter(Boolean);
       type = actors.length ? `utility:${actors.join("+")}` : type;
     }
@@ -700,7 +754,7 @@ async function freezeSupportDiagnosticsState(pageKey, browser, runtime) {
   let logicalProcessors = "";
   try {
     processSummary = summarizeRemoteProcesses(
-      await ChromeUtils.requestProcInfo()
+      await ChromeUtils.requestProcInfo(),
     );
   } catch {}
   try {
@@ -712,10 +766,10 @@ async function freezeSupportDiagnosticsState(pageKey, browser, runtime) {
   try {
     await runtime.ready;
     builtInExtensions = (await runtime.getExtensionInventory())
-      .filter(extension => extension.builtIn)
+      .filter((extension) => extension.builtIn)
       .map(
-        extension =>
-          `${extension.name} ${extension.version} (${extension.enabled ? "enabled" : "disabled"})`
+        (extension) =>
+          `${extension.name} ${extension.version} (${extension.enabled ? "enabled" : "disabled"})`,
       )
       .join(", ");
   } catch {}
@@ -741,32 +795,33 @@ async function freezeSupportDiagnosticsState(pageKey, browser, runtime) {
     codecSupport = "unavailable";
   }
   const privateWindow = Boolean(
-    readDiagnostic(() => runtime.getWindowState(ownerWindow).private, false)
+    readDiagnostic(() => runtime.getWindowState(ownerWindow).private, false),
   );
   const devicePixelRatio = Number(
-    readDiagnostic(() => diagnosticWindow?.devicePixelRatio, 0)
+    readDiagnostic(() => diagnosticWindow?.devicePixelRatio, 0),
   );
   const preferredSampleRate = Number(
-    readDiagnostic(() => windowUtils?.currentPreferredSampleRate, 0)
+    readDiagnostic(() => windowUtils?.currentPreferredSampleRate, 0),
   );
   return Object.freeze({
     pageKey,
     outcome: "ready",
     diagnostics: Object.freeze([
+      ...(await getAdditionalSupportDiagnostics(runtime)),
       diagnosticEntry("diagnostics.sessionUptime", formatSessionUptime()),
       diagnosticEntry("diagnostics.remoteProcesses", processSummary),
       diagnosticEntry(
         "diagnostics.socketProcess",
         readDiagnostic(() => Services.io.socketProcessLaunched, false)
           ? "active"
-          : "not-active"
+          : "not-active",
       ),
       diagnosticEntry("diagnostics.compositor", compositor),
       diagnosticEntry(
         "diagnostics.hardwareAcceleration",
         compositor === "Basic" || compositor.includes("Software")
           ? "disabled"
-          : "enabled"
+          : "enabled",
       ),
       diagnosticEntry("diagnostics.gpuProcess", gpuProcess),
       diagnosticEntry("diagnostics.graphicsAdapter", graphicsAdapter),
@@ -774,44 +829,44 @@ async function freezeSupportDiagnosticsState(pageKey, browser, runtime) {
       diagnosticEntry(
         "diagnostics.windowProtocol",
         graphicsProperty(gfxInfo, "windowProtocol") ||
-          readDiagnostic(() => Services.appinfo.desktopEnvironment)
+          readDiagnostic(() => Services.appinfo.desktopEnvironment),
       ),
       diagnosticEntry(
         "diagnostics.devicePixelRatio",
         devicePixelRatio
           ? `${devicePixelRatio} (${Math.round(devicePixelRatio * 100)}%)`
-          : ""
+          : "",
       ),
       diagnosticEntry(
         "diagnostics.webgpu",
         readDiagnostic(() => Boolean(diagnosticWindow?.navigator?.gpu), false)
           ? "enabled"
-          : "disabled"
+          : "disabled",
       ),
       diagnosticEntry(
         "diagnostics.graphicsFailures",
-        graphicsFailureCount(gfxInfo)
+        graphicsFailureCount(gfxInfo),
       ),
       diagnosticEntry(
         "diagnostics.audioBackend",
-        readDiagnostic(() => windowUtils?.currentAudioBackend)
+        readDiagnostic(() => windowUtils?.currentAudioBackend),
       ),
       diagnosticEntry(
         "diagnostics.maximumAudioChannels",
-        readDiagnostic(() => windowUtils?.currentMaxAudioChannels)
+        readDiagnostic(() => windowUtils?.currentMaxAudioChannels),
       ),
       diagnosticEntry(
         "diagnostics.preferredSampleRate",
-        preferredSampleRate ? `${preferredSampleRate} Hz` : ""
+        preferredSampleRate ? `${preferredSampleRate} Hz` : "",
       ),
       diagnosticEntry("diagnostics.codecSupport", codecSupport),
       diagnosticEntry(
         "diagnostics.networkState",
-        readDiagnostic(() => Services.io.offline, false) ? "offline" : "online"
+        readDiagnostic(() => Services.io.offline, false) ? "offline" : "online",
       ),
       diagnosticEntry(
         "diagnostics.privateWindow",
-        privateWindow ? "private" : "regular"
+        privateWindow ? "private" : "regular",
       ),
       diagnosticEntry("diagnostics.builtInExtensions", builtInExtensions),
       diagnosticEntry("diagnostics.logicalProcessors", logicalProcessors),
@@ -827,8 +882,8 @@ function applicationBuiltInIds() {
     Services.prefs
       .getStringPref(BUILTIN_EXTENSION_IDS_PREF, "")
       .split(",")
-      .map(id => id.trim())
-      .filter(Boolean)
+      .map((id) => id.trim())
+      .filter(Boolean),
   );
 }
 
@@ -855,7 +910,7 @@ function authenticatedInternalPage(browser) {
     const principalPage = resolveNavisInternalPageURI(principal.URI);
     if (
       principalPage?.id === page.id &&
-      principalPage.route === page.route &&
+      (page.id === "settings" || principalPage.route === page.route) &&
       !principal.addonId
     ) {
       return page;
@@ -875,7 +930,7 @@ function isLoopbackHost(host) {
   const octets = normalized.split(".");
   return (
     octets.length === 4 &&
-    octets.every(octet => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255) &&
+    octets.every((octet) => /^\d{1,3}$/u.test(octet) && Number(octet) <= 255) &&
     Number(octets[0]) === 127
   );
 }
@@ -979,11 +1034,11 @@ function canonicalWebAuthnRpId(value) {
   const labels = normalized.split(".");
   if (
     labels.some(
-      label =>
+      (label) =>
         !label ||
         label.length > 63 ||
         label.startsWith("-") ||
-        label.endsWith("-")
+        label.endsWith("-"),
     )
   ) {
     return null;
@@ -1006,12 +1061,12 @@ function projectWebAuthnDescriptor(sessionId, event, browser) {
   }
   const actions = WEB_AUTHN_ACTIONS[event.type] ?? DEFAULT_WEB_AUTHN_ACTIONS;
   const accounts = Object.freeze(
-    event.accounts.map(account =>
+    event.accounts.map((account) =>
       Object.freeze({
         name: account.name,
         displayName: account.displayName,
-      })
-    )
+      }),
+    ),
   );
   return Object.freeze({
     id: `prompt-${nextPromptId++}`,
@@ -1038,7 +1093,7 @@ function projectRelatedOriginWebAuthnDescriptor(sessionId, event, browser) {
   const authenticated = authenticatedWebAuthnOrigin(
     browser,
     event.origin,
-    event.browsingContextId
+    event.browsingContextId,
   );
   const rpId = canonicalWebAuthnRpId(event.rpId);
   if (!authenticated || !rpId) {
@@ -1072,7 +1127,7 @@ function projectConditionalWebAuthnDescriptor(sessionId, event, browser) {
   const authenticated = authenticatedWebAuthnOrigin(
     browser,
     event.origin,
-    event.browsingContextId
+    event.browsingContextId,
   );
   const rpId = event.rpId === null ? null : canonicalWebAuthnRpId(event.rpId);
   if (!authenticated || (event.rpId !== null && !rpId)) {
@@ -1095,7 +1150,7 @@ function projectConditionalWebAuthnDescriptor(sessionId, event, browser) {
       Object.freeze({
         name: account.name,
         displayName: account.displayName,
-      })
+      }),
     );
   }
   return Object.freeze({
@@ -1236,39 +1291,39 @@ function projectCertificate(certificate) {
   const validity = readSecurityValue(certificate, "validity");
   return Object.freeze({
     displayName: boundedSecurityText(
-      readSecurityValue(certificate, "displayName", "")
+      readSecurityValue(certificate, "displayName", ""),
     ),
     commonName: boundedSecurityText(
-      readSecurityValue(certificate, "commonName", "")
+      readSecurityValue(certificate, "commonName", ""),
     ),
     subjectName: boundedSecurityText(
-      readSecurityValue(certificate, "subjectName", "")
+      readSecurityValue(certificate, "subjectName", ""),
     ),
     organization: boundedSecurityText(
-      readSecurityValue(certificate, "organization", "")
+      readSecurityValue(certificate, "organization", ""),
     ),
     organizationalUnit: boundedSecurityText(
-      readSecurityValue(certificate, "organizationalUnit", "")
+      readSecurityValue(certificate, "organizationalUnit", ""),
     ),
     issuerCommonName: boundedSecurityText(
-      readSecurityValue(certificate, "issuerCommonName", "")
+      readSecurityValue(certificate, "issuerCommonName", ""),
     ),
     issuerName: boundedSecurityText(
-      readSecurityValue(certificate, "issuerName", "")
+      readSecurityValue(certificate, "issuerName", ""),
     ),
     issuerOrganization: boundedSecurityText(
-      readSecurityValue(certificate, "issuerOrganization", "")
+      readSecurityValue(certificate, "issuerOrganization", ""),
     ),
     serialNumber: boundedSecurityText(
-      readSecurityValue(certificate, "serialNumber", "")
+      readSecurityValue(certificate, "serialNumber", ""),
     ),
     validFrom: certificateTime(readSecurityValue(validity, "notBefore")),
     validTo: certificateTime(readSecurityValue(validity, "notAfter")),
     sha256Fingerprint: boundedSecurityText(
-      readSecurityValue(certificate, "sha256Fingerprint", "")
+      readSecurityValue(certificate, "sha256Fingerprint", ""),
     ),
     sha256SubjectPublicKeyInfoDigest: boundedSecurityText(
-      readSecurityValue(certificate, "sha256SubjectPublicKeyInfoDigest", "")
+      readSecurityValue(certificate, "sha256SubjectPublicKeyInfoDigest", ""),
     ),
   });
 }
@@ -1309,7 +1364,7 @@ function projectSecurityDetails(browser, state) {
   const fallbackChain = readSecurityValue(
     securityInfo,
     "handshakeCertificates",
-    []
+    [],
   );
   const chain = [...(chainSource?.length ? chainSource : fallbackChain)]
     .slice(0, 16)
@@ -1322,45 +1377,45 @@ function projectSecurityDetails(browser, state) {
     available: true,
     errorCode: Number(readSecurityValue(securityInfo, "errorCode", 0)) || 0,
     errorCodeString: boundedSecurityText(
-      readSecurityValue(securityInfo, "errorCodeString", "")
+      readSecurityValue(securityInfo, "errorCodeString", ""),
     ),
     connection: Object.freeze({
       protocol: tlsVersionName(
-        Number(readSecurityValue(securityInfo, "protocolVersion", -1))
+        Number(readSecurityValue(securityInfo, "protocolVersion", -1)),
       ),
       cipher: boundedSecurityText(
-        readSecurityValue(securityInfo, "cipherName", "")
+        readSecurityValue(securityInfo, "cipherName", ""),
       ),
       keyExchange: boundedSecurityText(
-        readSecurityValue(securityInfo, "keaGroupName", "")
+        readSecurityValue(securityInfo, "keaGroupName", ""),
       ),
       signature: boundedSecurityText(
-        readSecurityValue(securityInfo, "signatureSchemeName", "")
+        readSecurityValue(securityInfo, "signatureSchemeName", ""),
       ),
       keyLength: Number(readSecurityValue(securityInfo, "keyLength", 0)) || 0,
       secretKeyLength:
         Number(readSecurityValue(securityInfo, "secretKeyLength", 0)) || 0,
       privateDNS: Boolean(
-        readSecurityValue(securityInfo, "usedPrivateDNS", false)
+        readSecurityValue(securityInfo, "usedPrivateDNS", false),
       ),
       acceptedECH: Boolean(
-        readSecurityValue(securityInfo, "isAcceptedEch", false)
+        readSecurityValue(securityInfo, "isAcceptedEch", false),
       ),
       resumed: Boolean(readSecurityValue(securityInfo, "resumed", false)),
       rootBuiltIn: Boolean(
         readSecurityValue(
           securityInfo,
           "isBuiltCertChainRootBuiltInRoot",
-          false
-        )
+          false,
+        ),
       ),
       certificateTransparency:
         Number(
-          readSecurityValue(securityInfo, "certificateTransparencyStatus", 0)
+          readSecurityValue(securityInfo, "certificateTransparencyStatus", 0),
         ) || 0,
     }),
     certificate: projectCertificate(
-      readSecurityValue(securityInfo, "serverCert")
+      readSecurityValue(securityInfo, "serverCert"),
     ),
     certificateChain: Object.freeze(chain),
   });
@@ -1404,7 +1459,7 @@ const historyBridge = {
           Object.freeze({
             url,
             title: details.getProperty("title"),
-          })
+          }),
         );
       }
     } catch (error) {
@@ -1456,11 +1511,12 @@ function normalizeURI(value) {
   return Services.io.newURI(candidate);
 }
 
-function resolveAddressValue(value, providerId) {
-  const resolved = resolveDesktopAddressInput(value, providerId);
+function resolveAddressValue(value, providerId, privateMode = false) {
+  const resolved = classifyAddressInput(value);
   return resolved.kind === "url"
     ? Object.freeze({ ...resolved, url: Services.io.newURI(resolved.url).spec })
-    : resolved;
+    : Object.freeze({kind: "search", providerId,
+        ...NavisSearchService.submission(resolved.query, {providerId, privateMode})});
 }
 
 function readGlobalClipboardText() {
@@ -1472,7 +1528,7 @@ function readGlobalClipboardText() {
     transferable.addDataFlavor("text/plain");
     Services.clipboard.getData(
       transferable,
-      Services.clipboard.kGlobalClipboard
+      Services.clipboard.kGlobalClipboard,
     );
     const data = {};
     transferable.getTransferData("text/plain", data);
@@ -1517,30 +1573,30 @@ function normalizeCredentialRequest(request, { includeSecret = false } = {}) {
     origin: normalizeWebOrigin(request.origin),
     actionOrigin: normalizeWebOrigin(
       request.actionOrigin ?? request.origin,
-      "Credential action origin"
+      "Credential action origin",
     ),
     usernameField: credentialText(
       request.usernameField ?? "",
       "Credential username field",
-      256
+      256,
     ),
     passwordField: credentialText(
       request.passwordField ?? "",
       "Credential password field",
-      256
+      256,
     ),
   };
   if (includeSecret) {
     normalized.username = credentialText(
       request.username ?? "",
       "Credential username",
-      1024
+      1024,
     );
     normalized.password = credentialText(
       request.password,
       "Credential password",
       4096,
-      { allowEmpty: false }
+      { allowEmpty: false },
     );
   }
   return Object.freeze(normalized);
@@ -1627,7 +1683,7 @@ function promptButtons(args, kind) {
           // presentation strings. Keep the reusable Core/Platform boundary
           // semantic and let the consuming Platform own those words.
           label: kind === "before-unload" ? null : label,
-        })
+        }),
       );
     }
   }
@@ -1656,9 +1712,9 @@ function promptInput(args, kind) {
   }
   if (kind === "choice") {
     const choices = Object.freeze(
-      (Array.isArray(args.list) ? args.list : []).map(choice =>
-        stringValue(choice)
-      )
+      (Array.isArray(args.list) ? args.list : []).map((choice) =>
+        stringValue(choice),
+      ),
     );
     return Object.freeze({
       type: "choice",
@@ -1673,7 +1729,7 @@ function projectPromptDescriptor(sessionId, args, browser) {
   const kind = promptKind(args);
   const buttons = promptButtons(args, kind);
   const frameOrigin = principalOrigin(
-    args.promptPrincipal || browser.contentPrincipal
+    args.promptPrincipal || browser.contentPrincipal,
   );
   const origin = stringValue(args.authOrigin, frameOrigin);
   const checkbox = args.checkLabel
@@ -1683,12 +1739,12 @@ function projectPromptDescriptor(sessionId, args, browser) {
       })
     : null;
   const defaultButton = buttons.some(
-    button => button.id === args.defaultButtonNum
+    (button) => button.id === args.defaultButtonNum,
   )
     ? args.defaultButtonNum
     : buttons[0].id;
   const cancelButton =
-    buttons.find(button => button.role === "cancel")?.id ?? buttons[0].id;
+    buttons.find((button) => button.role === "cancel")?.id ?? buttons[0].id;
 
   return Object.freeze({
     id: `prompt-${nextPromptId++}`,
@@ -1730,7 +1786,7 @@ function normalizePromptResponse(response, descriptor) {
   const button = response.button ?? fallbackButton;
   if (
     !Number.isInteger(button) ||
-    !descriptor.buttons.some(candidate => candidate.id === button)
+    !descriptor.buttons.some((candidate) => candidate.id === button)
   ) {
     return null;
   }
@@ -1841,7 +1897,7 @@ function freezeSessionState(state) {
     credentials: Object.freeze({
       origin: state.credentials.origin,
       items: Object.freeze(
-        state.credentials.items.map(item => Object.freeze({ ...item }))
+        state.credentials.items.map((item) => Object.freeze({ ...item })),
       ),
     }),
   });
@@ -1877,6 +1933,7 @@ function projectDownload(id, download) {
     canCancel: !download.stopped,
     canRetry:
       download.stopped && !download.succeeded && !download.hasBlockedData,
+    canOpen: Boolean(download.succeeded && download.target?.exists),
   });
 }
 
@@ -1899,7 +1956,7 @@ function createRemoteBrowser(
     remoteType = "web",
     initialBrowsingContextGroupId = null,
     className = "desktop-engine-view",
-  } = {}
+  } = {},
 ) {
   const browser = ownerDocument.createXULElement("browser");
   browser.permanentKey = new (Cu.getGlobalForObject(Services).Object)();
@@ -1914,7 +1971,7 @@ function createRemoteBrowser(
   if (initialBrowsingContextGroupId) {
     browser.setAttribute(
       "initialBrowsingContextGroupId",
-      initialBrowsingContextGroupId
+      initialBrowsingContextGroupId,
     );
   }
   browser.setAttribute("flex", "1");
@@ -1948,6 +2005,14 @@ export class EngineRuntime {
   #sessionDelegateFactory = null;
   #downloadList = null;
   #downloadView = null;
+  #downloadLifecycle = null;
+  #downloadInitialized = false;
+  #downloadRevision = 0;
+  #downloadAttentionObserver = null;
+  #openingDownloads = new Set();
+  #appearanceDelegates = new Set();
+  #appearanceObserver = null;
+  #profileObserver = null;
   #downloadsById = new Map();
   #downloadIds = new WeakMap();
   #extensionManager = null;
@@ -1955,6 +2020,7 @@ export class EngineRuntime {
   #extensionOmnibox = null;
   #extensionPermissionPrompts = null;
   #extensionPopupHost = null;
+  #devTools = null;
   #extensionActionDelegate = null;
   #extensionOmniboxDelegate = null;
   #extensionActionChangedListener;
@@ -1964,7 +2030,9 @@ export class EngineRuntime {
   #extensionsReady;
   #cleanLinksReady;
   #profileStore;
+  #processManager = new NavisProcessManager();
   #profileReady;
+  #searchReady;
   #credentialReauthenticationPresentation = Object.freeze({
     reason: "",
     caption: "Navis",
@@ -1973,7 +2041,7 @@ export class EngineRuntime {
   constructor(options = undefined) {
     if (options !== undefined) {
       throw new TypeError(
-        "EngineRuntime source API 2 does not accept a window or View factory"
+        "EngineRuntime source API 2 does not accept a window or View factory",
       );
     }
     this.#cleanLinksReady = prepareDesktopCleanLinks();
@@ -1981,7 +2049,17 @@ export class EngineRuntime {
       "@mozilla.org/desktop-embedder/core-state;1"
     ].createInstance(Ci.nsIDesktopEmbedderCoreState);
     this.#profileStore = getDesktopProfileStore();
-    this.#profileReady = this.#profileStore.ready;
+    this.#searchReady = NavisSearchService.init({
+      providers: readSearchProviders(Services.prefs),
+      defaultProviderId: readDefaultSearchProvider(Services.prefs),
+      remoteSuggestionsEnabled: false,
+    });
+    // Load the per-profile identity before Platform renders its initial
+    // appearance, including the color selected in the new-profile dialog.
+    this.#profileReady = Promise.all([
+      this.#profileStore.ready,
+      getDesktopProfileManagement().current(),
+    ]);
     this.#extensionActionChangedListener = () => this.#notifyExtensionActions();
     this.#extensionActionRemovedListener = (_eventName, event) => {
       this.#extensionPopupHost?.closeExtension(event.extensionId);
@@ -1993,8 +2071,8 @@ export class EngineRuntime {
         request.extensionId,
         request.popup,
         "extensions-menu-toggle",
-        request.browserStyle
-      ).catch(error => {
+        request.browserStyle,
+      ).catch((error) => {
         console.error("Desktop embedder could not open extension popup", error);
       });
     };
@@ -2012,15 +2090,46 @@ export class EngineRuntime {
         Object.freeze({
           ...event.state,
           sessionId: event.nativeTab.session.id,
-        })
+        }),
       );
     };
     // The startup observer normally freezes the locale after profile prefs
     // load. Keep nonstandard EngineRuntime harnesses on the same invariants.
     initializeDesktopLocale();
     initializeDesktopProcessIsolation();
+    this.#appearanceObserver = () => {
+      const state = this.appearanceSettings;
+      for (const delegate of this.#appearanceDelegates) {
+        callDelegate(delegate, "AppearanceDelegate", "onAppearanceChanged", state);
+      }
+      for (const session of this.#sessions) {
+        const browser = session[GET_BROWSER]();
+        const page = authenticatedInternalPage(browser);
+        if (!page || page.id === "settings") continue;
+        try {
+          browser.browsingContext?.currentWindowGlobal?.getActor("DesktopInternalPage")
+            .sendAsyncMessage("DesktopInternalPage:AppearanceChanged", {
+              pageKey: page.key, appearance: state,
+            });
+        } catch { /* Navigation or teardown may destroy the actor between checks. */ }
+      }
+    };
+    Services.prefs.addObserver("navis.appearance.", this.#appearanceObserver);
+    Services.prefs.addObserver("navis.bookmarks.bar.", this.#appearanceObserver);
+    Services.prefs.addObserver("navis.history.", this.#appearanceObserver);
+    this.#profileObserver = () => {
+      for (const session of this.#sessions) {
+        const browser = session[GET_BROWSER]();
+        if (authenticatedInternalPage(browser)?.key !== "profiles") continue;
+        try {
+          browser.browsingContext?.currentWindowGlobal?.getActor("DesktopInternalPage")
+            .sendAsyncMessage("DesktopInternalPage:ProfileChanged", { pageKey: "profiles" });
+        } catch { /* Navigation or teardown may destroy the actor between checks. */ }
+      }
+    };
+    Services.obs.addObserver(this.#profileObserver, "navis-profile-identity-changed");
     installHistoryDelegate(this, this.#profileStore.historyDelegate);
-    this.#initializeDownloads().catch(error => {
+    this.#initializeDownloads().catch((error) => {
       console.error("Desktop embedder could not initialize downloads", error);
     });
     this.#extensionsReady = this.#initializeExtensions();
@@ -2040,6 +2149,48 @@ export class EngineRuntime {
 
   get capabilities() {
     return RUNTIME_CAPABILITIES;
+  }
+
+  getCurrentProfile() {
+    this.#assertOpen();
+    return getDesktopProfileManagement().current();
+  }
+
+  listProfiles() {
+    this.#assertOpen();
+    return getDesktopProfileManagement().snapshot();
+  }
+
+  updateCurrentProfile(value) {
+    this.#assertOpen();
+    return getDesktopProfileManagement().update(value);
+  }
+
+  createProfile(value) {
+    this.#assertOpen();
+    return getDesktopProfileManagement().create(value);
+  }
+
+  launchProfile(id) {
+    this.#assertOpen();
+    return getDesktopProfileManagement().launch(id);
+  }
+
+  setDefaultProfile(id) {
+    this.#assertOpen();
+    return getDesktopProfileManagement().setDefault(id);
+  }
+
+  removeProfile(value) {
+    this.#assertOpen();
+    return getDesktopProfileManagement().remove(value);
+  }
+
+  async relaunchProfile(value) {
+    this.#assertOpen();
+    await this.#closeDevToolsForRelaunch();
+    this.#assertOpen();
+    return getDesktopProfileManagement().restart(value);
   }
 
   get localeState() {
@@ -2062,23 +2213,27 @@ export class EngineRuntime {
     return setDesktopProcessIsolationMode(mode);
   }
 
-  relaunchForLocaleChange() {
+  async relaunchForLocaleChange() {
     this.#assertOpen();
     if (!this.localeState.restartRequired) {
       return false;
     }
+    await this.#closeDevToolsForRelaunch();
+    this.#assertOpen();
     return Services.startup.quit(
-      Ci.nsIAppStartup.eAttemptQuit | Ci.nsIAppStartup.eRestart
+      Ci.nsIAppStartup.eAttemptQuit | Ci.nsIAppStartup.eRestart,
     );
   }
 
-  relaunchForProcessIsolationChange() {
+  async relaunchForProcessIsolationChange() {
     this.#assertOpen();
     if (!this.processIsolationState.restartRequired) {
       return false;
     }
+    await this.#closeDevToolsForRelaunch();
+    this.#assertOpen();
     return Services.startup.quit(
-      Ci.nsIAppStartup.eAttemptQuit | Ci.nsIAppStartup.eRestart
+      Ci.nsIAppStartup.eAttemptQuit | Ci.nsIAppStartup.eRestart,
     );
   }
 
@@ -2123,31 +2278,92 @@ export class EngineRuntime {
 
   get searchProviders() {
     this.#assertOpen();
-    return Object.freeze(
-      DESKTOP_SEARCH_PROVIDERS.map(provider =>
-        Object.freeze({ id: provider.id, name: provider.name })
-      )
-    );
+    return NavisSearchService.snapshot.providers;
   }
 
   get defaultSearchProvider() {
     this.#assertOpen();
-    const selected = Services.prefs.getStringPref(
-      DEFAULT_SEARCH_PROVIDER_PREF,
-      DESKTOP_SEARCH_PROVIDERS[0].id
-    );
-    return SEARCH_PROVIDER_BY_ID.has(selected)
-      ? selected
-      : DESKTOP_SEARCH_PROVIDERS[0].id;
+    return NavisSearchService.snapshot.defaultProviderId;
   }
 
-  setDefaultSearchProvider(providerId) {
+  async setDefaultSearchProvider(providerId) {
     this.#assertOpen();
-    if (!SEARCH_PROVIDER_BY_ID.has(providerId)) {
-      throw new TypeError("Unknown Navis search provider");
-    }
-    Services.prefs.setStringPref(DEFAULT_SEARCH_PROVIDER_PREF, providerId);
+    await this.#searchReady;
+    await NavisSearchService.setDefault(providerId);
     return providerId;
+  }
+
+  get remoteSuggestionsEnabled() {
+    this.#assertOpen();
+    return NavisSearchService.snapshot.remoteSuggestionsEnabled;
+  }
+
+  searchText(value, {privateMode = false, providerId} = {}) {
+    this.#assertOpen();
+    return NavisSearchService.submission(value, {privateMode, providerId});
+  }
+
+  async getLocalSuggestions(session, value, {signal} = {}) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    await this.ready;
+    if (signal?.aborted) return Object.freeze([]);
+    const privateMode = session.state.private;
+    const search = String(value).trim().normalize("NFKC").split(/\s+/u)[0].slice(0, 128);
+    const [history, bookmarks] = await Promise.all([
+      privateMode ? [] : this.#profileStore.queryHistory({search, limit: 200}),
+      this.#profileStore.queryBookmarkSuggestions({search, limit: 200}),
+    ]);
+    if (signal?.aborted || this.#closed || !this.#sessions.has(session)) return Object.freeze([]);
+    const tabs = [...this.#sessions].filter(item => item !== session &&
+      item.state.private === privateMode && !item.state.closed).slice(0, 100);
+    return rankLocalSuggestions(value, [
+      ...tabs.map(item => ({kind: "tab", id: String(item.id), title: item.state.title, url: item.state.url})),
+      ...bookmarks.map(item => ({...item, kind: "bookmark"})),
+      ...history.map(item => ({...item, kind: "history", id: item.url,
+        lastVisit: item.lastVisitedAt})),
+    ], {privateMode});
+  }
+
+  async getNetworkSuggestions(session, value, {signal} = {}) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    await this.#searchReady;
+    if (signal?.aborted || this.#closed || !this.#sessions.has(session)) return Object.freeze([]);
+    return NavisSearchService.suggestions(value, {privateMode: session.state.private, signal});
+  }
+
+  searchSelectedText(session, text, providerId = this.defaultSearchProvider) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    const nativeTab = DesktopExtensionTabs.getForBrowser(session[GET_BROWSER]());
+    if (!nativeTab) return false;
+    const {url} = this.searchText(text, {providerId, privateMode: session.state.private});
+    DesktopExtensionTabs.createTab(nativeTab.window, url, true,
+      Services.scriptSecurityManager.getSystemPrincipal());
+    return true;
+  }
+
+  get appearanceSettings() {
+    this.#assertOpen();
+    return readAppearanceSettings(Services.prefs);
+  }
+
+  setAppearanceSetting(key, value) {
+    this.#assertOpen();
+    return setAppearanceSetting(Services.prefs, key, value);
+  }
+
+  addAppearanceDelegate(delegate) {
+    this.#assertOpen();
+    if (typeof delegate?.onAppearanceChanged !== "function") {
+      throw new TypeError("Appearance delegate requires onAppearanceChanged");
+    }
+    this.#appearanceDelegates.add(delegate);
+  }
+
+  removeAppearanceDelegate(delegate) {
+    return this.#appearanceDelegates.delete(delegate);
   }
 
   get cleanLinksEnabled() {
@@ -2160,9 +2376,9 @@ export class EngineRuntime {
     return setDesktopCleanLinksEnabled(enabled);
   }
 
-  resolveAddressInput(value) {
+  resolveAddressInput(value, {privateMode = false} = {}) {
     this.#assertOpen();
-    return resolveAddressValue(value, this.defaultSearchProvider);
+    return resolveAddressValue(value, this.defaultSearchProvider, privateMode);
   }
 
   getClipboardAddressInput() {
@@ -2213,13 +2429,96 @@ export class EngineRuntime {
       this.#profileReady,
       this.#extensionsReady,
       this.#cleanLinksReady,
+      this.#searchReady,
     ]).then(() => undefined);
   }
 
   get downloads() {
     return Object.freeze(
-      [...this.#downloadsById.values()].map(({ state }) => state)
+      [...this.#downloadsById.values()].map(({ download, state }) => Object.freeze({
+        ...state, attentionToken: getDesktopDownloadAttention().tokenFor(download),
+      })),
     );
+  }
+
+  getDownloadAttention({ privateMode = false } = {}) {
+    const items = this.downloads.filter(item => item.private === privateMode);
+    return Object.freeze({
+      activeCount: items.filter(item => item.status === "pending" || item.status === "downloading").length,
+      unseenCompleted: Object.freeze(items.filter(item => item.attentionToken).map(item =>
+        Object.freeze({ id: item.id, token: item.attentionToken }))),
+    });
+  }
+
+  acknowledgeDownloadsSeen(entries, { window: ownerWindow } = {}) {
+    if (this.#closed || !this.#windows.has(ownerWindow) || ownerWindow.closed ||
+        ownerWindow.document.visibilityState === "hidden" || !ownerWindow.document.hasFocus() ||
+        !Array.isArray(entries) || entries.length > 500) return false;
+    const privateMode = isPrivateWindow(ownerWindow);
+    const attention = getDesktopDownloadAttention();
+    let changed = false;
+    for (const item of entries) {
+      const entry = this.#downloadsById.get(item?.id);
+      if (entry && entry.state.private === privateMode) {
+        changed = attention.acknowledge(entry.download, item.token) || changed;
+      }
+    }
+    if (changed) Services.obs.notifyObservers(null, "navis-download-attention-changed");
+    return changed;
+  }
+
+  #downloadPageState(privateMode) {
+    return Object.freeze({ pageKey: "downloads", outcome: "ready", private: privateMode,
+      revision: this.#downloadRevision,
+      items: Object.freeze(this.downloads.filter(item => item.private === privateMode)),
+    });
+  }
+
+  getDeveloperToolsState(session) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    if (!AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
+      return Object.freeze({
+        available: false,
+        open: false,
+        host: null,
+        tool: null,
+      });
+    }
+    return this.#developerTools().getState(session);
+  }
+
+  async toggleDeveloperTools(session, options = undefined) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    if (!AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
+      throw new Error("Developer tools are not available in this build");
+    }
+    // The bundled secondary locale is registered by AddonManager. Wait for
+    // that process-wide startup boundary before DevTools freezes its Fluent
+    // and legacy string bundles on first use.
+    await this.#extensionsReady;
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    return this.#developerTools().toggle(session, options);
+  }
+
+  async [INSPECT_CONTEXT_TARGET](session, targetIdentifier) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    if (!AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
+      throw new Error("Developer tools are not available in this build");
+    }
+    await this.#extensionsReady;
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    return this.#developerTools().inspect(session, targetIdentifier);
+  }
+
+  async closeDeveloperTools(session) {
+    this.#assertOpen();
+    this.#assertOwnedSession(session);
+    return this.#devTools?.closeSession(session) || false;
   }
 
   async getExtensionInventory() {
@@ -2234,7 +2533,7 @@ export class EngineRuntime {
       delegate,
       "ExtensionActionDelegate",
       ["onActionsChanged"],
-      ["onActionsChanged"]
+      ["onActionsChanged"],
     );
     this.#extensionActionDelegate = delegate;
   }
@@ -2245,7 +2544,7 @@ export class EngineRuntime {
       delegate,
       "ExtensionOmniboxDelegate",
       ["onStateChanged"],
-      ["onStateChanged"]
+      ["onStateChanged"],
     );
     this.#extensionOmniboxDelegate = delegate;
   }
@@ -2276,7 +2575,7 @@ export class EngineRuntime {
     }
     if (
       !["currentTab", "newForegroundTab", "newBackgroundTab"].includes(
-        disposition
+        disposition,
       )
     ) {
       throw new TypeError("Extension omnibox disposition is invalid");
@@ -2324,7 +2623,7 @@ export class EngineRuntime {
           extensionId,
           result.popup,
           anchorId,
-          result.browserStyle
+          result.browserStyle,
         )
       : false;
     return Object.freeze({
@@ -2341,11 +2640,11 @@ export class EngineRuntime {
     await this.#extensionsReady;
     const result = this.#extensionActions?.triggerPageAction(
       extensionId,
-      nativeTab
+      nativeTab,
     );
     if (!result) {
       throw new Error(
-        "The extension page action is unavailable for this Session"
+        "The extension page action is unavailable for this Session",
       );
     }
     const popupOpened = result.popup
@@ -2354,7 +2653,7 @@ export class EngineRuntime {
           extensionId,
           result.popup,
           anchorId,
-          result.browserStyle
+          result.browserStyle,
         )
       : false;
     return Object.freeze({
@@ -2380,7 +2679,7 @@ export class EngineRuntime {
     }
     const extension = await this.#extensionManager.setToolbarPinned(
       extensionId,
-      pinned
+      pinned,
     );
     return Object.freeze({
       extensionId: extension.id,
@@ -2393,7 +2692,7 @@ export class EngineRuntime {
     const { view, delegates = undefined, privateMode = undefined } = options;
     if (!(view instanceof EngineView)) {
       throw new TypeError(
-        "EngineRuntime source API 2 requires an explicit EngineView per session"
+        "EngineRuntime source API 2 requires an explicit EngineView per session",
       );
     }
     if (view.session) {
@@ -2407,7 +2706,7 @@ export class EngineRuntime {
     const sessionPrivate = privateMode ?? windowPrivate;
     if (sessionPrivate !== windowPrivate) {
       throw new Error(
-        "A desktop Session private mode must match its host window"
+        "A desktop Session private mode must match its host window",
       );
     }
     const context = this.#ensureWindow(ownerWindow);
@@ -2473,7 +2772,7 @@ export class EngineRuntime {
       delegate,
       "NavigationDelegate",
       ["onNewSession", "onSessionCreated", "onPopupBlocked"],
-      ["onNewSession", "onSessionCreated"]
+      ["onNewSession", "onSessionCreated"],
     );
     this.#navigationDelegate = delegate;
   }
@@ -2484,7 +2783,7 @@ export class EngineRuntime {
       delegate,
       "DownloadDelegate",
       ["onDownloadsChanged"],
-      ["onDownloadsChanged"]
+      ["onDownloadsChanged"],
     );
     this.#downloadDelegate = delegate;
   }
@@ -2496,7 +2795,7 @@ export class EngineRuntime {
     }
     if (this.#sessionCreated) {
       throw new Error(
-        "The session delegate factory must be installed before the first session is created"
+        "The session delegate factory must be installed before the first session is created",
       );
     }
     this.#sessionDelegateFactory = factory;
@@ -2524,7 +2823,7 @@ export class EngineRuntime {
     Services.obs.notifyObservers(
       uri,
       HISTORY_STATUS_TOPIC,
-      visited ? "visited" : "unvisited"
+      visited ? "visited" : "unvisited",
     );
     return uri.spec;
   }
@@ -2539,7 +2838,7 @@ export class EngineRuntime {
     if (!Array.isArray(urls)) {
       throw new TypeError("deleteHistory() requires an array of URLs");
     }
-    const normalized = urls.map(value => normalizeURI(value).spec);
+    const normalized = urls.map((value) => normalizeURI(value).spec);
     const deleted = await this.#profileStore.deleteHistory(normalized);
     for (const url of deleted) {
       this.setHistoryVisited(url, false);
@@ -2617,7 +2916,7 @@ export class EngineRuntime {
       caption.length > 128
     ) {
       throw new TypeError(
-        "Credential reauthentication presentation requires bounded strings"
+        "Credential reauthentication presentation requires bounded strings",
       );
     }
     this.#credentialReauthenticationPresentation = Object.freeze({
@@ -2656,24 +2955,24 @@ export class EngineRuntime {
 
   async #refreshCredentialStates(requiredOrigin = null) {
     const snapshots = [...this.#sessions]
-      .filter(session => !session.state.private)
-      .map(session => ({
+      .filter((session) => !session.state.private)
+      .map((session) => ({
         session,
         origin: session.state.credentials.origin,
       }))
       .filter(
-        snapshot =>
+        (snapshot) =>
           snapshot.origin &&
-          (requiredOrigin === null || snapshot.origin === requiredOrigin)
+          (requiredOrigin === null || snapshot.origin === requiredOrigin),
       );
-    const origins = [...new Set(snapshots.map(snapshot => snapshot.origin))];
+    const origins = [...new Set(snapshots.map((snapshot) => snapshot.origin))];
     const credentialsByOrigin = new Map(
       await Promise.all(
-        origins.map(async origin => [
+        origins.map(async (origin) => [
           origin,
           await this.#profileStore.listCredentials({ origin }),
-        ])
-      )
+        ]),
+      ),
     );
     for (const { session, origin } of snapshots) {
       if (
@@ -2684,7 +2983,7 @@ export class EngineRuntime {
           null,
           origin,
           credentialsByOrigin.get(origin),
-          { preserveActor: true }
+          { preserveActor: true },
         );
       }
     }
@@ -2703,7 +3002,7 @@ export class EngineRuntime {
     if (!sessions.includes(selectedSession)) {
       throw new TypeError("The selected Session must be in the ordered set");
     }
-    const normalSessions = sessions.filter(session => {
+    const normalSessions = sessions.filter((session) => {
       if (!this.#sessions.has(session)) {
         throw new TypeError("A Session does not belong to this Runtime");
       }
@@ -2714,21 +3013,21 @@ export class EngineRuntime {
     }
     if (normalSessions.length !== sessions.length) {
       throw new TypeError(
-        "Normal and private Sessions cannot share restore state"
+        "Normal and private Sessions cannot share restore state",
       );
     }
     await this.#profileStore.saveSessionState(
-      normalSessions.map(session => ({
+      normalSessions.map((session) => ({
         url: normalizeURI(session.state.url).spec,
         selected: session === selectedSession,
-      }))
+      })),
     );
     return true;
   }
 
   async clearSiteData() {
     this.#assertOpen();
-    const failedFlags = await new Promise(resolve => {
+    const failedFlags = await new Promise((resolve) => {
       Services.clearData.deleteData(NAVIS_SITE_DATA_FLAGS, resolve);
     });
     if (failedFlags) {
@@ -2788,17 +3087,17 @@ export class EngineRuntime {
     if (!state) {
       throw new TypeError("The current page has no clearable Web origin");
     }
-    const failedFlags = await new Promise(resolve => {
+    const failedFlags = await new Promise((resolve) => {
       Services.clearData.deleteDataFromPrincipal(
         state.principal,
         true,
         NAVIS_SITE_DATA_FLAGS,
-        resolve
+        resolve,
       );
     });
     if (failedFlags) {
       throw new Error(
-        `Site-data clearing failed for ${state.origin} with flags ${failedFlags}`
+        `Site-data clearing failed for ${state.origin} with flags ${failedFlags}`,
       );
     }
     return Object.freeze({ origin: state.origin, host: state.host });
@@ -2816,23 +3115,92 @@ export class EngineRuntime {
       throw new TypeError("The internal-page command route does not match");
     }
     const command = request.command;
-    if (page.key === "settings") {
+    if (command === "appearance:get" && page.id !== "settings" && request.value === undefined) {
+      return Object.freeze({ pageKey: page.key, appearance: this.appearanceSettings });
+    }
+    if (page.key === "profiles") {
+      const value = request.value;
+      let profileOperation;
+      if (command === "profiles:create") {
+        profileOperation = await this.createProfile(value);
+      } else if (command === "profile:update") {
+        await this.updateCurrentProfile(value);
+      } else if (command === "profiles:launch") {
+        await this.launchProfile(value?.id);
+      } else if (command === "profiles:set-default") {
+        await this.setDefaultProfile(value?.id);
+      } else if (command === "profiles:remove") {
+        await this.removeProfile(value);
+      } else if (command === "profiles:restart") {
+        await this.relaunchProfile(value);
+      } else if (command !== "profiles:get") {
+        throw new TypeError("Unsupported profile command");
+      }
+      return Object.freeze({ pageKey: "profiles", outcome: "ready", profileManagement: await this.listProfiles(),
+        ...(profileOperation ? { profileOperation } : {}) });
+    }
+    if (page.key === "processes") {
+      const protectedProcessIds = [session[GET_BROWSER]()?.browsingContext?.currentWindowGlobal?.osPid];
+      if (command === "processes:end") {
+        await this.#processManager.end(request.value?.token, protectedProcessIds);
+      } else if (command !== "processes:get") {
+        throw new TypeError("Unsupported process manager command");
+      }
+      return Object.freeze({ pageKey: "processes", outcome: "ready", processes: await this.#processManager.snapshot(protectedProcessIds) });
+    }
+    if (page.key === "credits" && command === "credits:get") {
+      return Object.freeze({ pageKey: "credits", outcome: "ready", licenses: await getNavisLicenseText() });
+    }
+    if (page.id === "settings") {
       if (command === "settings:get") {
         return freezeSettingsPageState(this);
       }
       if (command === "settings:set-search-provider") {
-        this.setDefaultSearchProvider(request.value);
+        await this.setDefaultSearchProvider(request.value);
         return freezeSettingsPageState(this, "search-provider-updated");
+      }
+      if (command === "settings:set-remote-suggestions") {
+        await NavisSearchService.setRemoteSuggestionsEnabled(request.value);
+        return freezeSettingsPageState(this, "search-provider-updated");
+      }
+      if (command.startsWith("settings:search-")) {
+        const operation = command.slice("settings:search-".length);
+        const value = request.value;
+        if (operation === "add") {
+          await NavisSearchService.upsert({...value, id: Services.uuid.generateUUID().toString().slice(1, -1)});
+        } else if (operation === "update") {
+          if (!this.searchProviders.some(provider => provider.id === value?.id)) throw new TypeError("Unknown provider");
+          await NavisSearchService.upsert(value);
+        } else if (operation === "remove") {
+          await NavisSearchService.remove(value?.id);
+        } else if (operation === "move") {
+          await NavisSearchService.move(value?.id, value?.position);
+        } else {
+          throw new TypeError("Unknown search operation");
+        }
+        return freezeSettingsPageState(this, "search-provider-updated");
+      }
+      if (command === "settings:set-appearance") {
+        this.setAppearanceSetting(request.value.key, request.value.value);
+        return freezeSettingsPageState(this, "appearance-updated");
+      }
+      if (command === "settings:set-download") {
+        updateDesktopDownloadSetting(request.value.key, request.value.value);
+        return freezeSettingsPageState(this, "downloads-updated");
+      }
+      if (command === "settings:choose-download-directory") {
+        await chooseDesktopDownloadDirectory(this.#sessionContexts.get(session)?.ownerWindow);
+        return freezeSettingsPageState(this, "downloads-updated");
       }
       if (command === "settings:set-locale") {
         this.setLocaleSetting(request.value);
         return freezeSettingsPageState(this, "locale-updated");
       }
       if (command === "settings:relaunch-locale") {
-        const accepted = this.relaunchForLocaleChange();
+        const accepted = await this.relaunchForLocaleChange();
         return freezeSettingsPageState(
           this,
-          accepted ? "locale-relaunching" : "locale-relaunch-cancelled"
+          accepted ? "locale-relaunching" : "locale-relaunch-cancelled",
         );
       }
       if (command === "settings:set-process-isolation") {
@@ -2840,12 +3208,12 @@ export class EngineRuntime {
         return freezeSettingsPageState(this, "process-isolation-updated");
       }
       if (command === "settings:relaunch-process-isolation") {
-        const accepted = this.relaunchForProcessIsolationChange();
+        const accepted = await this.relaunchForProcessIsolationChange();
         return freezeSettingsPageState(
           this,
           accepted
             ? "process-isolation-relaunching"
-            : "process-isolation-relaunch-cancelled"
+            : "process-isolation-relaunch-cancelled",
         );
       }
       if (command === "settings:set-clean-links") {
@@ -2897,7 +3265,7 @@ export class EngineRuntime {
         if (command === "extensions:set-enabled") {
           const extension = await manager.setEnabled(
             request.value.id,
-            request.value.enabled
+            request.value.enabled,
           );
           return freezeExtensionsPageState(manager, "state-updated", {
             changedExtensionId: extension.id,
@@ -2906,7 +3274,7 @@ export class EngineRuntime {
         if (command === "extensions:set-private-browsing") {
           const extension = await manager.setPrivateBrowsingAllowed(
             request.value.id,
-            request.value.enabled
+            request.value.enabled,
           );
           return freezeExtensionsPageState(manager, "private-access-updated", {
             changedExtensionId: extension.id,
@@ -2915,7 +3283,7 @@ export class EngineRuntime {
         if (command === "extensions:set-pinned") {
           const extension = await manager.setToolbarPinned(
             request.value.id,
-            request.value.enabled
+            request.value.enabled,
           );
           return freezeExtensionsPageState(manager, "toolbar-updated", {
             changedExtensionId: extension.id,
@@ -3052,23 +3420,40 @@ export class EngineRuntime {
     }
 
     if (page.key === "downloads") {
-      if (command === "downloads:cancel") {
+      const downloadEntry = this.#downloadsById.get(request.value);
+      if (["downloads:cancel", "downloads:retry", "downloads:remove", "downloads:open"].includes(command) &&
+          (!downloadEntry || downloadEntry.state.private !== session.state.private)) {
+        throw new Error("Download does not belong to this browsing mode");
+      }
+      if (command === "downloads:open") {
+        const context = this.#sessionContexts.get(session);
+        let opened = false;
+        if (context?.activeSession === session) {
+          try {
+            opened = await this.openDownload(request.value, { window: context.ownerWindow });
+          } catch (error) {
+            console.error("Navis could not open a completed download", error);
+          }
+        }
+        return Object.freeze({ ...this.#downloadPageState(session.state.private),
+          outcome: opened ? "ready" : "failed", ...(opened ? {} : { error: "download-open-failed" }),
+        });
+      } else if (command === "downloads:cancel") {
         await this.cancelDownload(request.value);
       } else if (command === "downloads:retry") {
         await this.retryDownload(request.value);
       } else if (command === "downloads:remove") {
         await this.removeDownload(request.value);
+      } else if (command === "downloads:acknowledge") {
+        const context = this.#sessionContexts.get(session);
+        if (context?.activeSession === session) {
+          this.acknowledgeDownloadsSeen(request.value, { window: context.ownerWindow });
+        }
+        return Object.freeze({ pageKey: "downloads", outcome: "acknowledged" });
       } else if (command !== "downloads:get") {
         throw new TypeError(`Unsupported downloads command: ${command}`);
       }
-      return Object.freeze({
-        pageKey: page.key,
-        outcome: "ready",
-        private: session.state.private,
-        items: Object.freeze(
-          this.downloads.filter(item => item.private === session.state.private)
-        ),
-      });
+      return this.#downloadPageState(session.state.private);
     }
 
     throw new TypeError(`The ${page.key} route does not offer ${command}`);
@@ -3082,7 +3467,7 @@ export class EngineRuntime {
     const uris = [];
     try {
       const commandLine = ownerWindow.arguments?.[0]?.QueryInterface(
-        Ci.nsICommandLine
+        Ci.nsICommandLine,
       );
       let argument;
       while ((argument = commandLine?.handleFlagWithParam("url", false))) {
@@ -3095,6 +3480,30 @@ export class EngineRuntime {
       return uris;
     }
     return fallbackURI == null ? [] : [normalizeURI(fallbackURI).spec];
+  }
+
+  async openDownload(id, { window: ownerWindow } = {}) {
+    const eligibleWindow = () => !this.#closed && this.#windows.has(ownerWindow) &&
+      !ownerWindow.closed && ownerWindow.document.visibilityState === "visible" &&
+      ownerWindow.document.hasFocus();
+    if (!eligibleWindow() || this.#openingDownloads.has(id)) return false;
+    const entry = this.#downloadsById.get(id);
+    if (!entry || entry.state.private !== isPrivateWindow(ownerWindow) ||
+        !entry.download.succeeded) return false;
+    this.#openingDownloads.add(id);
+    try {
+      // Check disk again: a completed file may have been moved/deleted since
+      // its last snapshot. Gecko refresh updates the shared download views.
+      await entry.download.refresh();
+      if (!eligibleWindow() || this.#downloadsById.get(id)?.download !== entry.download ||
+          !entry.download.succeeded || !entry.download.target.exists) return false;
+      // Keep Gecko's executable consent and platform/MIME launch handling.
+      // Never construct a shell command from a download path or open its URL.
+      await entry.download.launch({ useSystemDefault: true });
+      return true;
+    } finally {
+      this.#openingDownloads.delete(id);
+    }
   }
 
   async cancelDownload(id) {
@@ -3143,6 +3552,14 @@ export class EngineRuntime {
       return false;
     }
     this.#closed = true;
+    for (const prefix of ["navis.appearance.", "navis.bookmarks.bar.", "navis.history."]) {
+      Services.prefs.removeObserver(prefix, this.#appearanceObserver);
+    }
+    this.#appearanceDelegates.clear();
+    Services.obs.removeObserver(this.#profileObserver, "navis-profile-identity-changed");
+
+    this.#devTools?.close();
+    this.#devTools = null;
 
     for (const session of [...this.#sessions]) {
       session.close();
@@ -3154,34 +3571,38 @@ export class EngineRuntime {
       this.#downloadList.removeView(this.#downloadView);
     }
     this.#downloadList = null;
+    if (this.#downloadAttentionObserver) {
+      Services.obs.removeObserver(this.#downloadAttentionObserver, "navis-download-attention-changed");
+      this.#downloadAttentionObserver = null;
+    }
     this.#downloadView = null;
     this.#downloadsById.clear();
 
     if (this.#extensionActions) {
       this.#extensionActions.off(
         "action-changed",
-        this.#extensionActionChangedListener
+        this.#extensionActionChangedListener,
       );
       this.#extensionActions.off(
         "action-removed",
-        this.#extensionActionRemovedListener
+        this.#extensionActionRemovedListener,
       );
       this.#extensionActions.off(
         "popup-requested",
-        this.#extensionPopupRequestedListener
+        this.#extensionPopupRequestedListener,
       );
       this.#extensionActions.off(
         "page-action-changed",
-        this.#extensionActionChangedListener
+        this.#extensionActionChangedListener,
       );
       this.#extensionActions.off(
         "page-action-removed",
-        this.#extensionActionRemovedListener
+        this.#extensionActionRemovedListener,
       );
     }
     this.#extensionOmnibox?.off(
       "state-changed",
-      this.#extensionOmniboxChangedListener
+      this.#extensionOmniboxChangedListener,
     );
     this.#extensionPopupHost?.close();
     this.#extensionPopupHost = null;
@@ -3208,14 +3629,14 @@ export class EngineRuntime {
     }
     const context = this.#sessionContexts.get(session);
     const extensionTab = DesktopExtensionTabs.getForBrowser(
-      session[GET_BROWSER]()
+      session[GET_BROWSER](),
     );
     if (extensionTab) {
       this.#extensionOmnibox?.cancel(extensionTab);
     }
     DesktopExtensionTabs.unregisterSession(
       session,
-      this.#closed || Boolean(context?.releasing)
+      this.#closed || Boolean(context?.releasing),
     );
     this.#notifyExtensionActions();
     this.#core.closeSession(session[GET_CORE_SESSION_ID]());
@@ -3243,7 +3664,7 @@ export class EngineRuntime {
     const ownerWindow = view[GET_VIEW_WINDOW]();
     if (session.state.private !== isPrivateWindow(ownerWindow)) {
       throw new Error(
-        "A desktop Session cannot cross the normal/private window boundary"
+        "A desktop Session cannot cross the normal/private window boundary",
       );
     }
     const context = this.#ensureWindow(ownerWindow);
@@ -3287,6 +3708,17 @@ export class EngineRuntime {
     this.#core.detach(session[GET_CORE_SESSION_ID](), viewId);
   }
 
+  [PREPARE_BROWSER_TRANSFER](session) {
+    if (!this.#sessions.has(session)) {
+      throw new TypeError("The session does not belong to this runtime");
+    }
+    // A docked Gecko toolbox captures its browser container when the host is
+    // created.  Retire it before swapDocShells moves the Session target to a
+    // parking browser or another View; F12 can reopen it on the new host once
+    // the transfer has committed.
+    this.#devTools?.closeForBrowserTransfer(session);
+  }
+
   [SET_SESSION_CRASHED](session, crashed) {
     if (!this.#sessions.has(session)) {
       throw new TypeError("The session does not belong to this runtime");
@@ -3308,7 +3740,7 @@ export class EngineRuntime {
         url: state.url,
         title: state.title,
         private: state.private,
-      })
+      }),
     );
   }
 
@@ -3333,7 +3765,7 @@ export class EngineRuntime {
         return Object.freeze({ credential: null });
       }
       const credential = await this.#profileStore.getCredential(
-        credentials[0].id
+        credentials[0].id,
       );
       if (!credential || !this.#sessions.has(session)) {
         return Object.freeze({ credential: null });
@@ -3366,7 +3798,7 @@ export class EngineRuntime {
       origin: capture.origin,
     });
     const existing = credentials.find(
-      credential => credential.username === capture.username
+      (credential) => credential.username === capture.username,
     );
     if (existing) {
       const full = await this.#profileStore.getCredential(existing.id);
@@ -3378,7 +3810,7 @@ export class EngineRuntime {
     }
     session[SET_CREDENTIAL_STATE](actor, capture.origin, credentials);
     session[QUEUE_CREDENTIAL_PROMPT](
-      Object.freeze({ ...capture, existingId: existing?.id ?? null })
+      Object.freeze({ ...capture, existingId: existing?.id ?? null }),
     );
     return true;
   }
@@ -3403,7 +3835,7 @@ export class EngineRuntime {
     }
     credentialText(id, "Credential ID", 128, { allowEmpty: false });
     const state = session.state.credentials;
-    if (!state.items.some(item => item.id === id)) {
+    if (!state.items.some((item) => item.id === id)) {
       throw new Error("Credential is not available to this Session");
     }
     const credential = await this.#profileStore.getCredential(id);
@@ -3429,7 +3861,7 @@ export class EngineRuntime {
       session[GET_CORE_SESSION_ID](),
       commandId,
       requestedUrl ?? "",
-      requestedUrl !== null
+      requestedUrl !== null,
     );
   }
 
@@ -3571,11 +4003,11 @@ export class EngineRuntime {
     const activate = policy.activate;
     const previousActiveSession = sourceContext.activeSession;
     const destinationContext = this.#windows.get(
-      policy.view[GET_VIEW_WINDOW]()
+      policy.view[GET_VIEW_WINDOW](),
     );
     const userContextId = userContextIdFrom(
       openWindowInfo,
-      openerOriginAttributes
+      openerOriginAttributes,
     );
     const preferredRemoteType =
       openerBrowser?.remoteType ||
@@ -3591,7 +4023,7 @@ export class EngineRuntime {
     } catch (error) {
       console.error(
         "Desktop embedder could not predict a content process",
-        error
+        error,
       );
     }
     let initialBrowsingContextGroupId = null;
@@ -3602,7 +4034,9 @@ export class EngineRuntime {
       } catch {}
     }
     const restorationSessions = new Set(
-      [previousActiveSession, destinationContext?.activeSession].filter(Boolean)
+      [previousActiveSession, destinationContext?.activeSession].filter(
+        Boolean,
+      ),
     );
     let session;
     try {
@@ -3632,7 +4066,7 @@ export class EngineRuntime {
           openerSessionId: this.#sessionIdForBrowser(openerBrowser),
         }),
         restorationSessions,
-        uri
+        uri,
       )
     ) {
       return null;
@@ -3711,7 +4145,7 @@ export class EngineRuntime {
     }
     if (ownerWindow.browserDOMWindow) {
       throw new Error(
-        "The EngineView window is already owned by another browser integration"
+        "The EngineView window is already owned by another browser integration",
       );
     }
 
@@ -3798,7 +4232,7 @@ export class EngineRuntime {
       const result = this.#navigationDelegate.onSessionCreated(details);
       if (typeof result?.then === "function") {
         throw new TypeError(
-          "NavigationDelegate.onSessionCreated must complete synchronously"
+          "NavigationDelegate.onSessionCreated must complete synchronously",
         );
       }
       if (!this.#sessions.has(details.session)) {
@@ -3836,7 +4270,7 @@ export class EngineRuntime {
       this.#navigationDelegate,
       "NavigationDelegate",
       "onPopupBlocked",
-      detail
+      detail,
     );
   }
 
@@ -3846,7 +4280,7 @@ export class EngineRuntime {
     }
     try {
       const { DesktopExtensionPermissionPrompts } = ChromeUtils.importESModule(
-        "resource://gre/modules/DesktopExtensionPermissionPrompts.sys.mjs"
+        "resource://gre/modules/DesktopExtensionPermissionPrompts.sys.mjs",
       );
       DesktopExtensionPermissionPrompts.registerRuntime(
         this,
@@ -3859,11 +4293,11 @@ export class EngineRuntime {
             return false;
           }
           return nativeTab.session[QUEUE_EXTENSION_PERMISSION](request);
-        }
+        },
       );
       this.#extensionPermissionPrompts = DesktopExtensionPermissionPrompts;
       const { DesktopExtensionManager } = ChromeUtils.importESModule(
-        "resource://gre/modules/DesktopExtensionManager.sys.mjs"
+        "resource://gre/modules/DesktopExtensionManager.sys.mjs",
       );
       const manager = new DesktopExtensionManager();
       await manager.initialize();
@@ -3873,40 +4307,40 @@ export class EngineRuntime {
       }
       this.#extensionManager = manager;
       const { DesktopExtensionActions } = ChromeUtils.importESModule(
-        "resource://gre/modules/DesktopExtensionActions.sys.mjs"
+        "resource://gre/modules/DesktopExtensionActions.sys.mjs",
       );
       const { DesktopExtensionOmnibox } = ChromeUtils.importESModule(
-        "resource://gre/modules/DesktopExtensionOmnibox.sys.mjs"
+        "resource://gre/modules/DesktopExtensionOmnibox.sys.mjs",
       );
       const { DesktopExtensionPopupHost } = ChromeUtils.importESModule(
-        "resource://gre/modules/DesktopExtensionPopupHost.sys.mjs"
+        "resource://gre/modules/DesktopExtensionPopupHost.sys.mjs",
       );
       this.#extensionActions = DesktopExtensionActions;
       this.#extensionOmnibox = DesktopExtensionOmnibox;
       this.#extensionPopupHost = new DesktopExtensionPopupHost();
       DesktopExtensionActions.on(
         "action-changed",
-        this.#extensionActionChangedListener
+        this.#extensionActionChangedListener,
       );
       DesktopExtensionActions.on(
         "action-removed",
-        this.#extensionActionRemovedListener
+        this.#extensionActionRemovedListener,
       );
       DesktopExtensionActions.on(
         "popup-requested",
-        this.#extensionPopupRequestedListener
+        this.#extensionPopupRequestedListener,
       );
       DesktopExtensionActions.on(
         "page-action-changed",
-        this.#extensionActionChangedListener
+        this.#extensionActionChangedListener,
       );
       DesktopExtensionActions.on(
         "page-action-removed",
-        this.#extensionActionRemovedListener
+        this.#extensionActionRemovedListener,
       );
       DesktopExtensionOmnibox.on(
         "state-changed",
-        this.#extensionOmniboxChangedListener
+        this.#extensionOmniboxChangedListener,
       );
       this.#notifyExtensionActions();
     } catch (error) {
@@ -3914,8 +4348,38 @@ export class EngineRuntime {
       this.#extensionPermissionPrompts = null;
       console.error(
         "Desktop embedder could not initialize the extension manager",
-        error
+        error,
       );
+    }
+  }
+
+  async #closeDevToolsForRelaunch() {
+    const devTools = this.#devTools;
+    if (!devTools) {
+      return;
+    }
+    // A Gecko restart tears down content-process actors immediately after
+    // quit is accepted. Complete the page-toolbox lifecycle while its target
+    // Sessions are still alive, then let normal shutdown close the Runtime.
+    // Clearing the slot also lets F12 construct a fresh adapter if a page
+    // vetoes the later attempt-quit request.
+    this.#devTools = null;
+    await devTools.closeAndWait();
+  }
+
+  #developerTools() {
+    if (!this.#devTools) {
+      const { DesktopDevTools } = ChromeUtils.importESModule(
+        "resource://gre/modules/DesktopDevTools.sys.mjs",
+      );
+      this.#devTools = new DesktopDevTools();
+    }
+    return this.#devTools;
+  }
+
+  #assertOwnedSession(session) {
+    if (!this.#sessions.has(session)) {
+      throw new TypeError("The Session does not belong to this Runtime");
     }
   }
 
@@ -3923,11 +4387,11 @@ export class EngineRuntime {
     this.#assertOpen();
     if (!this.#sessions.has(session)) {
       throw new TypeError(
-        "The extension action Session does not belong to this Runtime"
+        "The extension action Session does not belong to this Runtime",
       );
     }
     const nativeTab = DesktopExtensionTabs.getForBrowser(
-      session[GET_BROWSER]()
+      session[GET_BROWSER](),
     );
     if (!nativeTab || nativeTab.runtime !== this) {
       throw new Error("The extension action Session has no registered tab");
@@ -3940,7 +4404,7 @@ export class EngineRuntime {
     extensionId,
     popup,
     anchorId,
-    browserStyle
+    browserStyle,
   ) {
     if (nativeTab?.runtime !== this) {
       return false;
@@ -3954,7 +4418,7 @@ export class EngineRuntime {
       extension,
       popup,
       anchorId,
-      browserStyle
+      browserStyle,
     );
   }
 
@@ -3962,7 +4426,7 @@ export class EngineRuntime {
     callDelegate(
       this.#extensionActionDelegate,
       "ExtensionActionDelegate",
-      "onActionsChanged"
+      "onActionsChanged",
     );
   }
 
@@ -3972,15 +4436,21 @@ export class EngineRuntime {
       return;
     }
     this.#downloadList = downloadList;
+    this.#downloadAttentionObserver = () => this.#dispatchDownloadChange();
+    Services.obs.addObserver(this.#downloadAttentionObserver, "navis-download-attention-changed");
+    this.#downloadLifecycle = getDesktopDownloadLifecycle();
     this.#downloadView = {
-      onDownloadAdded: download => this.#updateDownload(download),
-      onDownloadChanged: download => this.#updateDownload(download),
-      onDownloadRemoved: download => this.#removeDownload(download),
+      onDownloadAdded: (download) => this.#updateDownload(download),
+      onDownloadChanged: (download) => this.#updateDownload(download),
+      onDownloadRemoved: (download) => this.#removeDownload(download),
     };
-    downloadList.addView(this.#downloadView);
+    await downloadList.addView(this.#downloadView);
+    this.#downloadInitialized = true;
   }
 
   #updateDownload(download) {
+    getDesktopDownloadAttention().observe(download, { existing: !this.#downloadInitialized });
+    this.#downloadLifecycle?.observe(download, { existing: !this.#downloadInitialized });
     let id = this.#downloadIds.get(download);
     if (!id) {
       id = `download-${nextDownloadId++}`;
@@ -3994,6 +4464,8 @@ export class EngineRuntime {
   }
 
   #removeDownload(download) {
+    getDesktopDownloadAttention().forget(download);
+    this.#downloadLifecycle?.forget(download);
     const id = this.#downloadIds.get(download);
     if (id) {
       this.#downloadsById.delete(id);
@@ -4002,13 +4474,22 @@ export class EngineRuntime {
   }
 
   #dispatchDownloadChange() {
+    this.#downloadRevision++;
     const downloads = this.downloads;
     callDelegate(
       this.#downloadDelegate,
       "DownloadDelegate",
       "onDownloadsChanged",
-      downloads
+      downloads,
     );
+    for (const session of this.#sessions) {
+      const browser = session[GET_BROWSER]();
+      if (authenticatedInternalPage(browser)?.key !== "downloads") continue;
+      try {
+        browser.browsingContext?.currentWindowGlobal?.getActor("DesktopInternalPage")
+          .sendAsyncMessage("DesktopInternalPage:DownloadsChanged", this.#downloadPageState(session.state.private));
+      } catch { /* Navigation or teardown may destroy the actor between checks. */ }
+    }
   }
 }
 
@@ -4028,7 +4509,7 @@ class DesktopBrowserDOMWindow {
     where,
     flags,
     triggeringPrincipal,
-    policyContainer
+    policyContainer,
   ) {
     return this.#runtime[OPEN_FROM_GECKO]({
       ownerWindow: this.#window,
@@ -4064,7 +4545,7 @@ class DesktopBrowserDOMWindow {
     where,
     flags,
     triggeringPrincipal,
-    policyContainer
+    policyContainer,
   ) {
     if (!uri) {
       throw Components.Exception("A URI is required", Cr.NS_ERROR_FAILURE);
@@ -4146,13 +4627,13 @@ export class EngineView {
       this.#browser?.isConnected &&
       this.#active &&
       !this.#crashed &&
-      !this.#browser.hidden
+      !this.#browser.hidden,
     );
   }
 
   get focused() {
     return Boolean(
-      this.visible && this.#document.activeElement === this.#browser
+      this.visible && this.#document.activeElement === this.#browser,
     );
   }
 
@@ -4287,6 +4768,7 @@ export class EngineSession {
   #progressListener = null;
   #titleListener = null;
   #crashListener = null;
+  #windowCloseListener = null;
   #active = false;
   #closed = false;
   #prompts = [];
@@ -4365,7 +4847,7 @@ export class EngineSession {
     this.#assertOpen();
     if (typeof requestId !== "string" || typeof command !== "string") {
       throw new TypeError(
-        "Context-menu request and command IDs must be strings"
+        "Context-menu request and command IDs must be strings",
       );
     }
     const request = this.#contextMenuRequest;
@@ -4386,7 +4868,7 @@ export class EngineSession {
         request.actor.dismiss(request.token);
         handled = DesktopExtensionMenus.execute(
           request.extensionMenuRequestId,
-          command
+          command,
         );
       } else if (command === "back") {
         DesktopExtensionMenus.dismiss(request.extensionMenuRequestId);
@@ -4400,6 +4882,20 @@ export class EngineSession {
         DesktopExtensionMenus.dismiss(request.extensionMenuRequestId);
         request.actor.dismiss(request.token);
         handled = this.reload();
+      } else if (command === "search-selection") {
+        DesktopExtensionMenus.dismiss(request.extensionMenuRequestId);
+        request.actor.dismiss(request.token);
+        handled = this.#runtime.searchSelectedText(this, request.selectionSearch.text,
+          request.selectionSearch.providerId);
+      } else if (command === "inspect-element") {
+        DesktopExtensionMenus.dismiss(request.extensionMenuRequestId);
+        request.actor.dismiss(request.token);
+        handled = true;
+        this.#runtime
+          [INSPECT_CONTEXT_TARGET](this, request.targetIdentifier)
+          .catch((error) => {
+            console.error("Desktop element inspection failed", error);
+          });
       } else {
         DesktopExtensionMenus.dismiss(request.extensionMenuRequestId);
         handled = request.actor.execute(request.token, command);
@@ -4460,7 +4956,7 @@ export class EngineSession {
       delegate,
       "ContentDelegate",
       ["onStateChanged", "onInteraction"],
-      ["onStateChanged"]
+      ["onStateChanged"],
     );
     this.#contentDelegate = delegate;
     return this;
@@ -4471,7 +4967,7 @@ export class EngineSession {
       delegate,
       "ContextMenuDelegate",
       ["onShow", "onDismissed"],
-      ["onShow"]
+      ["onShow"],
     );
     this.#dismissContextMenu("delegate-changed");
     this.#contextMenuDelegate = delegate;
@@ -4483,7 +4979,7 @@ export class EngineSession {
       delegate,
       "PermissionDelegate",
       ["onRequest", "onCanceled"],
-      ["onRequest"]
+      ["onRequest"],
     );
     this.#permissionDelegate = delegate;
     return this;
@@ -4494,7 +4990,7 @@ export class EngineSession {
       delegate,
       "PromptDelegate",
       ["onPrompt", "onCanceled"],
-      ["onPrompt"]
+      ["onPrompt"],
     );
     this.#promptDelegate = delegate;
     return this;
@@ -4505,7 +5001,7 @@ export class EngineSession {
       delegate,
       "WebAuthnDelegate",
       ["onRequest", "onCanceled"],
-      ["onRequest"]
+      ["onRequest"],
     );
     if (delegate !== this.#webAuthnDelegate) {
       this.#cancelWebAuthnPrompts("delegate-changed");
@@ -4519,7 +5015,7 @@ export class EngineSession {
       delegate,
       "MediaDelegate",
       ["onStateChanged"],
-      ["onStateChanged"]
+      ["onStateChanged"],
     );
     this.#mediaDelegate = delegate;
     return this;
@@ -4556,7 +5052,7 @@ export class EngineSession {
         this.#runtime[UPDATE_CORE_NAVIGATION](
           this,
           "stopNavigation",
-          this.#state.navigationId
+          this.#state.navigationId,
         );
       }
       // Publish one terminal state while the browser is still available to
@@ -4569,6 +5065,7 @@ export class EngineSession {
         credentials: { origin: null, items: [] },
         media: { camera: false, microphone: false, screen: false },
       });
+      DesktopExtensionTabs.notifySessionClosing(this);
       this.#destroyBrowser();
     } finally {
       this.#view?.[RELEASE_VIEW](this);
@@ -4630,7 +5127,7 @@ export class EngineSession {
     const changed = this.#runtime[UPDATE_CORE_NAVIGATION](
       this,
       "stopNavigation",
-      this.#state.navigationId
+      this.#state.navigationId,
     );
     if (changed) {
       this.#syncNavigationState();
@@ -4665,7 +5162,7 @@ export class EngineSession {
     this.#patchState({
       credentials: {
         origin,
-        items: items.map(item => ({ ...item })),
+        items: items.map((item) => ({ ...item })),
       },
     });
   }
@@ -4688,7 +5185,7 @@ export class EngineSession {
           origin: credential.origin,
           password: credential.password,
           username: credential.username,
-        }
+        },
       );
       return Boolean(result?.filled);
     } catch (error) {
@@ -4728,11 +5225,13 @@ export class EngineSession {
       descriptor,
       delegateType: "prompt",
       notifyShown: null,
-      respond: response => {
+      respond: (response) => {
         if (response.action === "accept" && response.button === 0) {
-          this.#runtime[SAVE_CREDENTIAL_CAPTURE](this, capture).catch(error => {
-            console.error("Desktop credential save failed", error);
-          });
+          this.#runtime
+            [SAVE_CREDENTIAL_CAPTURE](this, capture)
+            .catch((error) => {
+              console.error("Desktop credential save failed", error);
+            });
         }
       },
       cancel: () => undefined,
@@ -4740,10 +5239,10 @@ export class EngineSession {
   }
 
   [QUEUE_EXTENSION_PERMISSION](request) {
-    return new Promise(resolve => {
+    return new Promise((resolve) => {
       let settled = false;
       let timeout = null;
-      const finish = allowed => {
+      const finish = (allowed) => {
         if (settled) {
           return;
         }
@@ -4779,14 +5278,14 @@ export class EngineSession {
         descriptor,
         delegateType: "permission",
         notifyShown: null,
-        respond: decision => {
+        respond: (decision) => {
           finish(decision === "allow-always" || decision === "allow-session");
         },
         cancel: () => finish(false),
       };
       timeout = setTimeout(
         () => this.#cancelQueuedPrompt(promptEntry, "timed-out"),
-        EXTENSION_PERMISSION_TIMEOUT_MS
+        EXTENSION_PERMISSION_TIMEOUT_MS,
       );
       this.#enqueuePrompt(promptEntry);
     });
@@ -4806,7 +5305,7 @@ export class EngineSession {
     } else if (pendingPrompt.delegateType === "webAuthn") {
       normalizedResponse = normalizeWebAuthnResponse(
         response,
-        pendingPrompt.descriptor
+        pendingPrompt.descriptor,
       );
       if (!normalizedResponse) {
         throw new TypeError("Unsupported WebAuthnDelegate response");
@@ -4814,7 +5313,7 @@ export class EngineSession {
     } else {
       normalizedResponse = normalizePromptResponse(
         response,
-        pendingPrompt.descriptor
+        pendingPrompt.descriptor,
       );
       if (!normalizedResponse) {
         throw new TypeError("Unsupported PromptDelegate response");
@@ -4851,7 +5350,7 @@ export class EngineSession {
     }
     if (this.#view) {
       throw new Error(
-        "EngineSession is already attached; detach its current View first"
+        "EngineSession is already attached; detach its current View first",
       );
     }
 
@@ -4876,7 +5375,7 @@ export class EngineSession {
     let destinationBrowser;
     try {
       destinationBrowser = view[CREATE_VIEW_BROWSER](
-        this.#browserTransferOptions()
+        this.#browserTransferOptions(),
       );
       const parkingBrowser = this.#swapBrowser(destinationBrowser);
       this.#view = view;
@@ -4913,7 +5412,7 @@ export class EngineSession {
     try {
       parkingBrowser = this.#runtime[CREATE_PARKING_BROWSER](
         this,
-        this.#browserTransferOptions()
+        this.#browserTransferOptions(),
       );
       this.#swapBrowser(parkingBrowser);
     } catch (error) {
@@ -4991,7 +5490,7 @@ export class EngineSession {
             webProgress,
             request,
             newLocation,
-            flags
+            flags,
           );
         }
         if (!rootProgress || !newLocation) {
@@ -5003,7 +5502,7 @@ export class EngineSession {
             this,
             "setNavigationLocation",
             navigationId,
-            newLocation.spec
+            newLocation.spec,
           );
           return;
         }
@@ -5012,7 +5511,7 @@ export class EngineSession {
           this,
           "setNavigationLocation",
           navigationId,
-          newLocation.spec
+          newLocation.spec,
         );
         changed = this.#writeNavigationTitle(navigationId) || changed;
         changed = this.#writeNavigationHistory(navigationId) || changed;
@@ -5037,7 +5536,7 @@ export class EngineSession {
           this,
           "setNavigationSecurity",
           navigationId,
-          security
+          security,
         );
         changed = this.#writeNavigationIdentity(navigationId) || changed;
         if (changed) {
@@ -5053,7 +5552,7 @@ export class EngineSession {
             webProgress,
             request,
             state,
-            status
+            status,
           );
         }
         if (
@@ -5085,13 +5584,15 @@ export class EngineSession {
               "observeNavigationStart",
               requestedUrl ?? "",
               requestedUrl !== null,
-              startKind
+              startKind,
             );
             if (request && typeof request === "object") {
               this.#requestNavigations.set(request, navigationId);
             }
             this.#syncNavigationState(
-              navigationId !== this.#state.navigationId ? { favicon: "" } : null
+              navigationId !== this.#state.navigationId
+                ? { favicon: "" }
+                : null,
             );
           }
         }
@@ -5108,7 +5609,7 @@ export class EngineSession {
               "finishNavigation",
               navigationId,
               Boolean(failureCode),
-              failureCode
+              failureCode,
             ) || changed;
           if (changed) {
             this.#syncNavigationState();
@@ -5131,7 +5632,7 @@ export class EngineSession {
       this.#runtime[RECORD_HISTORY_TITLE](this);
       DesktopExtensionTabs.notifyTitle(this.#browser);
     };
-    this.#crashListener = event => {
+    this.#crashListener = (event) => {
       if (!event.isTopFrame) {
         return;
       }
@@ -5153,6 +5654,7 @@ export class EngineSession {
       callDelegate(this.#crashDelegate, "CrashDelegate", "onCrash", detail);
     };
 
+    this.#windowCloseListener = event => this.#handleWindowClose(event);
     this.#browser = browser;
     this.#bindBrowser(browser);
     DesktopExtensionTabs.registerSession(this, this.#runtime, browser);
@@ -5168,7 +5670,7 @@ export class EngineSession {
       external: isExternal = false,
       allowInheritPrincipal = true,
       navigationCommand = "load",
-    } = {}
+    } = {},
   ) {
     this.#assertOpen();
     if (this.#state.crashed) {
@@ -5197,7 +5699,7 @@ export class EngineSession {
           policyContainer,
           loadFlags,
         });
-      }
+      },
     );
   }
 
@@ -5205,7 +5707,7 @@ export class EngineSession {
     const navigationId = this.#runtime[BEGIN_CORE_NAVIGATION](
       this,
       command,
-      requestedUrl
+      requestedUrl,
     );
     this.#syncNavigationState({ crashed: false, favicon: "" });
     try {
@@ -5220,7 +5722,7 @@ export class EngineSession {
         "finishNavigation",
         navigationId,
         true,
-        failureCode
+        failureCode,
       );
       this.#syncNavigationState();
       throw error;
@@ -5271,7 +5773,7 @@ export class EngineSession {
       userContextId:
         Number.parseInt(
           this.#browser.getAttribute("usercontextid") || "0",
-          10
+          10,
         ) || 0,
       name: this.#browser.getAttribute("name") || "",
       skipLoad: false,
@@ -5299,12 +5801,12 @@ export class EngineSession {
     });
     if (
       request.command === "diagnostics:get" &&
-      (page.key === "support" || page.key === "settings/help")
+      (page.key === "support" || page.id === "settings")
     ) {
       return freezeSupportDiagnosticsState(
         page.key,
         this.#browser,
-        this.#runtime
+        this.#runtime,
       );
     }
     return this.#runtime[HANDLE_INTERNAL_PAGE_COMMAND](this, page, request);
@@ -5323,7 +5825,7 @@ export class EngineSession {
       this.#contentDelegate,
       "ContentDelegate",
       "onInteraction",
-      Object.freeze({ sessionId: this.id, kind })
+      Object.freeze({ sessionId: this.id, kind }),
     );
     return true;
   }
@@ -5338,7 +5840,7 @@ export class EngineSession {
       data.pageURL !== this.#browser.currentURI?.spec ||
       data.iconURL.length > 786432 ||
       !/^data:image\/(?:avif|bmp|gif|jpeg|png|svg\+xml|vnd\.microsoft\.icon|webp|x-icon)[;,]/iu.test(
-        data.iconURL
+        data.iconURL,
       )
     ) {
       return false;
@@ -5391,9 +5893,29 @@ export class EngineSession {
       nativeTab && /^https?:/iu.test(menuContext.pageUrl)
         ? DesktopExtensionMenus.open(nativeTab, menuContext)
         : Object.freeze({ requestId: null, items: Object.freeze([]) });
+    const targetIdentifier = projectContentDomReference(
+      data.targetIdentifier,
+      this.#browser,
+    );
+    const projectedItems = projectContextMenuItems(
+      data,
+      this.#state,
+      AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS && Boolean(targetIdentifier),
+    );
+    const developerItems = projectedItems.filter(
+      (item) => item.group === "developer",
+    );
+    const selectionSearch = projectSelectionSearch({
+      text: data.selectionSearchText,
+      password: menuContext.password,
+      hasSelection: menuContext.hasSelection,
+    }, this.#runtime.searchProviders.find(provider => provider.id === this.#runtime.defaultSearchProvider));
     const items = Object.freeze([
-      ...projectContextMenuItems(data, this.#state),
+      ...projectedItems.filter((item) => item.group !== "developer"),
+      ...(selectionSearch ? [Object.freeze({id: "search-selection", group: "selection",
+        enabled: true, providerName: selectionSearch.providerName, excerpt: selectionSearch.excerpt})] : []),
       ...extensionMenu.items,
+      ...developerItems,
     ]);
     const descriptor = Object.freeze({
       id: `context-menu-${this.id}-${nextContextMenuRequestId++}`,
@@ -5420,9 +5942,11 @@ export class EngineSession {
     });
     this.#contextMenuRequest = {
       actor,
+      selectionSearch,
       token,
       navigationId: this.#state.navigationId,
       extensionMenuRequestId: extensionMenu.requestId,
+      targetIdentifier,
       descriptor,
       items: indexContextMenuItems(items),
     };
@@ -5430,7 +5954,7 @@ export class EngineSession {
       this.#contextMenuDelegate,
       "ContextMenuDelegate",
       "onShow",
-      descriptor
+      descriptor,
     );
     if (result === false) {
       this.#dismissContextMenu("rejected");
@@ -5456,46 +5980,69 @@ export class EngineSession {
       this.#contextMenuDelegate,
       "ContextMenuDelegate",
       "onDismissed",
-      Object.freeze({ id: descriptor.id, sessionId: this.id, reason })
+      Object.freeze({ id: descriptor.id, sessionId: this.id, reason }),
     );
+  }
+
+  #handleWindowClose(event) {
+    const browser = this.#browser;
+    if (this.#closed || !browser) return;
+    if (browser.isRemoteBrowser) {
+      // Toolkit's BrowserElement actor forwards only top-level close requests.
+      // Its chrome-side CustomEvent is synthetic, so isTrusted is false here.
+      if (event.target !== browser) return;
+    } else if (!event.isTrusted ||
+        event.target?.docShell?.browsingContext !== browser.browsingContext) {
+      return;
+    }
+    const ownerWindow = browser.ownerGlobal;
+    if (!ownerWindow || ownerWindow.closed) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // Gecko already decides whether a newly opened download target should
+    // close, and enforces window.close permissions. Platform owns removing the
+    // tab and selecting its neighbour (or closing the last tab's window).
+    ownerWindow.dispatchEvent(new ownerWindow.CustomEvent(
+      "NavisBindingTabCloseRequested", { detail: { session: this } },
+    ));
   }
 
   #bindBrowser(browser) {
     browserPrivateModes.set(String(browser.browserId), this.#state.private);
-    browser.desktopEmbedderContentPermissionPrompt = request => {
+    browser.desktopEmbedderContentPermissionPrompt = (request) => {
       this.#handleContentPermission(request);
     };
     browser.desktopEmbedderWebRTCPermissionPrompt = (
       request,
       respond,
-      principal
+      principal,
     ) => {
       this.#handleMediaPermission(request, respond, principal);
     };
-    browser.desktopEmbedderCancelWebRTCPermissionPrompt = callID => {
+    browser.desktopEmbedderCancelWebRTCPermissionPrompt = (callID) => {
       this.#cancelMediaPrompt(callID);
     };
     browser.desktopEmbedderPrompt = (args, abortSignal) =>
       this.#handlePrompt(args, abortSignal);
-    browser.desktopEmbedderWebAuthnPrompt = event =>
+    browser.desktopEmbedderWebAuthnPrompt = (event) =>
       this.#handleWebAuthnPrompt(event);
     browser.desktopEmbedderWebAuthnPromptActive = () =>
-      this.#prompts.some(entry => entry.delegateType === "webAuthn");
-    browser.desktopEmbedderWebAuthnRelatedOriginPrompt = event =>
+      this.#prompts.some((entry) => entry.delegateType === "webAuthn");
+    browser.desktopEmbedderWebAuthnRelatedOriginPrompt = (event) =>
       this.#handleRelatedOriginWebAuthnPrompt(event);
-    browser.desktopEmbedderWebAuthnRelatedOriginPromptCanceled = event =>
+    browser.desktopEmbedderWebAuthnRelatedOriginPromptCanceled = (event) =>
       this.#cancelNativeRelatedOriginWebAuthnPrompt(event);
-    browser.desktopEmbedderWebAuthnConditionalPrompt = event =>
+    browser.desktopEmbedderWebAuthnConditionalPrompt = (event) =>
       this.#handleConditionalWebAuthnPrompt(event);
-    browser.desktopEmbedderWebAuthnConditionalPromptCanceled = event =>
+    browser.desktopEmbedderWebAuthnConditionalPromptCanceled = (event) =>
       this.#cancelNativeConditionalWebAuthnPrompt(event);
     browser.desktopEmbedderCredentialQuery = (actor, request) =>
       this.#runtime[QUERY_CREDENTIALS](this, actor, request);
     browser.desktopEmbedderCredentialSubmit = (actor, request) =>
       this.#runtime[SUBMIT_CREDENTIAL](this, actor, request);
-    browser.desktopEmbedderCredentialActorDestroyed = actor =>
+    browser.desktopEmbedderCredentialActorDestroyed = (actor) =>
       this[CREDENTIAL_ACTOR_DESTROYED](actor);
-    browser.desktopEmbedderMediaStateChanged = media => {
+    browser.desktopEmbedderMediaStateChanged = (media) => {
       this.#patchState({
         media: {
           camera: Boolean(media.camera),
@@ -5504,7 +6051,7 @@ export class EngineSession {
         },
       });
     };
-    browser.desktopEmbedderFullscreenStateChanged = fullscreen => {
+    browser.desktopEmbedderFullscreenStateChanged = (fullscreen) => {
       this.#patchState({ fullscreen: Boolean(fullscreen) });
     };
     browser.desktopEmbedderFaviconChanged = (actor, data) => {
@@ -5521,6 +6068,7 @@ export class EngineSession {
     browser.addProgressListener(this.#progressListener, PROGRESS_FLAGS);
     browser.addEventListener("pagetitlechanged", this.#titleListener);
     browser.addEventListener("oop-browser-crashed", this.#crashListener);
+    browser.addEventListener("DOMWindowClose", this.#windowCloseListener);
   }
 
   #unbindBrowser(browser) {
@@ -5530,6 +6078,7 @@ export class EngineSession {
     } catch {}
     browser.removeEventListener("pagetitlechanged", this.#titleListener);
     browser.removeEventListener("oop-browser-crashed", this.#crashListener);
+    browser.removeEventListener("DOMWindowClose", this.#windowCloseListener);
     browser.desktopEmbedderContentPermissionPrompt = null;
     browser.desktopEmbedderWebRTCPermissionPrompt = null;
     browser.desktopEmbedderCancelWebRTCPermissionPrompt = null;
@@ -5568,6 +6117,7 @@ export class EngineSession {
       throw new Error("Both browser hosts must have live browsing contexts");
     }
 
+    this.#runtime[PREPARE_BROWSER_TRANSFER](this);
     const sourceWasHidden = sourceBrowser.hidden;
     const destinationWasHidden = destinationBrowser.hidden;
     const sourcePermanentKey = sourceBrowser.permanentKey;
@@ -5589,7 +6139,7 @@ export class EngineSession {
         // restores its JavaScript-side fields when the native swap failed.
         destinationBrowser.swapDocShells(sourceBrowser);
         throw new Error(
-          "Gecko rejected the browser transfer; check host principal and origin attributes"
+          "Gecko rejected the browser transfer; check host principal and origin attributes",
         );
       }
     } catch (error) {
@@ -5607,7 +6157,7 @@ export class EngineSession {
     DesktopExtensionTabs.registerSession(
       this,
       this.#runtime,
-      destinationBrowser
+      destinationBrowser,
     );
     return sourceBrowser;
   }
@@ -5628,6 +6178,7 @@ export class EngineSession {
     this.#progressListener = null;
     this.#titleListener = null;
     this.#crashListener = null;
+    this.#windowCloseListener = null;
   }
 
   #replaceBrowser() {
@@ -5652,7 +6203,7 @@ export class EngineSession {
     } catch (error) {
       console.error(
         "Desktop embedder rejected an invalid permission request",
-        error
+        error,
       );
       request.cancel();
       return;
@@ -5678,7 +6229,7 @@ export class EngineSession {
 
     const existing = Services.perms.testPermissionFromPrincipal(
       principal,
-      permission.key
+      permission.key,
     );
     if (existing === Services.perms.DENY_ACTION) {
       request.cancel();
@@ -5710,7 +6261,7 @@ export class EngineSession {
         typeof request.notifyShown === "function"
           ? () => request.notifyShown()
           : null,
-      respond: decision => {
+      respond: (decision) => {
         if (decision === "allow-session" || decision === "allow-always") {
           Services.perms.addFromPrincipal(
             principal,
@@ -5718,7 +6269,7 @@ export class EngineSession {
             Services.perms.ALLOW_ACTION,
             decision === "allow-always"
               ? Services.perms.EXPIRE_NEVER
-              : Services.perms.EXPIRE_SESSION
+              : Services.perms.EXPIRE_SESSION,
           );
           request.allow();
         } else {
@@ -5727,7 +6278,7 @@ export class EngineSession {
               principal,
               permission.key,
               Services.perms.DENY_ACTION,
-              Services.perms.EXPIRE_NEVER
+              Services.perms.EXPIRE_NEVER,
             );
           }
           request.cancel();
@@ -5763,13 +6314,13 @@ export class EngineSession {
       delegateType: "webAuthn",
       nativeId: event.tid,
       notifyShown: null,
-      respond: response => {
+      respond: (response) => {
         this.#respondToWebAuthn(event.tid, response);
       },
       cancel: () => this.#cancelWebAuthnTransaction(event.tid),
     };
     const existingIndex = this.#prompts.findIndex(
-      entry => entry.delegateType === "webAuthn"
+      (entry) => entry.delegateType === "webAuthn",
     );
     if (existingIndex === -1) {
       this.#enqueuePrompt(promptEntry);
@@ -5793,16 +6344,16 @@ export class EngineSession {
     const descriptor = projectRelatedOriginWebAuthnDescriptor(
       this.id,
       event,
-      this.#browser
+      this.#browser,
     );
     if (this.#closed || this.#state.crashed || !descriptor) {
       return Promise.resolve(false);
     }
 
     this.#exitContentFullscreenForWebAuthn();
-    return new Promise(resolve => {
+    return new Promise((resolve) => {
       let settled = false;
-      const finish = allow => {
+      const finish = (allow) => {
         if (settled) {
           return;
         }
@@ -5814,7 +6365,7 @@ export class EngineSession {
         delegateType: "webAuthn",
         nativeId: event,
         notifyShown: null,
-        respond: response => finish(response.action === "continue"),
+        respond: (response) => finish(response.action === "continue"),
         cancel: () => finish(false),
       });
     });
@@ -5824,12 +6375,12 @@ export class EngineSession {
     const descriptor = projectConditionalWebAuthnDescriptor(
       this.id,
       event,
-      this.#browser
+      this.#browser,
     );
     if (this.#closed || this.#state.crashed || !descriptor) {
       return Promise.resolve(Object.freeze({ action: "cancel" }));
     }
-    if (this.#prompts.some(entry => entry.delegateType === "webAuthn")) {
+    if (this.#prompts.some((entry) => entry.delegateType === "webAuthn")) {
       // A modal WebAuthn transaction has priority. Keep the conditional get
       // pending so a later field focus can offer it without disturbing either
       // transaction.
@@ -5837,9 +6388,9 @@ export class EngineSession {
     }
 
     this.#exitContentFullscreenForWebAuthn();
-    return new Promise(resolve => {
+    return new Promise((resolve) => {
       let settled = false;
-      const finish = response => {
+      const finish = (response) => {
         if (settled) {
           return;
         }
@@ -5851,7 +6402,7 @@ export class EngineSession {
         delegateType: "webAuthn",
         nativeId: event,
         notifyShown: null,
-        respond: response => finish(response),
+        respond: (response) => finish(response),
         cancel: () => finish(Object.freeze({ action: "cancel" })),
         nativeCancel: () => finish(null),
       });
@@ -5863,7 +6414,7 @@ export class EngineSession {
     let service;
     try {
       service = Cc["@mozilla.org/webauthn/service;1"].getService(
-        Ci.nsIWebAuthnService
+        Ci.nsIWebAuthnService,
       );
       switch (response.action) {
         case "allow-identifying-attestation":
@@ -5904,7 +6455,7 @@ export class EngineSession {
 
   #cancelNativeWebAuthnPrompt(tid) {
     const index = this.#prompts.findIndex(
-      entry => entry.delegateType === "webAuthn" && entry.nativeId === tid
+      (entry) => entry.delegateType === "webAuthn" && entry.nativeId === tid,
     );
     if (index === -1) {
       return;
@@ -5921,7 +6472,7 @@ export class EngineSession {
 
   #cancelNativeRelatedOriginWebAuthnPrompt(event) {
     const index = this.#prompts.findIndex(
-      entry => entry.delegateType === "webAuthn" && entry.nativeId === event
+      (entry) => entry.delegateType === "webAuthn" && entry.nativeId === event,
     );
     if (index === -1) {
       return;
@@ -5940,7 +6491,7 @@ export class EngineSession {
 
   #cancelNativeConditionalWebAuthnPrompt(event) {
     const index = this.#prompts.findIndex(
-      entry => entry.delegateType === "webAuthn" && entry.nativeId === event
+      (entry) => entry.delegateType === "webAuthn" && entry.nativeId === event,
     );
     if (index === -1) {
       return;
@@ -5987,20 +6538,20 @@ export class EngineSession {
   }
 
   #handleMediaPermission(request, respond, principal) {
-    const permissionKeys = request.requestTypes.map(type =>
-      MEDIA_PERMISSION_KEYS.get(type)
+    const permissionKeys = request.requestTypes.map((type) =>
+      MEDIA_PERMISSION_KEYS.get(type),
     );
     if (
       !request.secure ||
       !permissionKeys.length ||
-      permissionKeys.some(key => !key)
+      permissionKeys.some((key) => !key)
     ) {
       respond({ allow: false });
       return;
     }
 
-    const existing = permissionKeys.map(key =>
-      Services.perms.testPermissionFromPrincipal(principal, key)
+    const existing = permissionKeys.map((key) =>
+      Services.perms.testPermissionFromPrincipal(principal, key),
     );
     if (existing.includes(Services.perms.DENY_ACTION)) {
       respond({ allow: false });
@@ -6012,7 +6563,7 @@ export class EngineSession {
       respond({ allow: false });
       return;
     }
-    if (existing.every(action => action === Services.perms.ALLOW_ACTION)) {
+    if (existing.every((action) => action === Services.perms.ALLOW_ACTION)) {
       this.#addMediaManagerVideoPermission(request, principal);
       respond({ allow: true, devices });
       return;
@@ -6028,10 +6579,10 @@ export class EngineSession {
       userGesture: request.isHandlingUserInput,
       devices: Object.freeze({
         camera: Object.freeze(
-          request.videoInputDevices.map(device => device.name)
+          request.videoInputDevices.map((device) => device.name),
         ),
         microphone: Object.freeze(
-          request.audioInputDevices.map(device => device.name)
+          request.audioInputDevices.map((device) => device.name),
         ),
       }),
     });
@@ -6041,7 +6592,7 @@ export class EngineSession {
       delegateType: "permission",
       nativeId: request.callID,
       notifyShown: null,
-      respond: decision => {
+      respond: (decision) => {
         if (decision === "allow-session" || decision === "allow-always") {
           for (const key of permissionKeys) {
             Services.perms.addFromPrincipal(
@@ -6050,7 +6601,7 @@ export class EngineSession {
               Services.perms.ALLOW_ACTION,
               decision === "allow-always"
                 ? Services.perms.EXPIRE_NEVER
-                : Services.perms.EXPIRE_SESSION
+                : Services.perms.EXPIRE_SESSION,
             );
           }
           this.#addMediaManagerVideoPermission(request, principal);
@@ -6062,7 +6613,7 @@ export class EngineSession {
                 principal,
                 key,
                 Services.perms.DENY_ACTION,
-                Services.perms.EXPIRE_NEVER
+                Services.perms.EXPIRE_NEVER,
               );
             }
           }
@@ -6075,10 +6626,10 @@ export class EngineSession {
 
   #handlePrompt(args, abortSignal) {
     const descriptor = projectPromptDescriptor(this.id, args, this.#browser);
-    return new Promise(resolve => {
+    return new Promise((resolve) => {
       let settled = false;
       let promptEntry;
-      const complete = result => {
+      const complete = (result) => {
         if (settled) {
           return;
         }
@@ -6093,14 +6644,14 @@ export class EngineSession {
         descriptor,
         delegateType: "prompt",
         notifyShown: null,
-        respond: response => {
+        respond: (response) => {
           complete(promptResult(args, descriptor, response));
         },
         cancel: () => {
           complete(
             promptResult(args, descriptor, defaultPromptResponse(descriptor), {
               aborted: true,
-            })
+            }),
           );
         },
       };
@@ -6141,7 +6692,7 @@ export class EngineSession {
       principal,
       "MediaManagerVideo",
       Services.perms.ALLOW_ACTION,
-      Services.perms.EXPIRE_SESSION
+      Services.perms.EXPIRE_SESSION,
     );
   }
 
@@ -6165,7 +6716,7 @@ export class EngineSession {
       } catch (error) {
         console.error(
           "Desktop embedder could not mark a permission prompt shown",
-          error
+          error,
         );
       }
     }
@@ -6200,19 +6751,19 @@ export class EngineSession {
     }
 
     Promise.resolve(decision).then(
-      resolvedDecision => {
+      (resolvedDecision) => {
         if (!PROMPT_DECISIONS.has(resolvedDecision)) {
           console.error(
-            `PermissionDelegate returned an invalid decision: ${resolvedDecision}`
+            `PermissionDelegate returned an invalid decision: ${resolvedDecision}`,
           );
           resolvedDecision = "dismiss";
         }
         this.#resolvePrompt(promptEntry.descriptor.id, resolvedDecision);
       },
-      error => {
+      (error) => {
         console.error("PermissionDelegate decision rejected", error);
         this.#resolvePrompt(promptEntry.descriptor.id, "dismiss");
-      }
+      },
     );
   }
 
@@ -6220,7 +6771,7 @@ export class EngineSession {
     if (!this.#promptDelegate) {
       this.#resolvePrompt(
         promptEntry.descriptor.id,
-        defaultPromptResponse(promptEntry.descriptor)
+        defaultPromptResponse(promptEntry.descriptor),
       );
       return;
     }
@@ -6238,7 +6789,7 @@ export class EngineSession {
     }
 
     Promise.resolve(response).then(
-      resolvedResponse => {
+      (resolvedResponse) => {
         if (
           !normalizePromptResponse(resolvedResponse, promptEntry.descriptor)
         ) {
@@ -6247,13 +6798,13 @@ export class EngineSession {
         }
         this.#resolvePrompt(promptEntry.descriptor.id, resolvedResponse);
       },
-      error => {
+      (error) => {
         console.error("PromptDelegate response rejected", error);
         this.#resolvePrompt(
           promptEntry.descriptor.id,
-          defaultPromptResponse(promptEntry.descriptor)
+          defaultPromptResponse(promptEntry.descriptor),
         );
-      }
+      },
     );
   }
 
@@ -6277,7 +6828,7 @@ export class EngineSession {
     }
 
     Promise.resolve(response).then(
-      resolvedResponse => {
+      (resolvedResponse) => {
         if (
           !normalizeWebAuthnResponse(resolvedResponse, promptEntry.descriptor)
         ) {
@@ -6286,10 +6837,10 @@ export class EngineSession {
         }
         this.#resolvePrompt(promptEntry.descriptor.id, resolvedResponse);
       },
-      error => {
+      (error) => {
         console.error("WebAuthnDelegate response rejected", error);
         this.#resolvePrompt(promptEntry.descriptor.id, fallback);
-      }
+      },
     );
   }
 
@@ -6303,28 +6854,28 @@ export class EngineSession {
         this.#permissionDelegate,
         "PermissionDelegate",
         "onCanceled",
-        detail
+        detail,
       );
     } else if (promptEntry.delegateType === "webAuthn") {
       callDelegate(
         this.#webAuthnDelegate,
         "WebAuthnDelegate",
         "onCanceled",
-        detail
+        detail,
       );
     } else {
       callDelegate(
         this.#promptDelegate,
         "PromptDelegate",
         "onCanceled",
-        detail
+        detail,
       );
     }
   }
 
   #cancelMediaPrompt(nativeId) {
     const index = this.#prompts.findIndex(
-      promptEntry => promptEntry.nativeId === nativeId
+      (promptEntry) => promptEntry.nativeId === nativeId,
     );
     if (index === -1) {
       return;
@@ -6379,7 +6930,7 @@ export class EngineSession {
         "setNavigationHistory",
         navigationId,
         this.#browser.canGoBack,
-        this.#browser.canGoForward
+        this.#browser.canGoForward,
       );
     } catch {
       return false;
@@ -6396,7 +6947,7 @@ export class EngineSession {
       "setNavigationIdentity",
       navigationId,
       identity.id,
-      identity.key
+      identity.key,
     );
   }
 
@@ -6408,7 +6959,7 @@ export class EngineSession {
       this,
       "setNavigationTitle",
       navigationId,
-      this.#browser.contentTitle || ""
+      this.#browser.contentTitle || "",
     );
   }
 
@@ -6420,7 +6971,7 @@ export class EngineSession {
 
   #patchState(patch) {
     const changed = Object.entries(patch).some(
-      ([key, value]) => this.#state[key] !== value
+      ([key, value]) => this.#state[key] !== value,
     );
     if (!changed) {
       return;
@@ -6431,14 +6982,14 @@ export class EngineSession {
       this.#contentDelegate,
       "ContentDelegate",
       "onStateChanged",
-      state
+      state,
     );
     if (Object.hasOwn(patch, "media")) {
       callDelegate(
         this.#mediaDelegate,
         "MediaDelegate",
         "onStateChanged",
-        freezeMediaState(this.id, this.#state.media)
+        freezeMediaState(this.id, this.#state.media),
       );
     }
   }

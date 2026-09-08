@@ -1,0 +1,130 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -37,6 +37,9 @@
+ const { NavisAndroidExtensionTabTopology } = ChromeUtils.importESModule(
+   "resource://gre/modules/NavisAndroidExtensionTabTopology.sys.mjs"
+ );
++const { NavisAndroidStartup } = ChromeUtils.importESModule(
++  "resource://gre/modules/NavisAndroidStartup.sys.mjs"
++);
+ const { registerNavisAndroidFaviconActors, createNavisAndroidFaviconBridge } =
+   ChromeUtils.importESModule("resource://gre/modules/NavisAndroidFavicon.sys.mjs");
+ 
+@@ -194,7 +197,11 @@
+           const product = ChromeUtils.importESModule(
+             "resource://gre/modules/navis/NavisAndroidProduct.sys.mjs"
+           );
+-          return product.query(window, data.operation, JSON.parse(data.payload));
++          const result = await product.query(window, data.operation, JSON.parse(data.payload));
++          if (data.operation === "product:initialize") {
++            await NavisAndroidStartup.completeProductInitialization(window);
++          }
++          return result;
+         }).then(result => callback?.onSuccess({ payload: JSON.stringify(result ?? null) }))
+           .catch(error => callback?.onError(error?.message || "Product query failed"));
+         break;
+@@ -1101,6 +1108,7 @@
+     });
+   });
+ 
++  NavisAndroidStartup.markChromeReady(window);
+   dispatcher.dispatch("NavisAndroid:HostReady", {
+     browsingContextId: browser.browsingContext.id,
+     contentSession: !window.tab.isPopup,
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -25,5 +25,6 @@
+             "NavisAndroidCommandRegistry.sys.mjs",
+             "NavisAndroidContextMenus.sys.mjs",
+             "NavisAndroidExtensionTabTopology.sys.mjs",
++            "NavisAndroidStartup.sys.mjs",
+             "NavisAndroidWebExtensionHost.sys.mjs",
+         ]
+diff --git a/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs b/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
+@@ -0,0 +1,81 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++// Install Gecko's startup observers before our first readiness notification.
++// A lazy import after notifyObservers would permanently lose that signal.
++ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs");
++const { NavisAndroidExtensionTabTopology: topology } = ChromeUtils.importESModule(
++  "resource://gre/modules/NavisAndroidExtensionTabTopology.sys.mjs"
++);
++
++const chromeReady = new WeakSet();
++let completion;
++let chromeNotified = false;
++let extensionsNotified = false;
++
++function assertReady(window) {
++  if (!window || window.closed || !chromeReady.has(window) ||
++      !topology.isDirectWindow(window) || !window.browser?.isConnected ||
++      topology.nativeTab(window.tab?.id) !== window.tab || !topology.revision ||
++      !topology.activeNativeTab() || topology.entries().some(entry => {
++        const host = topology.nativeTab(entry.tabId)?.browser?.documentGlobal;
++        return !host || host.closed || !chromeReady.has(host);
++      })) {
++    throw new Error("Navis product hosts and tab topology are not ready");
++  }
++}
++
++function nextMainThreadTask(action) {
++  return new Promise((resolve, reject) => {
++    Services.tm.dispatchToMainThread(() => {
++      try {
++        action();
++        resolve();
++      } catch (error) {
++        reject(error);
++      }
++    });
++  });
++}
++
++/** Process startup belongs to Navis, not GeckoView's ModuleManager lifecycle. */
++export const NavisAndroidStartup = {
++  markChromeReady(window) {
++    if (topology.isDirectWindow(window) && window.browser?.isConnected) {
++      chromeReady.add(window);
++    }
++  },
++
++  // Called only after product:initialize succeeds. Runtime publishes all initial
++  // native hosts + product topology before this query, then initializes its
++  // extension inventory afterwards. Do not wait for that inventory here: primed
++  // backgrounds/network listeners themselves depend on these notifications.
++  completeProductInitialization(window) {
++    assertReady(window);
++    if (completion) return completion;
++    completion = (async () => {
++      await nextMainThreadTask(() => {
++        assertReady(window);
++        if (!chromeNotified) {
++          chromeNotified = true;
++          // This is chrome initialization readiness, as in Gecko's Android
++          // embedder, not an actual surface-paint assertion. Native newtab has
++          // no Gecko display; waiting for one would deadlock initial requests.
++          Services.obs.notifyObservers(window, "browser-delayed-startup-finished");
++        }
++      });
++      await nextMainThreadTask(() => {
++        assertReady(window);
++        if (!extensionsNotified) {
++          extensionsNotified = true;
++          Services.obs.notifyObservers(window, "extensions-late-startup");
++        }
++      });
++    })().catch(error => {
++      completion = null;
++      throw error;
++    });
++    return completion;
++  },
++};

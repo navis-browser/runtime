@@ -80,7 +80,7 @@ diff --git a/toolkit/mozapps/extensions/components.conf b/toolkit/mozapps/extens
 -if buildconfig.substs['MOZ_WEBEXTENSIONS_RUNTIME']:
 +if (
 +    buildconfig.substs['MOZ_WEBEXTENSIONS_RUNTIME']
-+    and not buildconfig.substs['MOZ_DESKTOP_EMBEDDER']
++    and not buildconfig.substs.get('MOZ_DESKTOP_EMBEDDER')
 +):
      Classes += [
          {
@@ -162,7 +162,7 @@ diff --git a/toolkit/components/extensions/components.conf b/toolkit/components/
  
 -if buildconfig.substs['MOZ_WIDGET_TOOLKIT'] == 'gtk' and defined('MOZ_ENABLE_DBUS'):
 +if (
-+    not buildconfig.substs['MOZ_DESKTOP_EMBEDDER']
++    not buildconfig.substs.get('MOZ_DESKTOP_EMBEDDER')
 +    and buildconfig.substs['MOZ_WIDGET_TOOLKIT'] == 'gtk'
 +    and defined('MOZ_ENABLE_DBUS')
 +):

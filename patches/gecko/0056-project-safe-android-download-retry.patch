@@ -1,0 +1,150 @@
+diff --git a/mobile/android/components/geckoview/GeckoViewStreamListener.cpp b/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
+index 140ab9e11893..9350ecaba469 100644
+--- a/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
++++ b/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
+@@ -5,11 +5,14 @@
+ #include "GeckoViewStreamListener.h"
+ 
+ #include "mozilla/fallible.h"
++#include "mozilla/Unused.h"
+ #include "nsIAsyncVerifyRedirectCallback.h"
+ #include "nsIChannelEventSink.h"
+ #include "nsIHttpChannel.h"
+ #include "nsIHttpHeaderVisitor.h"
+ #include "nsIInputStream.h"
++#include "nsIReferrerInfo.h"
++#include "nsIUploadChannel.h"
+ #include "nsINSSErrorsService.h"
+ #include "nsITransportSecurityInfo.h"
+ #include "nsIWebProgressListener.h"
+@@ -234,6 +237,35 @@ nsresult GeckoViewStreamListener::HandleWebResponse(nsIRequest* aRequest) {
+     RefPtr<HeaderVisitor> visitor = new HeaderVisitor(builder);
+     rv = httpChannel->VisitResponseHeaders(visitor);
+     NS_ENSURE_SUCCESS(rv, rv);
++
++    // Derive retry eligibility from the channel, never from a URL or response
++    // header. A Navis retry must not replay a POST, upload stream, explicit
++    // authorization, or a cookie context that a plain Session cannot recreate.
++    nsAutoCString method;
++    nsCOMPtr<nsIUploadChannel> uploadChannel = do_QueryInterface(channel);
++    nsCOMPtr<nsIInputStream> uploadStream;
++    nsAutoCString authorization;
++    Unused << httpChannel->GetRequestHeader("Authorization"_ns, authorization);
++    auto originAttributes = loadInfo->GetOriginAttributes();
++    nsAutoCString originSuffix;
++    originAttributes.CreateSuffix(originSuffix);
++    const bool bodylessGet =
++        NS_SUCCEEDED(httpChannel->GetRequestMethod(method)) &&
++        method.EqualsLiteral("GET") && uploadChannel &&
++        NS_SUCCEEDED(uploadChannel->GetUploadStream(getter_AddRefs(uploadStream))) &&
++        !uploadStream && authorization.IsEmpty() &&
++        originAttributes.mUserContextId == 0 &&
++        originAttributes.mFirstPartyDomain.IsEmpty() &&
++        originAttributes.mPartitionKey.IsEmpty();
++    nsAutoCString referrer;
++    nsCOMPtr<nsIReferrerInfo> referrerInfo;
++    if (NS_SUCCEEDED(httpChannel->GetReferrerInfo(getter_AddRefs(referrerInfo))) &&
++        referrerInfo) {
++      Unused << referrerInfo->GetComputedReferrerSpec(referrer);
++    }
++    rv = builder->NavisDownloadRetryMetadata(method, bodylessGet, referrer,
++                                             originSuffix);
++    NS_ENSURE_SUCCESS(rv, rv);
+   } else {
+     // Headers for other responses
+     // try to provide some basic metadata about the response
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java
+index 9857ff23c623..57e1c2d870b3 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java
+@@ -30,6 +30,12 @@ public class WebResponse extends WebMessage {
+   /** A boolean indicating whether or not this response is the result of a redirection. */
+   public final boolean redirected;
+ 
++  /** Native channel metadata for Navis's constrained bodyless-GET download retry. */
++  public final @Nullable String navisRequestMethod;
++  public final boolean navisBodylessGet;
++  public final @Nullable String navisDownloadReferrer;
++  public final @Nullable String navisDownloadOriginAttributes;
++
+   /** Whether or not this response was delivered via a secure connection. */
+   public final boolean isSecure;
+ 
+@@ -65,6 +71,10 @@ public class WebResponse extends WebMessage {
+     super(builder);
+     this.statusCode = builder.mStatusCode;
+     this.redirected = builder.mRedirected;
++    this.navisRequestMethod = builder.mNavisRequestMethod;
++    this.navisBodylessGet = builder.mNavisBodylessGet;
++    this.navisDownloadReferrer = builder.mNavisDownloadReferrer;
++    this.navisDownloadOriginAttributes = builder.mNavisDownloadOriginAttributes;
+     this.body = builder.mBody;
+     this.requestExternalApp = builder.mRequestExternalApp;
+     this.skipConfirmation = builder.mSkipConfirmation;
+@@ -94,6 +104,10 @@ public class WebResponse extends WebMessage {
+   public static class Builder extends WebMessage.Builder {
+     /* package */ int mStatusCode;
+     /* package */ boolean mRedirected;
++    /* package */ String mNavisRequestMethod;
++    /* package */ boolean mNavisBodylessGet;
++    /* package */ String mNavisDownloadReferrer;
++    /* package */ String mNavisDownloadOriginAttributes;
+     /* package */ InputStream mBody;
+     /* package */ boolean mRequestExternalApp = false;
+     /* package */ boolean mSkipConfirmation = false;
+@@ -109,6 +123,18 @@ public class WebResponse extends WebMessage {
+       super(uri);
+     }
+ 
++    @WrapForJNI(exceptionMode = "nsresult")
++    private void navisDownloadRetryMetadata(
++        final String method,
++        final boolean bodylessGet,
++        final String referrer,
++        final String originAttributes) {
++      mNavisRequestMethod = method;
++      mNavisBodylessGet = bodylessGet;
++      mNavisDownloadReferrer = referrer;
++      mNavisDownloadOriginAttributes = originAttributes;
++    }
++
+     @Override
+     public @NonNull Builder uri(final @NonNull String uri) {
+       super.uri(uri);
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java
+@@ -447,6 +447,33 @@
+     }
+   }
+ 
++  /** Repeats a product-requested, bodyless GET using the original extension fetch context. */
++  public CompletionStage<Boolean> retryDownload(final Request request) {
++    final CompletableFuture<Boolean> result = new CompletableFuture<>();
++    onUi(
++        () -> {
++          if (mClosed || request == null || !request.method.equals("GET")
++              || request.body != null || !isHttp(request.sourceUri)) {
++            result.completeExceptionally(new IllegalStateException("Download cannot safely be retried"));
++            return;
++          }
++          download(
++              request,
++              new EventCallback() {
++                @Override
++                public void sendSuccess(final Object value) {
++                  result.complete(value instanceof GeckoBundle);
++                }
++
++                @Override
++                public void sendError(final Object error) {
++                  result.completeExceptionally(new IllegalStateException(String.valueOf(error)));
++                }
++              });
++        });
++    return result;
++  }
++
+   private void download(final Request request, final EventCallback callback) {
+     final PendingCommand pending = new PendingCommand(callback);
+     mPending.add(pending);

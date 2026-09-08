@@ -5,16 +5,27 @@
 import { resolveNavisInternalPageURI } from "resource://gre/modules/DesktopInternalPages.sys.mjs";
 
 const SETTINGS_COMMAND_EVENT = "NavisSettingsCommand";
+const APPEARANCE_COMMAND_EVENT = "NavisAppearanceCommand";
+const APPEARANCE_STATE_EVENT = "NavisAppearanceState";
+const APPEARANCE_COMMANDS = new Set(["appearance:get"]);
 const SETTINGS_STATE_EVENT = "NavisSettingsState";
 const SETTINGS_COMMANDS = new Set([
   "settings:get",
   "settings:set-search-provider",
+  "settings:set-remote-suggestions",
   "settings:set-locale",
   "settings:relaunch-locale",
   "settings:set-process-isolation",
   "settings:relaunch-process-isolation",
   "settings:set-clean-links",
   "settings:clear-site-data",
+  "settings:search-add",
+  "settings:search-update",
+  "settings:search-remove",
+  "settings:search-move",
+  "settings:set-appearance",
+  "settings:set-download",
+  "settings:choose-download-directory",
 ]);
 const DIAGNOSTICS_COMMAND_EVENT = "NavisDiagnosticsCommand";
 const DIAGNOSTICS_STATE_EVENT = "NavisDiagnosticsState";
@@ -22,6 +33,9 @@ const DIAGNOSTICS_COMMANDS = new Set(["diagnostics:get"]);
 const MANAGEMENT_COMMAND_EVENT = "NavisManagementCommand";
 const MANAGEMENT_STATE_EVENT = "NavisManagementState";
 const MANAGEMENT_COMMANDS = new Map([
+  ["processes", new Set(["processes:get", "processes:end"])],
+  ["credits", new Set(["credits:get"])],
+  ["profiles", new Set(["profiles:get", "profiles:create", "profile:update", "profiles:launch", "profiles:set-default", "profiles:remove", "profiles:restart"])],
   ["newtab", new Set(["newtab:navigate"])],
   ["history", new Set(["history:get", "history:delete", "history:clear"])],
   [
@@ -46,6 +60,8 @@ const MANAGEMENT_COMMANDS = new Map([
     "downloads",
     new Set([
       "downloads:get",
+      "downloads:acknowledge",
+      "downloads:open",
       "downloads:cancel",
       "downloads:retry",
       "downloads:remove",
@@ -80,7 +96,62 @@ function boundedText(value, maximum, { allowEmpty = false } = {}) {
 }
 
 function sanitizeCommandValue(command, rawValue) {
-  if (command === "settings:set-clean-links") {
+  if (command === "downloads:acknowledge") {
+    let raw;
+    try { raw = Cu.waiveXrays(rawValue); } catch { return { valid: false }; }
+    if (!Array.isArray(raw) || raw.length > 500) return { valid: false };
+    const value = [];
+    for (const item of raw) {
+      const id = boundedText(item?.id, 128);
+      const token = boundedText(item?.token, 64);
+      if (!id || !token) return { valid: false };
+      value.push({ id, token });
+    }
+    return { valid: true, value };
+  }
+  if (command === "processes:end") {
+    let raw;
+    try { raw = Cu.waiveXrays(rawValue); } catch { return { valid: false }; }
+    const token = boundedText(raw?.token, 64);
+    return { valid: !!token, value: { token } };
+  }
+  if (command.startsWith("settings:search-") ||
+      command === "settings:set-appearance" || command === "settings:set-download" ||
+      ["profiles:create", "profile:update", "profiles:launch", "profiles:set-default", "profiles:remove", "profiles:restart"].includes(command)) {
+    let raw;
+    try { raw = Cu.waiveXrays(rawValue); } catch { return { valid: false }; }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { valid: false };
+    const id = boundedText(raw.id, command.startsWith("profiles:") ? 512 : 64);
+    if (["settings:search-add", "settings:search-update"].includes(command)) {
+      const name = boundedText(raw.name, 80);
+      const template = boundedText(raw.template, 4096);
+      const suggestionTemplate = boundedText(raw.suggestionTemplate ?? "", 4096, { allowEmpty: true });
+      return { valid: !!name && !!template && suggestionTemplate !== null && (command.endsWith("-add") || !!id),
+        value: { id, name, template, suggestionTemplate } };
+    }
+    if (command === "settings:search-remove" || command === "profiles:launch" || command === "profiles:set-default") {
+      return { valid: !!id, value: { id } };
+    }
+    if (command === "settings:search-move") {
+      const position = raw.position;
+      return { valid: !!id && Number.isInteger(position) && position >= 0 && position < 64, value: { id, position } };
+    }
+    if (command === "profiles:remove") return { valid: !!id && typeof raw.deleteFiles === "boolean", value: { id, deleteFiles: raw.deleteFiles } };
+    if (command === "profiles:restart") return { valid: typeof raw.safeMode === "boolean", value: { safeMode: raw.safeMode } };
+    if (command === "profiles:create" || command === "profile:update") {
+      const userName = boundedText(raw.userName, 80);
+      const accentColor = boundedText(raw.accentColor, 7);
+      return { valid: !!userName && /^#[0-9a-f]{6}$/i.test(accentColor || ""), value: { userName, accentColor } };
+    }
+    const key = boundedText(raw.key, 32);
+    const value = raw.value;
+    const booleanKeys = command === "settings:set-download"
+      ? ["askBeforeSaving", "deletePrivateOnExit", "openWhenComplete"] : ["historyButton"];
+    const valid = booleanKeys.includes(key) ? typeof value === "boolean" :
+      command === "settings:set-appearance" && ["theme", "accent", "bookmarkBar"].includes(key) && boundedText(value, 32) !== null;
+    return { valid, value: { key, value } };
+  }
+  if (command === "settings:set-clean-links" || command === "settings:set-remote-suggestions") {
     return {
       valid: typeof rawValue === "boolean",
       value: rawValue,
@@ -115,11 +186,12 @@ function sanitizeCommandValue(command, rawValue) {
     ["downloads:cancel", 128],
     ["downloads:retry", 128],
     ["downloads:remove", 128],
+    ["downloads:open", 128],
     ["extensions:confirm-install", 80],
     ["extensions:cancel-install", 80],
     ["extensions:uninstall", 256],
     ["extensions:open-options", 256],
-    ["settings:set-search-provider", 32],
+    ["settings:set-search-provider", 64],
     ["settings:set-locale", 16],
     ["settings:set-process-isolation", 16],
   ]);
@@ -175,6 +247,28 @@ function sanitizeCommandValue(command, rawValue) {
 /** Bridges bounded commands from exact authenticated Navis internal pages. */
 export class DesktopInternalPageChild extends JSWindowActorChild {
   #requestId = 0;
+  #latestRequests = new Map();
+
+  receiveMessage(message) {
+    if (message.name === "DesktopInternalPage:ProfileChanged") {
+      if (this.#currentPage()?.key === "profiles" && message.data?.pageKey === "profiles") {
+        // A notification requests a fresh snapshot without replacing a pending mutation.
+        this.#dispatchState("NavisProfileChanged", message.data);
+      }
+      return;
+    }
+    if (message.name === "DesktopInternalPage:AppearanceChanged") {
+      const page = this.#currentPage();
+      if (!page || page.id === "settings" || message.data?.pageKey !== page.key) return;
+      // A newer preference push supersedes any older initial-page read.
+      this.#latestRequests.set(APPEARANCE_STATE_EVENT, ++this.#requestId);
+      this.#dispatchState(APPEARANCE_STATE_EVENT, message.data);
+      return;
+    }
+    if (message.name !== "DesktopInternalPage:DownloadsChanged" ||
+        this.#currentPage()?.key !== "downloads") return;
+    this.#dispatchState("NavisDownloadsChanged", message.data);
+  }
 
   handleEvent(event) {
     if (event.target !== this.contentWindow.document) {
@@ -183,12 +277,15 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
     const page = this.#currentPage();
     let commands;
     let stateEvent;
-    if (event.type === SETTINGS_COMMAND_EVENT && page?.key === "settings") {
+    if (event.type === APPEARANCE_COMMAND_EVENT && page && page.id !== "settings") {
+      commands = APPEARANCE_COMMANDS;
+      stateEvent = APPEARANCE_STATE_EVENT;
+    } else if (event.type === SETTINGS_COMMAND_EVENT && page?.id === "settings") {
       commands = SETTINGS_COMMANDS;
       stateEvent = SETTINGS_STATE_EVENT;
     } else if (
       event.type === DIAGNOSTICS_COMMAND_EVENT &&
-      (page?.key === "support" || page?.key === "settings/help")
+      (page?.key === "support" || page?.id === "settings")
     ) {
       commands = DIAGNOSTICS_COMMANDS;
       stateEvent = DIAGNOSTICS_STATE_EVENT;
@@ -215,6 +312,16 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
     if (!sanitized.valid) {
       return;
     }
+    if (command === "downloads:acknowledge") {
+      if (this.contentWindow.document.visibilityState !== "visible" ||
+          !this.contentWindow.document.hasFocus()) return;
+      // Attention acknowledgements must not supersede an outstanding mutation
+      // or its reply in the management request stream.
+      this.sendQuery("DesktopInternalPage:Command", {
+        pageKey: page.key, command, value: sanitized.value,
+      }).catch(() => {});
+      return;
+    }
     this.#request(page, command, stateEvent, sanitized.value);
   }
 
@@ -230,6 +337,9 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
 
   async #request(page, command, stateEvent, value = undefined) {
     const requestId = ++this.#requestId;
+    // Settings and diagnostics share the settings SPA, but a background
+    // diagnostic read must not supersede a user's settings operation.
+    this.#latestRequests.set(stateEvent, requestId);
     try {
       const state = await this.sendQuery("DesktopInternalPage:Command", {
         pageKey: page.key,
@@ -237,16 +347,16 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
         value,
       });
       if (
-        requestId !== this.#requestId ||
-        this.#currentPage()?.key !== page.key
+        requestId !== this.#latestRequests.get(stateEvent) ||
+        !this.#samePageFamily(page)
       ) {
         return;
       }
       this.#dispatchState(stateEvent, { requestId, ...state });
     } catch {
       if (
-        requestId === this.#requestId &&
-        this.#currentPage()?.key === page.key
+        requestId === this.#latestRequests.get(stateEvent) &&
+        this.#samePageFamily(page)
       ) {
         this.#dispatchState(stateEvent, {
           requestId,
@@ -263,5 +373,10 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
     ownerWindow.dispatchEvent(
       new ownerWindow.CustomEvent(stateEvent, { detail })
     );
+  }
+
+  #samePageFamily(page) {
+    const current = this.#currentPage();
+    return current?.key === page.key || (page.id === "settings" && current?.id === "settings");
   }
 }

@@ -1,0 +1,771 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java
+@@ -7,19 +7,21 @@
+ import android.content.Context;
+ import android.os.Handler;
+ import android.os.IBinder;
++import android.os.Looper;
+ import android.os.RemoteException;
+ import android.text.Editable;
+ import android.text.InputType;
+ import android.text.Selection;
+-import android.text.Spannable;
+ import android.text.SpannableStringBuilder;
+ import android.util.Log;
+ import android.view.KeyEvent;
++import android.view.KeyCharacterMap;
+ import android.view.View;
+ import android.view.inputmethod.BaseInputConnection;
+ import android.view.inputmethod.EditorInfo;
+ import android.view.inputmethod.InputConnection;
+ import android.view.inputmethod.InputMethodManager;
++import java.util.ArrayDeque;
+ import java.util.Objects;
+ import org.mozilla.gecko.IGeckoEditableChild;
+ import org.mozilla.gecko.IGeckoEditableParent;
+@@ -67,16 +69,20 @@
+ 
+   private static final int IME_RANGE_CARETPOSITION = 1;
+   private static final int IME_RANGE_RAWINPUT = 2;
+-  private static final int IME_RANGE_SELECTEDRAWTEXT = 3;
+   private static final int IME_RANGE_UNDERLINE = 1;
+   private static final int IME_RANGE_LINE_SOLID = 1;
+ 
+   private final Host mHost;
+   private final Handler mUiHandler = ThreadUtils.getUiHandler();
++  // Follow GeckoEditable's current/shadow ownership: only native notifications
++  // change confirmed text; only InputConnection changes the optimistic shadow.
++  // Both sides run on our single IC/UI handler, but replies remain asynchronous.
++  private final SpannableStringBuilder mCurrentText = new SpannableStringBuilder();
+   private final SpannableStringBuilder mText = new SpannableStringBuilder();
++  private final ArrayDeque<PendingAction> mActions = new ArrayDeque<>();
+ 
+   private View mView;
+-  private InputConnectionImpl mConnection;
++  private volatile InputConnectionImpl mConnection;
+   private IGeckoEditableChild mDefaultChild;
+   private IGeckoEditableChild mFocusedChild;
+   private IBinder mFocusedToken;
+@@ -86,22 +92,92 @@
+   private String mActionHint = "";
+   private String mAutocapitalize = "";
+   private boolean mAutocorrect;
++  private volatile boolean mClosed;
++  private long mEditorGeneration;
++  private int mBatchDepth;
++  private int mEditDepth;
++  private boolean mNeedSync;
++  private boolean mHasComposition;
++  private boolean mSyncScheduled;
++  private boolean mAwaitingSelection;
++
++  private static final class PendingAction {
++    final long generation;
++    final IBinder token;
++
++    PendingAction(final long generation, final IBinder token) {
++      this.generation = generation;
++      this.token = token;
++    }
++  }
++
++  @FunctionalInterface
++  private interface ChildAction {
++    void run(IGeckoEditableChild child) throws RemoteException;
++  }
+ 
+   NavisAndroidTextInput(final Host host) {
+     mHost = Objects.requireNonNull(host, "host");
++    Selection.setSelection(mCurrentText, 0);
+     Selection.setSelection(mText, 0);
+   }
+ 
+   void setView(final View view) {
+     ThreadUtils.assertOnUiThread();
+-    if (mView == view) {
++    if (mClosed || mView == view) {
+       return;
+     }
++    if (mConnection != null) mConnection.mClosed = true;
+     mView = view;
+-    mConnection = view == null ? null : new InputConnectionImpl(view);
++    mConnection = null;
++    mBatchDepth = 0;
++    if (view == null) {
++      // Retain native focus/confirmed state across Surface recreation, but a
++      // detached Android InputConnection must never write into a replacement.
++      BaseInputConnection.removeComposingSpans(mText);
++    }
+     restartInput(false);
+   }
+ 
++  void close() {
++    ThreadUtils.assertOnUiThread();
++    if (mClosed) return;
++    mClosed = true;
++    if (mConnection != null) mConnection.mClosed = true;
++    mConnection = null;
++    mView = null;
++    mDefaultChild = mFocusedChild = null;
++    mFocusedToken = null;
++    resetEditor();
++  }
++
++  private boolean onInputThread() {
++    return Looper.myLooper() == mUiHandler.getLooper();
++  }
++
++  private void postCallback(final Runnable callback) {
++    // Even in-process native callbacks are queued, never reentrant inside a
++    // BaseInputConnection edit or a partially submitted native transaction.
++    if (!mClosed) mUiHandler.post(() -> { if (!mClosed) callback.run(); });
++  }
++
++  private void resetEditor() {
++    mEditorGeneration++;
++    mActions.clear();
++    mBatchDepth = 0;
++    mNeedSync = false;
++    mHasComposition = false;
++    mAwaitingSelection = false;
++    if (mConnection != null) mConnection.mClosed = true;
++    mConnection = null;
++    mCurrentText.clear();
++    mCurrentText.clearSpans();
++    mText.clear();
++    mText.clearSpans();
++    Selection.setSelection(mCurrentText, 0);
++    Selection.setSelection(mText, 0);
++  }
++
+   Handler getHandler(final Handler defaultHandler) {
+     synchronized (this) {
+       return mConnection == null ? defaultHandler : mUiHandler;
+@@ -110,14 +186,18 @@
+ 
+   InputConnection onCreateInputConnection(final EditorInfo attributes) {
+     Objects.requireNonNull(attributes, "attributes");
+-    synchronized (this) {
+-      configureEditorInfo(attributes);
+-      return mImeState == IME_STATE_DISABLED ? null : mConnection;
+-    }
++    if (!onInputThread() || mClosed) return null;
++    synchronizeShadow();
++    configureEditorInfo(attributes);
++    if (mImeState == IME_STATE_DISABLED || mView == null || mFocusedChild == null) return null;
++    if (mConnection == null || mConnection.mClosed) mConnection = new InputConnectionImpl(mView);
++    return mConnection;
+   }
+ 
+   boolean onKeyPreIme(final int keyCode, final KeyEvent event) {
+-    return sendKeyEvent(event);
++    // Let Android's IME process the key first, as GeckoEditable does. A consumed
++    // pre-IME key must not also bypass the IME and modify Gecko's editor.
++    return false;
+   }
+ 
+   boolean onKeyDown(final int keyCode, final KeyEvent event) {
+@@ -129,23 +209,51 @@
+   }
+ 
+   boolean onKeyLongPress(final int keyCode, final KeyEvent event) {
+-    return sendKeyEvent(event);
++    return false;
+   }
+ 
+   boolean onKeyMultiple(final int keyCode, final int repeatCount, final KeyEvent event) {
+-    return sendKeyEvent(event);
++    if (!onInputThread() || mClosed || event == null) return false;
++    if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
++      final String characters = event.getCharacters();
++      if (characters == null || characters.isEmpty()) return false;
++      final KeyEvent[] events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
++          .getEvents(characters.toCharArray());
++      if (events != null) {
++        for (final KeyEvent key : events) if (!sendKeyEvent(key)) return false;
++        return true;
++      }
++      // Non-keyboard Unicode (including non-BMP text) remains a real IME edit,
++      // not a fabricated key code or a native ACTION_MULTIPLE crash.
++      final InputConnection connection = onCreateInputConnection(new EditorInfo());
++      return connection != null && connection.commitText(characters, 1);
++    }
++    for (int index = 0; index < repeatCount; index++) {
++      if (!sendKeyEvent(KeyEvent.changeAction(event, KeyEvent.ACTION_DOWN))
++          || !sendKeyEvent(KeyEvent.changeAction(event, KeyEvent.ACTION_UP))) return false;
++    }
++    return repeatCount > 0;
+   }
+ 
+-  private synchronized boolean sendKeyEvent(final KeyEvent event) {
+-    if (event == null) {
++  private boolean sendKeyEvent(final KeyEvent event) {
++    if (!onInputThread() || mClosed || mView == null || event == null) {
+       return false;
+     }
++    if (event.getAction() == KeyEvent.ACTION_MULTIPLE) {
++      return onKeyMultiple(event.getKeyCode(), event.getRepeatCount(), event);
++    }
++    if (event.getAction() != KeyEvent.ACTION_DOWN && event.getAction() != KeyEvent.ACTION_UP) return false;
+     final IGeckoEditableChild child = currentChild();
+     if (child == null) {
+       return false;
+     }
+-    try {
+-      child.onKeyEvent(
++    final ChildAction key = target -> {
++      if (event.getAction() == KeyEvent.ACTION_DOWN && mHasComposition) {
++        target.onImeRequestCommit();
++        mHasComposition = false;
++        BaseInputConnection.removeComposingSpans(mText);
++      }
++      target.onKeyEvent(
+           event.getAction(),
+           event.getKeyCode(),
+           event.getScanCode(),
+@@ -158,13 +266,60 @@
+           false,
+           false,
+           event);
++    };
++    if (mFocusedChild != null) return submit(key, true);
++    try { key.run(child); return true; }
++    catch (final RemoteException error) { return false; }
++  }
++
++  private boolean submit(final ChildAction operation, final boolean synchronize) {
++    final IGeckoEditableChild child = mFocusedChild;
++    if (mClosed || mView == null || child == null || mFocusedToken == null) return false;
++    final PendingAction action = new PendingAction(mEditorGeneration, mFocusedToken);
++    mActions.addLast(action);
++    mNeedSync = true;
++    try {
++      operation.run(child);
++      // ReplaceText replies itself. Keys/selection/commit require this barrier.
++      if (synchronize) child.onImeSynchronize();
+       return true;
+     } catch (final RemoteException error) {
+-      Log.e(LOGTAG, "Unable to send Android key event to Gecko", error);
++      mActions.remove(action);
++      Log.e(LOGTAG, "Unable to submit Android input transaction", error);
++      synchronizeShadow();
+       return false;
+     }
+   }
+ 
++  private void synchronizeShadow() {
++    if (!mNeedSync || mClosed || !mActions.isEmpty() || mBatchDepth != 0 || mEditDepth != 0
++        || mAwaitingSelection) return;
++    mNeedSync = false;
++    // Pending edits are never overwritten by older Gecko notifications. Once
++    // all replies arrive, Gecko wins, including script-normalized/rejected input.
++    if (!mText.toString().contentEquals(mCurrentText)) {
++      mText.replace(0, mText.length(), mCurrentText);
++      BaseInputConnection.removeComposingSpans(mText);
++      mHasComposition = false;
++    }
++    Selection.setSelection(mText, Selection.getSelectionStart(mCurrentText),
++        Selection.getSelectionEnd(mCurrentText));
++    final InputMethodManager manager = inputMethodManager();
++    if (manager != null && mView != null) {
++      manager.updateSelection(mView, Selection.getSelectionStart(mText), Selection.getSelectionEnd(mText),
++          BaseInputConnection.getComposingSpanStart(mText), BaseInputConnection.getComposingSpanEnd(mText));
++    }
++  }
++
++  private void scheduleShadowSync() {
++    if (mSyncScheduled || mClosed) return;
++    mSyncScheduled = true;
++    mUiHandler.post(() -> {
++      mSyncScheduled = false;
++      synchronizeShadow();
++    });
++  }
++
+   private void configureEditorInfo(final EditorInfo attributes) {
+     attributes.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+     if (mImeState == IME_STATE_PASSWORD || "password".equalsIgnoreCase(mTypeHint)) {
+@@ -223,11 +378,13 @@
+   }
+ 
+   private void restartInput(final boolean show) {
++    final View expectedView = mView;
++    final long generation = mEditorGeneration;
+     mUiHandler.post(
+         () -> {
+           final View view = mView;
+           final InputMethodManager manager = inputMethodManager();
+-          if (view == null || manager == null) {
++          if (mClosed || view == null || view != expectedView || generation != mEditorGeneration || manager == null) {
+             return;
+           }
+           manager.restartInput(view);
+@@ -238,36 +395,43 @@
+   }
+ 
+   private void hideSoftInput() {
++    final View expectedView = mView;
++    final long generation = mEditorGeneration;
+     mUiHandler.post(
+         () -> {
+           final View view = mView;
+           final InputMethodManager manager = inputMethodManager();
+-          if (view != null && manager != null) {
++          if (!mClosed && view != null && view == expectedView && generation == mEditorGeneration && manager != null) {
+             manager.hideSoftInputFromWindow(view.getWindowToken(), 0);
+           }
+         });
+   }
+ 
+-  private synchronized IGeckoEditableChild currentChild() {
++  private IGeckoEditableChild currentChild() {
+     return mFocusedChild != null ? mFocusedChild : mDefaultChild;
+   }
+ 
+-  private synchronized boolean accepts(final IBinder token, final boolean allowDefault) {
++  private boolean accepts(final IBinder token, final boolean allowDefault) {
+     return token != null
+         && (token == mFocusedToken
+-            || (allowDefault && mDefaultChild != null && token == mDefaultChild.asBinder()));
++            || (allowDefault && mFocusedToken == null && mDefaultChild != null
++                && token == mDefaultChild.asBinder()));
+   }
+ 
+   @Override
+-  public synchronized void setDefaultChild(final IGeckoEditableChild child) {
+-    mDefaultChild = child;
++  public void setDefaultChild(final IGeckoEditableChild child) {
++    postCallback(() -> mDefaultChild = child);
+   }
+ 
+   @Override
+   public void notifyIME(final IGeckoEditableChild child, final int type) {
+     final IBinder token = child == null ? null : child.asBinder();
+-    synchronized (this) {
++    postCallback(() -> {
+       if (type == EditableListener.NOTIFY_IME_OF_TOKEN) {
++        // A token is an editor-focus boundary, including a different editor
++        // within the same process/binder. No old IC or action crosses it.
++        resetEditor();
++        mFocusedChild = null;
+         mFocusedToken = token;
+         return;
+       }
+@@ -279,10 +443,11 @@
+       } else if (type == EditableListener.NOTIFY_IME_OF_BLUR) {
+         mFocusedChild = null;
+         mFocusedToken = null;
++        mImeState = IME_STATE_DISABLED;
++        resetEditor();
+       }
+-    }
+ 
+-    switch (type) {
++      switch (type) {
+       case EditableListener.NOTIFY_IME_OF_FOCUS:
+         restartInput(true);
+         break;
+@@ -294,18 +459,25 @@
+         break;
+       case EditableListener.NOTIFY_IME_TO_COMMIT_COMPOSITION:
+       case EditableListener.NOTIFY_IME_TO_CANCEL_COMPOSITION:
+-        mUiHandler.post(
+-            () -> {
+-              final InputConnectionImpl connection = mConnection;
+-              if (connection != null) {
+-                connection.finishComposingText();
+-              }
+-            });
++        // Gecko has already committed/cancelled. Do not echo another request.
++        BaseInputConnection.removeComposingSpans(mText);
++        mHasComposition = false;
++        mNeedSync = true;
++        scheduleShadowSync();
+         break;
+       case EditableListener.NOTIFY_IME_REPLY_EVENT:
++        final PendingAction action = mActions.peekFirst();
++        if (action != null && action.generation == mEditorGeneration && action.token == token) {
++          mActions.removeFirst();
++          // FlushIMEChanges sends text, ordered replies, then selection.
++          // Queue the sync behind that batch instead of exposing old selection.
++          scheduleShadowSync();
++        }
++        break;
+       default:
+         break;
+-    }
++      }
++    });
+   }
+ 
+   @Override
+@@ -318,7 +490,7 @@
+       final String autocapitalize,
+       final boolean autocorrect,
+       final int flags) {
+-    synchronized (this) {
++    postCallback(() -> {
+       if (!accepts(token, true)) {
+         return;
+       }
+@@ -328,12 +500,12 @@
+       mActionHint = actionHint == null ? "" : actionHint;
+       mAutocapitalize = autocapitalize == null ? "" : autocapitalize;
+       mAutocorrect = autocorrect;
+-    }
+-    if (state == IME_STATE_DISABLED) {
+-      hideSoftInput();
+-    } else {
+-      restartInput((flags & EditableListener.IME_FLAG_USER_ACTION) != 0);
+-    }
++      if (state == IME_STATE_DISABLED) {
++        hideSoftInput();
++      } else {
++        restartInput((flags & EditableListener.IME_FLAG_USER_ACTION) != 0);
++      }
++    });
+   }
+ 
+   @Override
+@@ -342,39 +514,45 @@
+       final int start,
+       final int end,
+       final boolean causedOnlyByComposition) {
+-    synchronized (this) {
+-      if (!accepts(token, true)) {
++    postCallback(() -> {
++      if (!accepts(token, false)) {
+         return;
+       }
+-      final int safeStart = Math.max(0, Math.min(start, mText.length()));
+-      final int safeEnd = Math.max(0, Math.min(end, mText.length()));
+-      Selection.setSelection(mText, safeStart, safeEnd);
+-    }
+-    mUiHandler.post(
+-        () -> {
+-          final View view = mView;
+-          final InputMethodManager manager = inputMethodManager();
+-          if (view != null && manager != null) {
+-            manager.updateSelection(view, start, end, -1, -1);
+-          }
+-        });
++      final int safeStart = Math.max(0, Math.min(start, mCurrentText.length()));
++      final int safeEnd = Math.max(0, Math.min(end, mCurrentText.length()));
++      Selection.setSelection(mCurrentText, safeStart, safeEnd);
++      mAwaitingSelection = false;
++      mNeedSync = true;
++      scheduleShadowSync();
++    });
+   }
+ 
+   @Override
+-  public synchronized void onTextChange(
++  public void onTextChange(
+       final IBinder token,
+       final CharSequence text,
+       final int start,
+       final int unboundedOldEnd,
+       final boolean causedOnlyByComposition) {
+-    if (!accepts(token, true)) {
+-      return;
+-    }
+-    final int safeStart = Math.max(0, Math.min(start, mText.length()));
+-    final int safeEnd = Math.max(safeStart, Math.min(unboundedOldEnd, mText.length()));
+-    mText.replace(safeStart, safeEnd, text == null ? "" : text);
+-    final int selection = Math.min(safeStart + (text == null ? 0 : text.length()), mText.length());
+-    Selection.setSelection(mText, selection);
++    // Binder may hand us mutable CharSequence storage. Snapshot at the boundary.
++    final String replacement = text == null ? "" : text.toString();
++    postCallback(() -> {
++      if (!accepts(token, false)) return;
++      if (unboundedOldEnd >= Integer.MAX_VALUE / 2) {
++        // A recovery snapshot supersedes confirmed text, not outstanding replies.
++        // Native FlushIMEText still emits those replies. Keep their FIFO slots:
++        // an input event can run between our queued text and reply callbacks.
++        // A real editor change already clears the queue at the TOKEN boundary.
++        mCurrentText.clearSpans();
++      }
++      final int safeStart = Math.max(0, Math.min(start, mCurrentText.length()));
++      final int safeEnd = Math.max(safeStart, Math.min(unboundedOldEnd, mCurrentText.length()));
++      mCurrentText.replace(safeStart, safeEnd, replacement);
++      mAwaitingSelection = true;
++      mNeedSync = true;
++      // Native always follows changed text with selection. Replies also schedule
++      // synchronization for rejected/no-op edits that produced no text callback.
++    });
+   }
+ 
+   @Override
+@@ -392,128 +570,187 @@
+   }
+ 
+   private final class InputConnectionImpl extends BaseInputConnection {
++    private final View mBoundView;
++    private final long mGeneration;
++    private boolean mClosed;
++
+     InputConnectionImpl(final View view) {
+       super(view, true);
++      mBoundView = view;
++      mGeneration = mEditorGeneration;
++    }
++
++    private boolean valid() {
++      return onInputThread() && !NavisAndroidTextInput.this.mClosed && !mClosed
++          && mConnection == this && mView == mBoundView && mGeneration == mEditorGeneration
++          && mFocusedChild != null && mImeState != IME_STATE_DISABLED;
+     }
+ 
+     @Override
+     public Editable getEditable() {
+-      return mText;
++      return valid() ? mText : null;
+     }
+ 
+     @Override
+     public boolean sendKeyEvent(final KeyEvent event) {
+-      return NavisAndroidTextInput.this.sendKeyEvent(event);
++      return valid() && NavisAndroidTextInput.this.sendKeyEvent(event);
++    }
++
++    @Override
++    public void closeConnection() {
++      mClosed = true;
++      if (onInputThread() && mConnection == this) {
++        mBatchDepth = 0;
++        scheduleShadowSync();
++      }
++    }
++
++    @Override
++    public boolean beginBatchEdit() {
++      if (!valid()) return false;
++      mBatchDepth++;
++      return true;
++    }
++
++    @Override
++    public boolean endBatchEdit() {
++      if (!valid() || mBatchDepth == 0) return false;
++      mBatchDepth--;
++      if (mBatchDepth == 0) scheduleShadowSync();
++      return true;
+     }
+ 
+     @Override
+     public boolean commitText(final CharSequence text, final int newCursorPosition) {
+-      final boolean changed = super.commitText(text, newCursorPosition);
+-      return changed && synchronize(false);
++      return edit(() -> super.commitText(text, newCursorPosition));
+     }
+ 
+     @Override
+     public boolean setComposingText(final CharSequence text, final int newCursorPosition) {
+-      final boolean changed = super.setComposingText(text, newCursorPosition);
+-      return changed && synchronize(true);
++      return edit(() -> super.setComposingText(text, newCursorPosition));
+     }
+ 
+     @Override
+     public boolean setComposingRegion(final int start, final int end) {
++      if (!valid() || start < 0 || end < 0 || start > mText.length() || end > mText.length()) return false;
+       final boolean changed = super.setComposingRegion(start, end);
+-      return changed && synchronize(true);
++      return changed && updateGeckoSelection();
+     }
+ 
+     @Override
+     public boolean finishComposingText() {
++      if (!valid()) return false;
+       final boolean changed = super.finishComposingText();
+-      final IGeckoEditableChild child = currentChild();
+-      if (child != null) {
+-        try {
+-          child.onImeRequestCommit();
+-        } catch (final RemoteException error) {
+-          Log.e(LOGTAG, "Unable to commit Gecko composition", error);
+-          return false;
+-        }
+-      }
+-      return changed;
++      mHasComposition = false;
++      return changed && submit(IGeckoEditableChild::onImeRequestCommit, true);
+     }
+ 
+     @Override
+     public boolean deleteSurroundingText(final int beforeLength, final int afterLength) {
+-      final boolean changed = super.deleteSurroundingText(beforeLength, afterLength);
+-      return changed && synchronize(false);
++      if (beforeLength < 0 || afterLength < 0) return false;
++      return edit(() -> super.deleteSurroundingText(beforeLength, afterLength));
++    }
++
++    @Override
++    public boolean deleteSurroundingTextInCodePoints(final int beforeLength, final int afterLength) {
++      if (beforeLength < 0 || afterLength < 0) return false;
++      return edit(() -> super.deleteSurroundingTextInCodePoints(beforeLength, afterLength));
+     }
+ 
+     @Override
+     public boolean setSelection(final int start, final int end) {
+-      if (start < 0 || end < 0 || start > mText.length() || end > mText.length()) {
++      if (!valid() || start < 0 || end < 0 || start > mText.length() || end > mText.length()) {
+         return false;
+       }
+       final boolean changed = super.setSelection(start, end);
+-      return changed && updateGeckoSelection(false);
++      return changed && (mEditDepth != 0 || updateGeckoSelection());
+     }
+ 
+-    private boolean synchronize(final boolean composing) {
+-      final IGeckoEditableChild child = currentChild();
+-      if (child == null) {
+-        return false;
+-      }
+-      final int selectionStart = Math.max(0, Selection.getSelectionStart(mText));
+-      final int selectionEnd = Math.max(0, Selection.getSelectionEnd(mText));
++    @Override
++    public boolean performEditorAction(final int actionCode) {
++      if (!valid()) return false;
++      final int code = actionCode == EditorInfo.IME_ACTION_NEXT ? KeyEvent.KEYCODE_TAB : KeyEvent.KEYCODE_ENTER;
++      return sendKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, code))
++          && sendKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, code));
++    }
++
++    private boolean edit(final java.util.function.BooleanSupplier operation) {
++      if (!valid()) return false;
++      final String before = mText.toString();
++      final int oldCompositionStart = BaseInputConnection.getComposingSpanStart(mText);
++      final int oldCompositionEnd = BaseInputConnection.getComposingSpanEnd(mText);
++      mEditDepth++;
+       try {
+-        child.onImeReplaceText(0, Integer.MAX_VALUE, mText.toString());
+-        if (composing) {
++        if (!operation.getAsBoolean()) return false;
++        final String after = mText.toString();
++        if (!before.equals(after)) {
++          int start = 0;
++          while (start < before.length() && start < after.length()
++              && before.charAt(start) == after.charAt(start)) start++;
++          // Keep surrogate pairs intact at the replacement boundary.
++          if (start > 0 && start < after.length() && Character.isLowSurrogate(after.charAt(start))
++              && Character.isHighSurrogate(after.charAt(start - 1))) start--;
++          int oldEnd = before.length();
++          int newEnd = after.length();
++          while (oldEnd > start && newEnd > start
++              && before.charAt(oldEnd - 1) == after.charAt(newEnd - 1)) { oldEnd--; newEnd--; }
++          if (newEnd > 0 && newEnd < after.length() && Character.isHighSurrogate(after.charAt(newEnd - 1))
++              && Character.isLowSurrogate(after.charAt(newEnd))) { oldEnd++; newEnd++; }
++
+           final int compositionStart = BaseInputConnection.getComposingSpanStart(mText);
+           final int compositionEnd = BaseInputConnection.getComposingSpanEnd(mText);
+-          if (compositionStart >= 0 && compositionEnd >= compositionStart) {
+-            child.onImeAddCompositionRange(
+-                selectionEnd - compositionStart,
+-                selectionEnd - compositionStart,
+-                IME_RANGE_CARETPOSITION,
+-                0,
+-                0,
+-                false,
+-                0,
+-                0,
+-                0);
+-            child.onImeAddCompositionRange(
+-                0,
+-                compositionEnd - compositionStart,
+-                selectionStart == compositionStart && selectionEnd == compositionEnd
+-                    ? IME_RANGE_SELECTEDRAWTEXT
+-                    : IME_RANGE_RAWINPUT,
+-                IME_RANGE_UNDERLINE,
+-                IME_RANGE_LINE_SOLID,
+-                false,
+-                0,
+-                0,
+-                0);
+-            child.onImeUpdateComposition(compositionStart, compositionEnd, 0);
+-            return true;
++          if (compositionStart >= 0) {
++            // Like GeckoEditable's span-bearing replacement action, transmit
++            // the complete composing range rather than composing only its suffix.
++            start = Math.min(start, compositionStart);
++            if (oldCompositionStart >= 0) start = Math.min(start, oldCompositionStart);
++            oldEnd = Math.max(oldEnd, oldCompositionEnd);
++            newEnd = Math.max(newEnd, compositionEnd);
++            final int trailing = Math.min(before.length() - oldEnd, after.length() - newEnd);
++            oldEnd = before.length() - trailing;
++            newEnd = after.length() - trailing;
+           }
++          final int replaceStart = start;
++          final int replaceEnd = oldEnd;
++          final String replacement = after.substring(start, newEnd);
++          final int caret = Math.max(0, Selection.getSelectionEnd(mText));
++          if (!submit(child -> {
++            if (compositionStart >= 0) {
++              addCompositionRanges(child, caret - replaceStart, compositionEnd - replaceStart);
++            }
++            child.onImeReplaceText(replaceStart, replaceEnd, replacement);
++          }, false)) return false;
+         }
+-        child.onImeUpdateComposition(selectionStart, selectionEnd, 0);
+-        return true;
+-      } catch (final RemoteException error) {
+-        Log.e(LOGTAG, "Unable to synchronize Android IME with Gecko", error);
+-        return false;
++        return updateGeckoSelection();
++      } finally {
++        mEditDepth--;
++        scheduleShadowSync();
+       }
+     }
+ 
+-    private boolean updateGeckoSelection(final boolean composing) {
+-      final IGeckoEditableChild child = currentChild();
+-      if (child == null) {
+-        return false;
+-      }
+-      try {
+-        child.onImeUpdateComposition(
+-            Selection.getSelectionStart(mText), Selection.getSelectionEnd(mText), 0);
+-        return true;
+-      } catch (final RemoteException error) {
+-        Log.e(LOGTAG, "Unable to update Gecko selection", error);
+-        return false;
+-      }
++    private boolean updateGeckoSelection() {
++      final int start = Math.max(0, Selection.getSelectionStart(mText));
++      final int end = Math.max(0, Selection.getSelectionEnd(mText));
++      final int compositionStart = BaseInputConnection.getComposingSpanStart(mText);
++      final int compositionEnd = BaseInputConnection.getComposingSpanEnd(mText);
++      mHasComposition = compositionStart >= 0 && compositionEnd >= compositionStart;
++      final boolean composing = mHasComposition;
++      return submit(child -> {
++        if (composing) {
++          addCompositionRanges(child, end - compositionStart, compositionEnd - compositionStart);
++          child.onImeUpdateComposition(compositionStart, compositionEnd, 0);
++        } else {
++          child.onImeUpdateComposition(start, end, 0);
++        }
++      }, true);
++    }
++
++    private void addCompositionRanges(final IGeckoEditableChild child, final int caret, final int length)
++        throws RemoteException {
++      final int safeCaret = Math.max(0, Math.min(caret, length));
++      child.onImeAddCompositionRange(safeCaret, safeCaret, IME_RANGE_CARETPOSITION, 0, 0, false, 0, 0, 0);
++      child.onImeAddCompositionRange(0, length, IME_RANGE_RAWINPUT, IME_RANGE_UNDERLINE,
++          IME_RANGE_LINE_SOLID, false, 0, 0, 0);
+     }
+   }
+ }
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -1255,6 +1255,7 @@
+     mCompositorAttached = false;
+     mOwnedShortcuts.clear();
+     clearInputView();
++    mTextInput.close();
+     mSurface = null;
+     mSurfaceBounds.setEmpty();
+     mPendingCommands.clear();

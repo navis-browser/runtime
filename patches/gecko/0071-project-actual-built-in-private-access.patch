@@ -1,0 +1,14 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -1994,9 +1994,9 @@
+           signature,
+           enabled: foreign ? false : Boolean(addon.isActive),
+           privateBrowsingAllowed:
+-            !builtIn &&
+             !foreign &&
+             !temporary &&
++            addon.incognito !== "not_allowed" &&
+             Boolean(granted.permissions?.includes(PRIVATE_PERMISSION)),
+           privateBrowsingAvailable:
+             !builtIn &&

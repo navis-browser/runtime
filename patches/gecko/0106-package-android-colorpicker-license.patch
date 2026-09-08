@@ -1,0 +1,13 @@
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -26,6 +26,9 @@
+     FINAL_TARGET_FILES.modules.navis += [
+         "/navis/chrome/content/clean-links-policy.json",
+     ]
++    FINAL_TARGET_FILES.modules["navis-licenses"] += [
++        "/desktop-embedder/modules/licenses/colorpicker-compose-1.1.4.txt",
++    ]
+     if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
+         EXTRA_JS_MODULES += [
+             "NavisAndroidBrowsingData.sys.mjs",

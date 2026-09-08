@@ -1,0 +1,192 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -2089,7 +2089,7 @@
+    */
+   loadPopupTarget(browser, extensionId, targetToken, popupUri) {
+     if (!browser || typeof browser.setAttribute !== "function") {
+-      throw installError("Invalid popup browser target", "action-unavailable");
++      throw installError("Invalid popup browser target", "popup-invalid-target");
+     }
+     if (
+       !this.#popup ||
+@@ -2097,50 +2097,66 @@
+       this.#popup.targetToken !== targetToken ||
+       this.#popup.popupUri !== popupUri
+     ) {
+-      throw installError("The extension popup transaction is stale", "action-unavailable");
++      throw installError("The extension popup transaction is stale", "popup-transaction-stale");
+     }
+     const ownerWindow = browser.ownerGlobal;
+     const ownerTab = ownerWindow?.tab;
+-    if (
+-      ownerWindow?.document?.documentElement?.getAttribute("windowtype") !==
+-        DIRECT_WINDOW_TYPE ||
+-      !ownerTab ||
+-      ownerTab === this.#popup.nativeTab ||
+-      ownerWindow.name !==
+-        `navis-android-session-${ownerTab.id}:popup-${targetToken}`
+-    ) {
+-      throw installError("Invalid direct popup target", "action-unavailable");
++    if (ownerWindow?.document?.documentElement?.getAttribute("windowtype") !==
++        DIRECT_WINDOW_TYPE || !ownerTab) {
++      throw installError("Invalid direct popup owner", "popup-owner-invalid");
++    }
++    if (ownerTab === this.#popup.nativeTab) {
++      throw installError("Popup cannot reuse its source tab", "popup-owner-reused");
++    }
++    if (ownerWindow.name !==
++        `navis-android-session-${ownerTab.id}:popup-${targetToken}`) {
++      throw installError("Invalid direct popup target name", "popup-owner-name");
+     }
+     const extension = lazy.ExtensionParent.GlobalManager.getExtension(extensionId);
+-    if (
+-      !extension ||
+-      !extension.tabManager?.canAccessTab(this.#popup.nativeTab) ||
+-      extension.tabManager.activeTab !== this.#popup.nativeTab ||
+-      lazy.PrivateBrowsingUtils.isBrowserPrivate(browser) !== this.#popup.privateMode
+-    ) {
++    if (!extension || !extension.tabManager?.canAccessTab(this.#popup.nativeTab)) {
+       this.#dismissPopup();
+-      throw installError("The popup source tab is no longer active", "action-unavailable");
++      throw installError("The popup source is not accessible", "popup-source-inaccessible");
++    }
++    if (extension.tabManager.activeTab !== this.#popup.nativeTab) {
++      this.#dismissPopup();
++      throw installError("The popup source tab is no longer active", "popup-source-inactive");
++    }
++    if (lazy.PrivateBrowsingUtils.isBrowserPrivate(browser) !== this.#popup.privateMode) {
++      this.#dismissPopup();
++      throw installError("The popup privacy context changed", "popup-private-mismatch");
+     }
+     if (this.#popup.targetBrowser && this.#popup.targetBrowser !== browser) {
+-      throw installError("The popup transaction already has a target", "action-unavailable");
++      throw installError("The popup transaction already has a target", "popup-target-reused");
+     }
+     if (
+       browser.hasAttribute("webextension-view-type") &&
+       browser.getAttribute("webextension-view-type") !== "popup"
+     ) {
+-      throw installError("Popup browser has an incompatible view type", "action-unavailable");
++      throw installError("Popup browser has an incompatible view type", "popup-viewtype");
+     }
+     if (browser.hasAttribute("webextension-view-type")) {
+       return true;
+     }
+     this.#popup = Object.freeze({ ...this.#popup, targetBrowser: browser });
+-    ownerTab.setPopup(true);
+-    browser.setAttribute("webextension-view-type", "popup");
+-    lazy.ExtensionParent.apiManager.emit("extension-browser-inserted", browser);
+-    browser.loadURI(Services.io.newURI(popupUri), {
+-      triggeringPrincipal:
+-        Services.scriptSecurityManager.getSystemPrincipal(),
+-    });
++    try {
++      ownerTab.setPopup(true);
++      browser.setAttribute("webextension-view-type", "popup");
++    } catch {
++      throw installError("Could not assign popup view type", "popup-viewtype-failed");
++    }
++    try {
++      lazy.ExtensionParent.apiManager.emit("extension-browser-inserted", browser);
++    } catch {
++      throw installError("Could not initialize the popup context", "popup-insertion-failed");
++    }
++    try {
++      browser.loadURI(Services.io.newURI(popupUri), {
++        triggeringPrincipal:
++          Services.scriptSecurityManager.getSystemPrincipal(),
++      });
++    } catch {
++      throw installError("Could not begin loading the popup", "popup-load-failed");
++    }
+     return true;
+   }
+ }
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -235,8 +235,8 @@
+         } catch (error) {
+           if (callback) {
+             callback.onError({
+-              code: error?.code || "action-unavailable",
+-              message: error?.message || "Could not bind the extension popup",
++              code: error?.code || "popup-bind-failed",
++              message: "Could not bind the extension popup",
+             });
+           } else {
+             throw error;
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+@@ -279,7 +279,7 @@
+                     return;
+                   }
+                   if (error != null || !Boolean.TRUE.equals(loaded)) {
+-                    notifyFailed("popup-bind-failed");
++                    notifyFailed(NavisAndroidPopupBindingFailure.code(error));
+                   }
+                 });
+       }
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupBindingFailure.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupBindingFailure.java
+new file mode 100644
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupBindingFailure.java
+@@ -0,0 +1,56 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.ExecutionException;
++import org.mozilla.gecko.EventDispatcher;
++import org.mozilla.gecko.util.GeckoBundle;
++
++/** Preserves only reviewed binding phases, never exception text or popup identifiers. */
++final class NavisAndroidPopupBindingFailure {
++  private NavisAndroidPopupBindingFailure() {}
++
++  static String code(final Throwable failure) {
++    Throwable error = failure;
++    for (int depth = 0; depth < 4
++        && (error instanceof CompletionException || error instanceof ExecutionException);
++        depth++) {
++      error = error.getCause();
++    }
++    if (error instanceof EventDispatcher.QueryException) {
++      final Object data = ((EventDispatcher.QueryException) error).data;
++      if (data instanceof GeckoBundle) {
++        final String candidate;
++        try {
++          candidate = ((GeckoBundle) data).getString("code");
++        } catch (final RuntimeException invalidData) {
++          return "popup-bind-failed";
++        }
++        if (candidate != null) {
++          switch (candidate) {
++            case "popup-invalid-target":
++            case "popup-transaction-stale":
++            case "popup-owner-invalid":
++            case "popup-owner-reused":
++            case "popup-owner-name":
++            case "popup-source-inaccessible":
++            case "popup-source-inactive":
++            case "popup-private-mismatch":
++            case "popup-target-reused":
++            case "popup-viewtype":
++            case "popup-viewtype-failed":
++            case "popup-insertion-failed":
++            case "popup-load-failed":
++              return candidate;
++            default:
++              break;
++          }
++        }
++      }
++    }
++    return "popup-bind-failed";
++  }
++}

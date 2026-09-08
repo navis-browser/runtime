@@ -1,0 +1,302 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+@@ -6,11 +6,13 @@
+ const dispatcher = EventDispatcher.byName("navis-android-extension-profile");
+ const CHANGED = "NavisAndroid:ExtensionProfile:BookmarksChanged";
+ const HISTORY_CHANGED = "NavisAndroid:ExtensionProfile:HistoryChanged";
++const SESSIONS_CHANGED = "NavisAndroid:ExtensionProfile:SessionsChanged";
+ const OPERATIONS = new Map([
+   ...["list", "create", "update", "move", "remove", "removeTree"].map(name => [`bookmarks:${name}`, "bookmarks"]),
+   ["topSites:list", "topSites"],
+   ...["search", "visits", "add", "deleteUrl", "deleteRange", "deleteAll"].map(name => [`history:${name}`, "history"]),
+   ["search:get", "search"], ["search:resolve", "search"],
++  ...["list", "forget", "restore"].map(name => [`sessions:${name}`, "sessions"]),
+ ]);
+ function checkAccess(extension, permission, context = null) {
+   if (!extension || extension.hasShutdown || context?.unloaded ||
+@@ -101,4 +103,16 @@
+       convert(newFire) { fire = newFire; },
+     };
+   },
++  registerSessions(extension, fire) {
++    checkAccess(extension, "sessions");
++    const listener = { onEvent() {
++      try { checkAccess(extension, "sessions"); } catch { return; }
++      fire.async();
++    } };
++    dispatcher.registerListener(listener, [SESSIONS_CHANGED]);
++    return {
++      unregister() { dispatcher.unregisterListener(listener, [SESSIONS_CHANGED]); },
++      convert(newFire) { fire = newFire; },
++    };
++  },
+ });
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+@@ -21,11 +21,13 @@
+   private static final String COMMAND = "NavisAndroid:ExtensionProfile:Request";
+   private static final String CHANGED = "NavisAndroid:ExtensionProfile:BookmarksChanged";
+   private static final String HISTORY_CHANGED = "NavisAndroid:ExtensionProfile:HistoryChanged";
++  private static final String SESSIONS_CHANGED = "NavisAndroid:ExtensionProfile:SessionsChanged";
+   private static final Set<String> OPERATIONS = new HashSet<>(Arrays.asList(
+       "bookmarks:list", "bookmarks:create", "bookmarks:update", "bookmarks:move",
+       "bookmarks:remove", "bookmarks:removeTree", "topSites:list",
+       "history:search", "history:visits", "history:add", "history:deleteUrl",
+-      "history:deleteRange", "history:deleteAll", "search:get", "search:resolve"));
++      "history:deleteRange", "history:deleteAll", "search:get", "search:resolve",
++      "sessions:list", "sessions:forget", "sessions:restore"));
+   public static final class Request {
+     public final String extensionId, operation, arguments;
+     public final boolean privateMode, privateBrowsingAllowed;
+@@ -89,6 +91,10 @@
+     data.putString("json", json);
+     mDispatcher.dispatch(HISTORY_CHANGED, data);
+   }
++  public void publishSessionsChange() {
++    ThreadUtils.assertOnUiThread();
++    if (!mClosed) mDispatcher.dispatch(SESSIONS_CHANGED, new GeckoBundle(0));
++  }
+   @Override public void close() {
+     ThreadUtils.assertOnUiThread();
+     if (mClosed) return;
+diff --git a/mobile/shared/components/extensions/ext-android.json b/mobile/shared/components/extensions/ext-android.json
+--- a/mobile/shared/components/extensions/ext-android.json
++++ b/mobile/shared/components/extensions/ext-android.json
+@@ -1,4 +1,10 @@
+ {
++  "sessions": {
++    "url": "chrome://geckoview/content/ext-sessions.js",
++    "schema": "chrome://geckoview/content/schemas/sessions.json",
++    "scopes": ["addon_parent"],
++    "paths": [["sessions"]]
++  },
+   "find": {
+     "url": "chrome://geckoview/content/ext-find.js",
+     "schema": "chrome://geckoview/content/schemas/find.json",
+diff --git a/mobile/shared/components/extensions/jar.mn b/mobile/shared/components/extensions/jar.mn
+--- a/mobile/shared/components/extensions/jar.mn
++++ b/mobile/shared/components/extensions/jar.mn
+@@ -7,6 +7,8 @@
+     content/ext-android.json
+     content/ext-bookmarks.js
+     content/ext-history.js
++    content/ext-sessions.js
++    content/schemas/sessions.json (../../../../browser/components/extensions/schemas/sessions.json)
+     content/ext-topSites.js
+     content/ext-search.js
+     content/ext-find.js
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -66,6 +66,7 @@
+   "product:initialize", "site:get", "site:clear", "data:clear",
+   "links:set", "links:copy", "prefs:flush", "session:can-close", "support:get",
+   "session:presentation", "session:history", "session:traverse", "session:load",
++  "session:capture-closed",
+ ]);
+ 
+ const MAX_SESSION_STATE_CHARS = 1024 * 1024;
+@@ -201,6 +202,11 @@
+           if (NavisAndroidPresentation.handles(data.operation)) {
+             return NavisAndroidPresentation.query(window, data.operation, JSON.parse(data.payload));
+           }
++          if (data.operation === "session:capture-closed") {
++            const { NavisAndroidClosedTabs } = ChromeUtils.importESModule(
++              "resource://gre/modules/NavisAndroidClosedTabs.sys.mjs");
++            return NavisAndroidClosedTabs.capture(window);
++          }
+           const product = ChromeUtils.importESModule(
+             "resource://gre/modules/navis/NavisAndroidProduct.sys.mjs"
+           );
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -6,6 +6,7 @@
+     EXTRA_JS_MODULES += [
+         "/desktop-embedder/components/DesktopFaviconChild.sys.mjs",
+         "/desktop-embedder/components/DesktopFaviconParent.sys.mjs",
++        "NavisAndroidClosedTabs.sys.mjs",
+         "NavisAndroidDevTools.sys.mjs",
+         "NavisAndroidFavicon.sys.mjs",
+         "NavisAndroidGeckoProducer.sys.mjs",
+diff --git a/mobile/shared/modules/navis/NavisAndroidClosedTabs.sys.mjs b/mobile/shared/modules/navis/NavisAndroidClosedTabs.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidClosedTabs.sys.mjs
+@@ -0,0 +1,49 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++const { SessionHistory } = ChromeUtils.importESModule(
++  "resource://gre/modules/sessionstore/SessionHistory.sys.mjs");
++const { PrivateBrowsingUtils } = ChromeUtils.importESModule(
++  "resource://gre/modules/PrivateBrowsingUtils.sys.mjs");
++
++function hasPostData(entry, budget, depth = 0) {
++  if (!entry) return false;
++  if (depth > 32 || --budget.left < 0) throw new RangeError("Session history tree exceeds its capture limit");
++  if (entry.postData) return true;
++  for (let index = 0; index < entry.childCount; index++) {
++    if (hasPostData(entry.GetChildAt(index), budget, depth + 1)) return true;
++  }
++  return false;
++}
++
++/** Only the owning Runtime can capture a closed tab; content has no access to this query. */
++export const NavisAndroidClosedTabs = Object.freeze({
++  capture(window) {
++    const browser = window.tab?.linkedBrowser;
++    if (window.closed || !browser) throw new TypeError("No live closed-tab owner");
++    const unavailable = reason => ({ restorable: false, reason });
++    if (PrivateBrowsingUtils.isBrowserPrivate(browser)) return unavailable("private");
++    if (browser.navisNativePresentation !== false) return unavailable("native");
++    const context = browser.browsingContext;
++    const uri = context?.currentURI;
++    if (!uri || (!uri.schemeIs("http") && !uri.schemeIs("https")) || uri.spec.length > 8192) {
++      return unavailable("unsupported-uri");
++    }
++    const history = context.sessionHistory;
++    if (!history || history.count < 1 || history.count > 512 || history.index < 0 || history.index >= history.count) {
++      return unavailable("missing-history");
++    }
++    // The pinned serializer does not persist POST bodies. Check all frames and
++    // history entries, not only the current page, so Back cannot replay one as GET.
++    const budget = { left: 4096 };
++    for (let index = 0; index < history.count; index++) {
++      if (hasPostData(history.getEntryAtIndex(index), budget)) return unavailable("post-data");
++    }
++    const data = SessionHistory.collectFromParent(uri.spec, true, history);
++    if (!data || data.entries?.[data.index - 1]?.url !== uri.spec) return unavailable("missing-history");
++    const state = JSON.stringify({ version: 1, history: data });
++    if (state.length > 1024 * 1024) throw new RangeError("Closed-tab snapshot exceeds its capture limit");
++    return { restorable: true, state, uri: uri.spec,
++      title: (context.currentWindowGlobal?.documentTitle ?? "").slice(0, 4096) };
++  },
++});
+diff --git a/mobile/shared/components/extensions/ext-sessions.js b/mobile/shared/components/extensions/ext-sessions.js
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/components/extensions/ext-sessions.js
+@@ -0,0 +1,120 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++{
++  const { NavisAndroidExtensionProfile: profile } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionProfile.sys.mjs");
++  const { NavisAndroidExtensionTabTopology: topology } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionTabTopology.sys.mjs");
++  const tabValues = new WeakMap();
++  // A product window outlives its representative native tab/chrome window.
++  const windowValues = new Map();
++  topology.onWindowRemoved(id => windowValues.delete(id));
++
++  function key(value) {
++    if (typeof value !== "string" || !value || value.length > 256) {
++      throw new ExtensionError("Invalid session value key");
++    }
++    return value;
++  }
++  function encodedValue(value) {
++    let json;
++    try { json = JSON.stringify(value); } catch { throw new ExtensionError("Session values must be JSON serializable"); }
++    if (json === undefined || new TextEncoder().encode(json).byteLength > 64 * 1024) {
++      throw new ExtensionError("Session value exceeds the storage limit");
++    }
++    return json;
++  }
++  function values(container, owner, extensionId, create = false) {
++    let namespaces = container.get(owner);
++    if (!namespaces && create) container.set(owner, namespaces = new Map());
++    let entries = namespaces?.get(extensionId);
++    if (!entries && create) namespaces.set(extensionId, entries = new Map());
++    return entries;
++  }
++  function closedTab(record) {
++    return { active: false, highlighted: false, incognito: false, pinned: false,
++      index: record.index, sessionId: record.sessionId, title: record.title,
++      url: record.url, windowId: record.windowId };
++  }
++
++  this.sessions = class extends ExtensionAPIPersistent {
++    PERSISTENT_EVENTS = {
++      onChanged({ fire }) { return profile.registerSessions(this.extension, fire); },
++    };
++    getAPI(context) {
++      const { extension } = context;
++      const access = () => {
++        if (extension.hasShutdown || context.unloaded || !extension.hasPermission("sessions") ||
++            (context.incognito && !extension.privateBrowsingAllowed)) {
++          throw new ExtensionError("Session access is not allowed");
++        }
++      };
++      const tab = id => {
++        access();
++        const native = tabTracker.getTab(id);
++        if (!native || !extension.tabManager.canAccessTab(native) ||
++            !context.canAccessWindow(native.browser.documentGlobal)) {
++          throw new ExtensionError("Invalid or inaccessible tab ID");
++        }
++        return native;
++      };
++      const windowId = id => {
++        access();
++        const window = windowTracker.getWindow(id, context);
++        if (!window || !context.canAccessWindow(window)) throw new ExtensionError("Invalid or inaccessible window ID");
++        const actual = windowTracker.getId(window);
++        if (!Number.isSafeInteger(actual) || actual <= 0) throw new ExtensionError("Invalid product window ID");
++        return actual;
++      };
++      const call = (name, args) => profile.request(extension, context, `sessions:${name}`, args);
++      const methods = (container, owner) => ({
++        set(id, name, value) {
++          const target = owner(id);
++          const checkedKey = key(name);
++          const json = encodedValue(value);
++          values(container, target, extension.id, true).set(checkedKey, json);
++        },
++        get(id, name) {
++          const target = owner(id);
++          const checkedKey = key(name);
++          const json = values(container, target, extension.id)?.get(checkedKey);
++          return json === undefined ? undefined : JSON.parse(json);
++        },
++        remove(id, name) {
++          const target = owner(id);
++          const checkedKey = key(name);
++          values(container, target, extension.id)?.delete(checkedKey);
++        },
++      });
++      const tabs = methods(tabValues, tab);
++      const windows = methods(windowValues, windowId);
++      return { sessions: {
++        async getRecentlyClosed(filter = {}) {
++          const records = await call("list", { maxResults: Math.min(filter.maxResults ?? 25, 25) });
++          return records.map(record => ({ lastModified: record.closedAt, tab: closedTab(record) }));
++        },
++        async forgetClosedTab(windowId, sessionId) { await call("forget", { windowId, sessionId }); },
++        async forgetClosedWindow() { throw new ExtensionError("No closed window record exists"); },
++        async restore(sessionId) {
++          const restored = await call("restore", { sessionId });
++          // Runtime waits for a real restored owner/topology. Never create a GET
++          // tab here or substitute an unrelated active tab while it initializes.
++          const native = tab(restored.tabId);
++          if (windowTracker.getId(native.browser.documentGlobal) !== restored.windowId) {
++            throw new ExtensionError("Restored tab changed windows");
++          }
++          return { lastModified: restored.lastModified, tab: extension.tabManager.convert(native) };
++        },
++        async setTabValue(id, name, value) { tabs.set(id, name, value); },
++        async getTabValue(id, name) { return tabs.get(id, name); },
++        async removeTabValue(id, name) { tabs.remove(id, name); },
++        async setWindowValue(id, name, value) { windows.set(id, name, value); },
++        async getWindowValue(id, name) { return windows.get(id, name); },
++        async removeWindowValue(id, name) { windows.remove(id, name); },
++        onChanged: new EventManager({ context, module: "sessions", event: "onChanged", extensionApi: this }).api(),
++      } };
++    }
++  };
++}

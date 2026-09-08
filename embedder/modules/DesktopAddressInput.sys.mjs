@@ -23,6 +23,16 @@ const ADDRESSABLE_SCHEMES = new Set([
   "navis",
 ]);
 
+export function projectSelectionSearch({text, password, hasSelection}, provider) {
+  if (password || !hasSelection || typeof text !== "string" || text.length > 8192 ||
+      !text.trim() || !provider || typeof provider.id !== "string" ||
+      typeof provider.name !== "string") return null;
+  const query = text.trim();
+  const display = Array.from(query.replace(/\s+/gu, " "));
+  return Object.freeze({text: query, providerId: provider.id, providerName: provider.name,
+    excerpt: display.slice(0, 40).join("") + (display.length > 40 ? "…" : "")});
+}
+
 function validIPv4(value) {
   const octets = value.split(".");
   return (
@@ -48,7 +58,7 @@ function requireValidURL(value) {
   return value;
 }
 
-export function resolveDesktopAddressInput(value, providerId) {
+export function classifyAddressInput(value) {
   if (typeof value !== "string") {
     throw new TypeError("Address input must be a string");
   }
@@ -98,14 +108,24 @@ export function resolveDesktopAddressInput(value, providerId) {
     });
   }
 
+  return Object.freeze({kind: "search", query: candidate});
+}
+
+// Compatibility helper for independent consumers. Product runtime search
+// submissions use the shared Gecko SearchService after classifying input.
+export function resolveDesktopAddressInput(value, providerId, providers = DESKTOP_SEARCH_PROVIDERS) {
+  const classified = classifyAddressInput(value);
+  if (classified.kind === "url") {
+    return classified;
+  }
   const provider =
-    PROVIDERS_BY_ID.get(providerId) ?? DESKTOP_SEARCH_PROVIDERS[0];
+    providers.find(item => item.id === providerId) ?? DESKTOP_SEARCH_PROVIDERS[0];
   return Object.freeze({
     kind: "search",
     providerId: provider.id,
-    url: provider.template.replace(
+    url: provider.template.replaceAll(
       "{searchTerms}",
-      encodeURIComponent(candidate)
+      encodeURIComponent(classified.query)
     ),
   });
 }

@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: willvar <0@willvar.tw>
+Date: Fri, 4 Sep 2026 08:30:00 +0800
+Subject: [PATCH] Project Navis product identity from Android GeckoView
+
+---
+diff --git a/mobile/android/geckoview/build.gradle b/mobile/android/geckoview/build.gradle
+index c2e19e4..4f6eb60 100644
+--- a/mobile/android/geckoview/build.gradle
++++ b/mobile/android/geckoview/build.gradle
+@@ -7,6 +7,10 @@ plugins {
+ 
+ import groovy.json.JsonOutput
+ 
++def navisProductUserAgentSuffix = mozconfig.substs.MOZ_NAVIS_CORE
++        ? " + \" Navis/${mozconfig.substs.MOZ_NAVIS_PRODUCT_VERSION}\""
++        : ""
++
+ // The SDK binding generation tasks depend on the JAR creation task of the
+ // :annotations project.
+ evaluationDependsOn(':annotations')
+@@ -52,8 +56,8 @@ android {
+         buildConfigField 'String', "OMNIJAR_NAME", "\"${mozconfig.substs.OMNIJAR_NAME}\"";
+ 
+         // Keep in sync with actual user agent in nsHttpHandler::BuildUserAgent
+-        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE", "\"Mozilla/5.0 (Android \" + android.os.Build.VERSION.RELEASE + \"; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}";
+-        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE_ANDROID_10", "\"Mozilla/5.0 (Android 10; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}";
++        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE", "\"Mozilla/5.0 (Android \" + android.os.Build.VERSION.RELEASE + \"; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}${navisProductUserAgentSuffix}";
++        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE_ANDROID_10", "\"Mozilla/5.0 (Android 10; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}${navisProductUserAgentSuffix}";
+ 
+         buildConfigField 'int', 'MIN_SDK_VERSION', mozconfig.substs.MOZ_ANDROID_MIN_SDK_VERSION;
+ 
+diff --git a/netwerk/protocol/http/moz.build b/netwerk/protocol/http/moz.build
+index 1b8068f..315d108 100644
+--- a/netwerk/protocol/http/moz.build
++++ b/netwerk/protocol/http/moz.build
+@@ -238,6 +238,11 @@ LOCAL_INCLUDES += [
+ 
+ DEFINES["MOZ_APP_UA_NAME"] = f'"{CONFIG["MOZ_APP_UA_NAME"]}"'
+ 
++if CONFIG["MOZ_NAVIS_CORE"] and CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
++    DEFINES["MOZ_NAVIS_PRODUCT_UA_TOKEN"] = (
++        '"Navis/%s"' % CONFIG["MOZ_NAVIS_PRODUCT_VERSION"]
++    )
++
+ if CONFIG["MOZ_AUTH_EXTENSION"]:
+     LOCAL_INCLUDES += [
+         "/extensions/auth",
+diff --git a/netwerk/protocol/http/nsHttpHandler.cpp b/netwerk/protocol/http/nsHttpHandler.cpp
+index d7c4ee4..3138c14 100644
+--- a/netwerk/protocol/http/nsHttpHandler.cpp
++++ b/netwerk/protocol/http/nsHttpHandler.cpp
+@@ -1079,6 +1079,10 @@ void nsHttpHandler::BuildUserAgent() {
+     mUserAgent += '/';
+     mUserAgent += mAppVersion;
+   }
++#ifdef MOZ_NAVIS_PRODUCT_UA_TOKEN
++  mUserAgent += ' ';
++  mUserAgent += MOZ_NAVIS_PRODUCT_UA_TOKEN;
++#endif
+ }
+ 
+ #ifdef XP_WIN
+diff --git a/toolkit/components/extensions/parent/ext-runtime.js b/toolkit/components/extensions/parent/ext-runtime.js
+index 8278148..3313356 100644
+--- a/toolkit/components/extensions/parent/ext-runtime.js
++++ b/toolkit/components/extensions/parent/ext-runtime.js
+@@ -334,6 +334,17 @@ this.runtime = class extends ExtensionAPIPersistent {
+         },
+ 
+         getBrowserInfo: function () {
++          if (
++            AppConstants.MOZ_NAVIS_CORE &&
++            AppConstants.platform === "android"
++          ) {
++            return Promise.resolve({
++              name: "Navis",
++              vendor: "Navis",
++              version: AppConstants.MOZ_NAVIS_PRODUCT_VERSION_DISPLAY,
++              buildID: Services.appinfo.appBuildID,
++            });
++          }
+           const { name, vendor, version, appBuildID } = Services.appinfo;
+           const info = { name, vendor, version, buildID: appBuildID };
+           return Promise.resolve(info);
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index adbec51..d893b77 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -140,6 +140,13 @@ export var AppConstants = Object.freeze({
+ 
+   MOZ_BITS_DOWNLOAD: @MOZ_BITS_DOWNLOAD_BOOL@,
+ 
++  MOZ_NAVIS_CORE:
++#ifdef MOZ_NAVIS_CORE
++  true,
++#else
++  false,
++#endif
++
+   MOZ_DESKTOP_EMBEDDER:
+ #ifdef MOZ_DESKTOP_EMBEDDER
+   true,
+@@ -211,6 +218,8 @@ export var AppConstants = Object.freeze({
+   MOZ_APP_DISPLAYNAME_DO_NOT_USE: "@MOZ_APP_DISPLAYNAME@",
+   MOZ_APP_VERSION: "@MOZ_APP_VERSION@",
+   MOZ_APP_VERSION_DISPLAY: "@MOZ_APP_VERSION_DISPLAY@",
++  MOZ_NAVIS_PRODUCT_VERSION: "@MOZ_NAVIS_PRODUCT_VERSION@",
++  MOZ_NAVIS_PRODUCT_VERSION_DISPLAY: "@MOZ_NAVIS_PRODUCT_VERSION_DISPLAY@",
+   MOZ_BUILDID: "@MOZ_BUILDID@",
+   MOZ_BUILD_APP: "@MOZ_BUILD_APP@",
+   MOZ_MACBUNDLE_ID: "@MOZ_MACBUNDLE_ID@",
+diff --git a/toolkit/modules/moz.build b/toolkit/modules/moz.build
+index 62b2004..b9bc84f 100644
+--- a/toolkit/modules/moz.build
++++ b/toolkit/modules/moz.build
+@@ -292,6 +292,8 @@ for var in (
+     "MOZ_APP_DISPLAYNAME",
+     "MOZ_APP_VERSION",
+     "MOZ_APP_VERSION_DISPLAY",
++    "MOZ_NAVIS_PRODUCT_VERSION",
++    "MOZ_NAVIS_PRODUCT_VERSION_DISPLAY",
+     "MOZ_BING_API_CLIENTID",
+     "MOZ_BING_API_KEY",
+     "MOZ_GOOGLE_SAFEBROWSING_API_KEY",
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+index 61d4b32..41b4ac1 100644
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -66,6 +66,59 @@ def navis_core(value, desktop_embedder):
+ set_config("MOZ_NAVIS_CORE", navis_core)
+ set_define("MOZ_NAVIS_CORE", True, when=navis_core)
+ 
++option(
++    "--with-navis-product-version-file-path",
++    nargs=1,
++    help=(
++        "Read the Android Navis product version independently of Gecko's "
++        "engine version"
++    ),
++)
++
++
++@depends(
++    "--with-navis-product-version-file-path",
++    navis_core,
++    target,
++    build_environment,
++)
++@imports(_from="__builtin__", _import="open")
++@imports("os")
++@imports("re")
++def navis_product_versions(path, has_navis_core, target, build_env):
++    if not path:
++        if has_navis_core and target.os == "Android":
++            die("Android Navis Core requires a product version file path")
++        return namespace(version="", display_version="")
++    if not has_navis_core or target.os != "Android":
++        die("--with-navis-product-version-file-path requires Android Navis Core")
++
++    directory = path[0]
++    values = []
++    for name in ("version.txt", "version_display.txt"):
++        version_path = os.path.join(build_env.topsrcdir, directory, name)
++        try:
++            with open(version_path, "r") as version_file:
++                lines = version_file.read().splitlines()
++        except OSError as error:
++            die("Cannot read Navis product version {}: {}".format(version_path, error))
++        if len(lines) != 1 or not re.fullmatch(
++            r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", lines[0]
++        ):
++            die("Invalid Navis product version in {}".format(version_path))
++        values.append(lines[0])
++
++    version, display_version = values
++    if display_version != version and not display_version.startswith(version + "-"):
++        die("Navis display version must extend its base version")
++    return namespace(version=version, display_version=display_version)
++
++
++set_config("MOZ_NAVIS_PRODUCT_VERSION", navis_product_versions.version)
++set_config(
++    "MOZ_NAVIS_PRODUCT_VERSION_DISPLAY", navis_product_versions.display_version
++)
++
+ option(
+     "--enable-desktop-embedder-devtools",
+     help="Build Gecko page developer tools for the desktop embedder",
+-- 
+2.51.0

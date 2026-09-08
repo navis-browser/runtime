@@ -541,6 +541,21 @@ class DesktopProfileStoreImpl extends EventEmitter {
     return Object.freeze(rows.map(freezeBookmark));
   }
 
+  async queryBookmarkSuggestions({search = "", limit = 200} = {}) {
+    checkedString(search, "Bookmark search", {allowEmpty: true});
+    checkedLimit(limit);
+    await this.#ready;
+    await this.#writeTail;
+    const rows = await this.#connection.executeCached(
+      `SELECT id, parent_id, type, url, title, position, created_at, updated_at
+       FROM bookmarks WHERE type = 'bookmark'
+       AND (url LIKE :pattern ESCAPE '\\' OR title LIKE :pattern ESCAPE '\\')
+       ORDER BY updated_at DESC, id ASC LIMIT :limit`,
+      {pattern: `%${search.replace(/[\\%_]/g, "\\$&")}%`, limit},
+    );
+    return Object.freeze(rows.map(freezeBookmark));
+  }
+
   async createBookmark({
     parentId = ROOT_BOOKMARK_FOLDER,
     type = "bookmark",

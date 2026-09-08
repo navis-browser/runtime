@@ -1,0 +1,74 @@
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -18,7 +18,8 @@
+         "NavisAndroidTargetBridge.sys.mjs",
+     ]
+     EXTRA_JS_MODULES.navis += [
+-        "/desktop-embedder/modules/DesktopCleanLinks.sys.mjs",
++        "/desktop-embedder/modules/DesktopCleanLinks.sys.mjs",
++        "/desktop-embedder/modules/DesktopProductPages.sys.mjs",
+         "NavisAndroidProduct.sys.mjs",
+     ]
+     FINAL_TARGET_FILES.modules.navis += [
+diff --git a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+@@ -6,7 +6,15 @@
+   prepareDesktopCleanLinks,
+   projectDesktopCopiedLink,
+   setDesktopCleanLinksEnabled,
+-} from "resource://gre/modules/navis/DesktopCleanLinks.sys.mjs";
++} from "resource://gre/modules/navis/DesktopCleanLinks.sys.mjs";
++import { NavisProcessManager, getAdditionalSupportDiagnostics, getNavisLicenseText }
++  from "resource://gre/modules/navis/DesktopProductPages.sys.mjs";
++
++const processManagers = new WeakMap();
++function processManager(window) {
++  if (!processManagers.has(window)) processManagers.set(window, new NavisProcessManager());
++  return processManagers.get(window);
++}
+ 
+ // Match the desktop storage boundary. The upstream convenience flag also
+ // invokes cleaners for product capabilities Navis deliberately excludes.
+@@ -223,7 +231,17 @@
+       if (state.length > 1024 * 1024) throw new Error("Session history exceeds its storage limit");
+       return { allowed: true, state };
+     }
+-    case "support:get":
++    case "processes:get":
++      return { processes: await processManager(window).snapshot([
++        browser.browsingContext?.currentWindowGlobal?.osPid,
++      ]) };
++    case "processes:end":
++      return { ended: await processManager(window).end(data.token, [
++        browser.browsingContext?.currentWindowGlobal?.osPid,
++      ]) };
++    case "credits:get":
++      return { licenses: await getNavisLicenseText() };
++    case "support:get":
+       return { engineVersion: Services.appinfo.platformVersion,
+         engineBuildId: Services.appinfo.platformBuildID,
+         applicationBuildId: Services.appinfo.appBuildID,
+@@ -231,7 +249,9 @@
+         availableLocales: Services.locale.availableLocales,
+         remoteType: browser.remoteType ?? "",
+         multiprocess: Services.appinfo.browserTabsRemoteAutostart,
+-        fission: Services.appinfo.fissionAutostart };
++        fission: Services.appinfo.fissionAutostart,
++        ...Object.fromEntries((await getAdditionalSupportDiagnostics()).filter(([, value]) => value)),
++      };
+     default: throw new TypeError("Unknown product operation");
+   }
+ }
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -68,6 +68,7 @@
+ const PRODUCT_QUERIES = new Set([
+   "product:initialize", "site:get", "site:clear", "data:clear",
+   "links:set", "links:copy", "prefs:flush", "session:can-close", "support:get",
++  "processes:get", "processes:end", "credits:get",
+   "session:presentation", "session:history", "session:traverse", "session:load",
+   "session:capture-closed",
+   "session:restore-result",

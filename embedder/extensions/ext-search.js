@@ -8,18 +8,23 @@
   /* globals ExtensionAPI, ExtensionError, tabTracker, windowTracker */
 
   ChromeUtils.defineESModuleGetters(this, {
-    DESKTOP_SEARCH_PROVIDERS:
-      "resource://gre/modules/DesktopAddressInput.sys.mjs",
+    NavisSearchService: "resource://gre/modules/NavisSearchService.sys.mjs",
+    readSearchProviders: "resource://gre/modules/NavisSettingsPolicy.sys.mjs",
+    readDefaultSearchProvider: "resource://gre/modules/NavisSettingsPolicy.sys.mjs",
     DesktopExtensionTabs: "resource://gre/modules/DesktopExtensionTabs.sys.mjs",
     clearTimeout: "resource://gre/modules/Timer.sys.mjs",
     setTimeout: "resource://gre/modules/Timer.sys.mjs",
   });
 
-  const DEFAULT_SEARCH_PROVIDER_PREF = "navis.search.defaultProvider";
+  const prepareSearch = () => NavisSearchService.init({
+    providers: readSearchProviders(Services.prefs),
+    defaultProviderId: readDefaultSearchProvider(Services.prefs),
+    remoteSuggestionsEnabled: false,
+  });
 
   function selectedProvider(name = null) {
     if (name) {
-      const provider = DESKTOP_SEARCH_PROVIDERS.find(
+      const provider = NavisSearchService.snapshot.providers.find(
         candidate => candidate.name === name || candidate.id === name
       );
       if (!provider) {
@@ -27,24 +32,20 @@
       }
       return provider;
     }
-    const id = Services.prefs.getStringPref(
-      DEFAULT_SEARCH_PROVIDER_PREF,
-      DESKTOP_SEARCH_PROVIDERS[0].id
-    );
-    return (
-      DESKTOP_SEARCH_PROVIDERS.find(provider => provider.id === id) ||
-      DESKTOP_SEARCH_PROVIDERS[0]
-    );
+    return NavisSearchService.snapshot.providers.find(
+      provider => provider.id === NavisSearchService.snapshot.defaultProviderId);
   }
 
-  function searchURL(text, engine = null) {
+  function requestPrivacy(properties) {
+    const target = properties.tabId != null ? tabTracker.getTab(properties.tabId) : tabTracker.activeTab;
+    return Boolean(target?.session.state.private);
+  }
+
+  function searchURL(text, engine = null, privateMode = false) {
     if (typeof text !== "string" || !text.trim() || text.length > 8192) {
       throw new ExtensionError("A bounded search query is required");
     }
-    return selectedProvider(engine).template.replace(
-      "{searchTerms}",
-      encodeURIComponent(text.trim())
-    );
+    return NavisSearchService.submission(text.trim(), {providerId: selectedProvider(engine).id, privateMode}).url;
   }
 
   function openSearch(context, url, { tabId, disposition }, fallback) {
@@ -114,8 +115,9 @@
       return {
         search: {
           async get() {
+            await prepareSearch();
             const current = selectedProvider();
-            return DESKTOP_SEARCH_PROVIDERS.map(provider => ({
+            return NavisSearchService.snapshot.providers.map(provider => ({
               name: provider.name,
               alias: provider.id,
               isDefault: provider.id === current.id,
@@ -123,18 +125,20 @@
           },
 
           async search(properties) {
+            await prepareSearch();
             openSearch(
               context,
-              searchURL(properties.query, properties.engine),
+              searchURL(properties.query, properties.engine, requestPrivacy(properties)),
               properties,
               "NEW_TAB"
             );
           },
 
           async query(properties) {
+            await prepareSearch();
             openSearch(
               context,
-              searchURL(properties.text),
+              searchURL(properties.text, null, requestPrivacy(properties)),
               properties,
               "CURRENT_TAB"
             );

@@ -1,0 +1,373 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs b/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
+@@ -114,7 +114,8 @@
+     : Array.isArray(prompt.options)
+       ? prompt.options.map(option => option?.value ?? option)
+       : [];
+-  const login = logins[0] ?? {};
++  const loginIndex = Number.isInteger(prompt.loginIndex) ? prompt.loginIndex : 0;
++  const login = logins[loginIndex] ?? {};
+   const structuredOptions =
+     kind === "choice"
+       ? {
+@@ -144,25 +145,20 @@
+     privateMode: privateMode(browser),
+     uri: options.uri ?? browser?.currentURI?.spec ?? "",
+     username: options.username ?? "",
+-    password: options.password ?? "",
++    password: kind === "authentication" ? options.password ?? "" : "",
+     passwordOnly: options.mode === "password",
+     previousAttemptFailed: Boolean(options.previousAttemptFailed),
+     secure: Boolean(options.secure),
+     defaultValue: prompt.value ?? "",
+     loginOrigin: login.origin ?? "",
+     loginUsername: login.username ?? "",
+-    loginIndex: Number.isInteger(prompt.loginIndex)
+-      ? prompt.loginIndex
+-      : Number.isInteger(login.index)
+-        ? login.index
+-        : 0,
+-    // LoginEntry is intentionally a plain JSON-shaped object.  The Android
+-    // target only chooses an index; the selected entry is returned below.
+-    // The existing scalar direct-session seam transports structured prompt
+-    // options as bounded JSON.  Login options retain their historical shape;
+-    // the other prompt kinds use the same field until their product adapter
+-    // grows typed fields.
+-    loginOptions: JSON.stringify(structuredOptions ?? logins),
++    loginIndex,
++    // Credentials cross only the private Java persistence seam. Product/UI
++    // receives metadata, never a password hidden inside a DTO or JSON field.
++    loginCandidates: kind === "save-login" ? logins : [],
++    loginOptions: JSON.stringify(structuredOptions ?? logins.map((entry, index) => ({
++      index, origin: entry.origin ?? "", username: entry.username ?? "",
++    }))),
+     promptId: prompt.id ?? null,
+   };
+ }
+@@ -210,6 +206,8 @@
+         ? prompt.options[index]
+         : null;
+       return {
++        // Only the private native save transaction may mint this acknowledgement.
++        navisSaved: payload.kind === "save-login" && result.navisSaved === true,
+         selection: {
+           value: selected,
+           hint: selected?.hint ?? selectedOption?.hint ?? prompt.hint ?? 0,
+@@ -288,6 +286,9 @@
+           // it could not represent.
+           return Promise.resolve(null);
+         }
++        if (payload.kind === "save-login" && privateMode(browser)) {
++          return Promise.resolve(null);
++        }
+         const request = targetBridge.prompt(payload);
+         const id = requestId(prompt);
+         if (id !== null) {
+diff --git a/mobile/shared/components/geckoview/LoginStorageDelegate.sys.mjs b/mobile/shared/components/geckoview/LoginStorageDelegate.sys.mjs
+--- a/mobile/shared/components/geckoview/LoginStorageDelegate.sys.mjs
++++ b/mobile/shared/components/geckoview/LoginStorageDelegate.sys.mjs
+@@ -71,10 +71,15 @@
+           return;
+         }
+ 
++        if (lazy.AppConstants.MOZ_NAVIS_CORE && result.navisSaved !== true) {
++          return;
++        }
+         const loginInfo = lazy.LoginEntry.parse(selectedLogin).toLoginInfo();
+         Services.obs.notifyObservers(loginInfo, "passwordmgr-prompt-save");
+ 
+-        lazy.GeckoViewAutocomplete.onLoginSave(selectedLogin);
++        if (!lazy.AppConstants.MOZ_NAVIS_CORE) {
++          lazy.GeckoViewAutocomplete.onLoginSave(selectedLogin);
++        }
+       }
+     );
+ 
+@@ -113,7 +118,14 @@
+           return;
+         }
+ 
+-        lazy.GeckoViewAutocomplete.onLoginSave(selectedLogin);
++        // Navis returns a selection only after its private storage commit.
++        if (lazy.AppConstants.MOZ_NAVIS_CORE && result.navisSaved !== true) {
++          return;
++        }
++
++        if (!lazy.AppConstants.MOZ_NAVIS_CORE) {
++          lazy.GeckoViewAutocomplete.onLoginSave(selectedLogin);
++        }
+ 
+         const loginInfo = lazy.LoginEntry.parse(selectedLogin).toLoginInfo();
+         Services.obs.notifyObservers(
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidLogins.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidLogins.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidLogins.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidLogins.java
+@@ -8,6 +8,7 @@
+ import java.util.HashSet;
+ import java.util.Set;
+ import java.util.concurrent.CompletionStage;
++import java.util.concurrent.CompletableFuture;
+ import org.mozilla.gecko.EventDispatcher;
+ import org.mozilla.gecko.util.BundleEventListener;
+ import org.mozilla.gecko.util.EventCallback;
+@@ -60,7 +61,7 @@
+       this.password = password;
+     }
+ 
+-    private static Login fromBundle(final GeckoBundle bundle) {
++    static Login fromBundle(final GeckoBundle bundle) {
+       if (bundle == null) {
+         return null;
+       }
+@@ -103,7 +104,7 @@
+   public interface Delegate {
+     CompletionStage<Login[]> onLoginFetch(String domain);
+ 
+-    void onLoginSave(Login login);
++    CompletionStage<Void> onLoginSave(Login login);
+ 
+     void onLoginUsed(Login login, int usedFields);
+   }
+@@ -114,6 +115,7 @@
+   private final EventDispatcher mDispatcher;
+   private final BundleEventListener mListener = this::handleMessage;
+   private final Set<PendingFetch> mPendingFetches = new HashSet<>();
++  private final Set<CompletableFuture<Void>> mPendingSaves = new HashSet<>();
+   private boolean mRegistered;
+   private boolean mClosed;
+ 
+@@ -177,8 +179,10 @@
+             fail(callback, "Invalid login save payload");
+             return;
+           }
+-          mDelegate.onLoginSave(saved);
+-          succeed(callback, null);
++          save(saved).whenComplete((ignored, error) -> {
++            if (error == null) succeed(callback, null);
++            else fail(callback, "Navis login save failed");
++          });
+           return;
+         case USED_LOGIN_EVENT:
+           final Login used = Login.fromBundle(message == null ? null : message.getBundle("login"));
+@@ -199,6 +203,30 @@
+     }
+   }
+ 
++  /** Engine-private save. Completion means Keystore/SQLite commit, never mere enqueue. */
++  static CompletionStage<Void> save(final Login login) {
++    ThreadUtils.assertOnUiThread();
++    final CompletableFuture<Void> result = new CompletableFuture<>();
++    final NavisAndroidLogins owner = sInstance;
++    if (owner == null || owner.mClosed || login == null || !login.isValid()) {
++      result.completeExceptionally(new IllegalStateException("Navis login storage is unavailable"));
++      return result;
++    }
++    owner.mPendingSaves.add(result);
++    try {
++      owner.mDelegate.onLoginSave(login).whenComplete((ignored, error) ->
++          ThreadUtils.runOnUiThread(() -> {
++            if (!owner.mPendingSaves.remove(result)) return;
++            if (error == null && !owner.mClosed) result.complete(null);
++            else result.completeExceptionally(new IllegalStateException("Navis login save failed"));
++          }));
++    } catch (final Throwable error) {
++      owner.mPendingSaves.remove(result);
++      result.completeExceptionally(new IllegalStateException("Navis login save failed"));
++    }
++    return result;
++  }
++
+   private void fetch(final GeckoBundle message, final EventCallback callback) {
+     if (callback == null) {
+       return;
+@@ -271,6 +299,10 @@
+       sInstance = null;
+     }
+     unregister();
++    for (final CompletableFuture<Void> pending : new ArrayList<>(mPendingSaves)) {
++      pending.completeExceptionally(new IllegalStateException("Navis login storage is closed"));
++    }
++    mPendingSaves.clear();
+     for (final PendingFetch pending : mPendingFetches) {
+       pending.callback.sendError("Navis login storage is closed");
+     }
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -144,6 +144,9 @@
+       return CompletableFuture.completedFuture(false);
+     }
+ 
++    /** Delivered only after the original private save request commits. */
++    default void onLoginSaveCompleted(final long sessionId, final long requestId) {}
++
+     /** All target callbacks carry bounded, engine-neutral scalar values. */
+     default void onPromptRequested(
+         final long sessionId,
+@@ -258,6 +261,7 @@
+   private final Handler mUiHandler = new Handler(Looper.getMainLooper());
+   private final Map<String, PendingNewWindowRequest> mPendingNewWindows = new HashMap<>();
+   private final Map<Long, EventCallback> mPendingTargetRequests = new HashMap<>();
++  private final Map<Long, PendingLoginSave> mPendingLoginSaves = new HashMap<>();
+   private final Map<String, EventCallback> mPendingContextMenus = new HashMap<>();
+   private final java.util.HashSet<String> mOwnedShortcuts = new java.util.HashSet<>();
+ 
+@@ -265,6 +269,7 @@
+   private Object mSurface;
+ 
+   private boolean mOpenRequested;
++  private boolean mPrivateMode;
+   private boolean mNativeWindowReady;
+   private boolean mCompositorAttached;
+   private boolean mHostReady;
+@@ -475,6 +480,7 @@
+       throw new IllegalArgumentException("restoredState exceeds the 1 MiB character limit");
+     }
+     mOpenRequested = true;
++    mPrivateMode = privateMode;
+     mPopupTargetToken = engineWindowToken != null && engineWindowToken.startsWith("popup-")
+         ? engineWindowToken.substring("popup-".length()) : null;
+     NativeWindow.open(
+@@ -1006,15 +1012,37 @@
+       return false;
+     }
+     final long requestId = message.getLong("requestId", 0L);
+-    if (requestId <= 0L || mPendingTargetRequests.put(requestId, callback) != null) {
++    if (requestId <= 0L || mPendingTargetRequests.containsKey(requestId)) {
+       callback.sendError("Invalid or duplicate Navis target request");
+       return false;
+     }
++    mPendingTargetRequests.put(requestId, callback);
+     return true;
+   }
+ 
+   private void handlePromptRequest(final GeckoBundle message, final EventCallback callback) {
+     if (!rememberTargetRequest(message, callback)) return;
++    final long requestId = message.getLong("requestId", 0L);
++    if ("save-login".equals(message.getString("kind"))) {
++      final GeckoBundle[] candidates = message.getBundleArray("loginCandidates");
++      // Only trusted engine-supplied candidates are writable. Never accept credentials
++      // or a success marker supplied as part of the UI response.
++      if (mClosed || !mOpenRequested || mPrivateMode || message.getBoolean("privateMode", true)
++          || candidates == null || candidates.length == 0 || candidates.length > 32 ||
++          message.getInt("loginIndex", -1) < 0 || message.getInt("loginIndex", -1) >= candidates.length) {
++        cancelTargetRequest(requestId);
++        return;
++      }
++      final NavisAndroidLogins.Login[] logins = new NavisAndroidLogins.Login[candidates.length];
++      for (int i = 0; i < candidates.length; i++) {
++        logins[i] = NavisAndroidLogins.Login.fromBundle(candidates[i]);
++        if (logins[i] == null) {
++          cancelTargetRequest(requestId);
++          return;
++        }
++      }
++      mPendingLoginSaves.put(requestId, new PendingLoginSave(message, logins, callback));
++    }
+     mDelegate.onPromptRequested(
+         mSessionId, message.getLong("requestId", 0L), message.getString("kind", "alert"),
+         message.getString("title", ""), message.getString("message", ""),
+@@ -1034,11 +1062,16 @@
+    * never create a second callback or resolve/cancel the prompt. The product target therefore
+    * replaces the same-id DTO in place.
+    */
+-  private void handlePromptUpdate(final GeckoBundle message) {
++  private void handlePromptUpdate(GeckoBundle message) {
+     final long requestId = message.getLong("requestId", 0L);
+     if (requestId <= 0L || !mPendingTargetRequests.containsKey(requestId)) {
+       return;
+     }
++    final PendingLoginSave save = mPendingLoginSaves.get(requestId);
++    if (save != null && save.busy) return;
++    // A save retry presents the same immutable candidate, not new metadata from
++    // an unrelated prompt update paired with the old retained password.
++    if (save != null) message = save.message;
+     mDelegate.onPromptRequested(
+         mSessionId, requestId, message.getString("kind", "alert"),
+         message.getString("title", ""), message.getString("message", ""),
+@@ -1091,6 +1124,15 @@
+   /** Product adapter supplies an opaque response; GeckoBundle remains private transport. */
+   public boolean respondToTarget(final long requestId, final Object response) {
+     ThreadUtils.assertOnUiThread();
++    final PendingLoginSave save = mPendingLoginSaves.get(requestId);
++    if (save != null && response instanceof GeckoBundle) {
++      final GeckoBundle choice = (GeckoBundle) response;
++      if (choice.getBoolean("accepted", false)) {
++        if (!"SelectOption".equals(choice.getString("type"))) return false;
++        return saveLoginCandidate(requestId, save, choice.getInt("index", -1));
++      }
++    }
++    mPendingLoginSaves.remove(requestId);
+     final EventCallback callback = mPendingTargetRequests.remove(requestId);
+     if (callback == null || mClosed) return false;
+     callback.sendSuccess((GeckoBundle) response);
+@@ -1099,12 +1141,60 @@
+ 
+   public boolean cancelTargetRequest(final long requestId) {
+     ThreadUtils.assertOnUiThread();
++    mPendingLoginSaves.remove(requestId);
+     final EventCallback callback = mPendingTargetRequests.remove(requestId);
+     if (callback == null) return false;
+     callback.sendError("Navis target request cancelled");
+     return true;
+   }
+ 
++  private boolean saveLoginCandidate(final long requestId, final PendingLoginSave save, final int index) {
++    if (mClosed || !mOpenRequested || mPrivateMode || save.busy ||
++        mPendingLoginSaves.get(requestId) != save ||
++        mPendingTargetRequests.get(requestId) != save.callback ||
++        index < 0 || index >= save.logins.length) return false;
++    save.busy = true;
++    final long attempt = ++save.attempt;
++    NavisAndroidLogins.save(save.logins[index]).whenComplete((ignored, error) ->
++        ThreadUtils.runOnUiThread(() -> {
++          // Closing/replacing a prompt withdraws UI ownership, not a promise to undo
++          // a storage commit already accepted by the user.
++          if (mClosed || mPendingLoginSaves.get(requestId) != save ||
++              mPendingTargetRequests.get(requestId) != save.callback || save.attempt != attempt) return;
++          save.busy = false;
++          if (error != null) {
++            save.message.putBoolean("previousAttemptFailed", true);
++            handlePromptUpdate(save.message);
++            return; // Keep the original Gecko callback live for an explicit retry.
++          }
++          mPendingLoginSaves.remove(requestId);
++          mPendingTargetRequests.remove(requestId);
++          final GeckoBundle result = new GeckoBundle(4);
++          result.putString("type", "SelectOption");
++          result.putBoolean("accepted", true);
++          result.putInt("index", index);
++          result.putBoolean("navisSaved", true);
++          save.callback.sendSuccess(result);
++          mDelegate.onLoginSaveCompleted(mSessionId, requestId);
++        }));
++    return true;
++  }
++
++  private static final class PendingLoginSave {
++    final GeckoBundle message;
++    final NavisAndroidLogins.Login[] logins;
++    final EventCallback callback;
++    long attempt;
++    boolean busy;
++
++    PendingLoginSave(final GeckoBundle message, final NavisAndroidLogins.Login[] logins,
++        final EventCallback callback) {
++      this.message = message;
++      this.logins = logins;
++      this.callback = callback;
++    }
++  }
++
+   public boolean notifySitePermissionShown(final long requestId) {
+     return mPendingTargetRequests.containsKey(requestId);
+   }
+@@ -1295,6 +1385,7 @@
+       request.callback.sendSuccess(false);
+     }
+     final ArrayList<EventCallback> targetRequests = new ArrayList<>(mPendingTargetRequests.values());
++    mPendingLoginSaves.clear();
+     mPendingTargetRequests.clear();
+     for (final EventCallback request : targetRequests) {
+       request.sendError("Navis Android session closed");

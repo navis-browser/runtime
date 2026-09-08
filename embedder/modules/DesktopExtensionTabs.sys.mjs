@@ -25,19 +25,60 @@ function checkedSessionValue(extensionId, key, value) {
   return JSON.parse(serialized);
 }
 
+function dispatchBrowserTabEvent(tab, type, detail = {}) {
+  const { browser, window } = tab;
+  if (
+    !browser?.isConnected ||
+    browser.ownerDocument?.defaultView !== window
+  ) {
+    return false;
+  }
+  browser.dispatchEvent(
+    new window.CustomEvent(type, {
+      bubbles: true,
+      cancelable: false,
+      detail,
+    })
+  );
+  return true;
+}
+
 /** Private adapter joining one EngineSession, browser, and Platform window. */
 class DesktopExtensionTab {
+  #eventListeners = new Map();
+
   constructor(id, session, runtime, browser, window) {
     this.id = id;
     this.session = session;
     this.runtime = runtime;
     this.browser = browser;
     this.window = window;
+    this.closing = false;
     this.createdAt = Date.now();
   }
 
   get linkedBrowser() {
     return this.browser;
+  }
+
+  get tagName() {
+    return "tab";
+  }
+
+  get ownerDocument() {
+    return this.window.document;
+  }
+
+  get documentGlobal() {
+    return this.window;
+  }
+
+  get ownerGlobal() {
+    return this.window;
+  }
+
+  get label() {
+    return this.session.state.title || this.session.state.url;
   }
 
   get userContextId() {
@@ -54,6 +95,86 @@ class DesktopExtensionTab {
 
   get index() {
     return DesktopExtensionTabs.tabsForWindow(this.window).indexOf(this);
+  }
+
+  focus() {
+    return this.session.view?.focus() || false;
+  }
+
+  addEventListener(type, listener, options = undefined) {
+    if (
+      typeof type !== "string" ||
+      (!listener?.handleEvent && typeof listener !== "function")
+    ) {
+      return;
+    }
+    const normalized = typeof options === "object" && options ? options : {};
+    if (normalized.signal?.aborted) {
+      return;
+    }
+    const entry = {
+      listener,
+      once: Boolean(normalized.once),
+      signal: normalized.signal || null,
+      abort: null,
+    };
+    let listeners = this.#eventListeners.get(type);
+    if (!listeners) {
+      listeners = new Set();
+      this.#eventListeners.set(type, listeners);
+    }
+    if ([...listeners].some(candidate => candidate.listener === listener)) {
+      return;
+    }
+    if (entry.signal) {
+      entry.abort = () => this.#removeEventEntry(type, entry);
+      entry.signal.addEventListener("abort", entry.abort, { once: true });
+    }
+    listeners.add(entry);
+  }
+
+  removeEventListener(type, listener) {
+    const entry = [...(this.#eventListeners.get(type) || [])].find(
+      candidate => candidate.listener === listener
+    );
+    if (entry) {
+      this.#removeEventEntry(type, entry);
+    }
+  }
+
+  dispatchBindingEvent(type) {
+    const event = Object.freeze({
+      type,
+      target: this,
+      currentTarget: this,
+    });
+    for (const entry of [...(this.#eventListeners.get(type) || [])]) {
+      try {
+        if (typeof entry.listener === "function") {
+          entry.listener.call(this, event);
+        } else {
+          entry.listener.handleEvent(event);
+        }
+      } catch (error) {
+        console.error(`Navis tab ${type} listener failed`, error);
+      }
+      if (entry.once) {
+        this.#removeEventEntry(type, entry);
+      }
+    }
+  }
+
+  #removeEventEntry(type, entry) {
+    const listeners = this.#eventListeners.get(type);
+    if (!listeners?.delete(entry)) {
+      return;
+    }
+    if (entry.signal && entry.abort) {
+      entry.signal.removeEventListener("abort", entry.abort);
+    }
+    if (!listeners.size) {
+      this.#eventListeners.delete(type);
+    }
   }
 }
 
@@ -77,11 +198,45 @@ class DesktopExtensionTabRegistry extends EventEmitter {
     let tab = this.#bySession.get(session);
     if (tab) {
       if (tab.browser !== browser) {
-        this.#byBrowser.delete(tab.browser);
+        const previousBrowser = tab.browser;
+        const previousWindow = tab.window;
+        const windowChanged = previousWindow !== window;
+        const wasActive = this.#activeByWindow.get(previousWindow) === tab;
+        this.#byBrowser.delete(previousBrowser);
+        if (windowChanged) {
+          const previousTabs = this.#tabsByWindow.get(previousWindow);
+          const previousIndex = previousTabs?.indexOf(tab) ?? -1;
+          if (previousIndex >= 0) {
+            previousTabs.splice(previousIndex, 1);
+          }
+          if (previousTabs && !previousTabs.length) {
+            this.#tabsByWindow.delete(previousWindow);
+          }
+
+          let destinationTabs = this.#tabsByWindow.get(window);
+          if (!destinationTabs) {
+            destinationTabs = [];
+            this.#tabsByWindow.set(window, destinationTabs);
+          }
+          if (!destinationTabs.includes(tab)) {
+            destinationTabs.push(tab);
+          }
+
+          if (wasActive) {
+            this.#activeByWindow.delete(previousWindow);
+            this.#activeByWindow.set(window, tab);
+          }
+        }
         tab.browser = browser;
         tab.window = window;
         this.#byBrowser.set(browser, tab);
-        this.emit("tab-browser-changed", { nativeTab: tab });
+        tab.dispatchBindingEvent("TabRemotenessChange");
+        this.emit("tab-browser-changed", {
+          nativeTab: tab,
+          previousBrowser,
+          previousWindow,
+          windowChanged,
+        });
       }
       return tab;
     }
@@ -103,7 +258,21 @@ class DesktopExtensionTabRegistry extends EventEmitter {
     }
     tabs.push(tab);
     this.emit("tab-created", { nativeTab: tab });
+    dispatchBrowserTabEvent(tab, "TabOpen");
     return tab;
+  }
+
+  notifySessionClosing(session) {
+    const tab = this.#bySession.get(session);
+    if (!tab || tab.closing) {
+      return false;
+    }
+    // Both local TabDescriptorFront and server BrowserTabList must observe the
+    // close while the target browser is still connected and registered.
+    tab.closing = true;
+    tab.dispatchBindingEvent("TabClose");
+    dispatchBrowserTabEvent(tab, "TabClose");
+    return true;
   }
 
   unregisterSession(session, isWindowClosing = false) {
@@ -112,6 +281,7 @@ class DesktopExtensionTabRegistry extends EventEmitter {
       return false;
     }
     const windowId = tab.window?.docShell?.outerWindowID ?? -1;
+    this.notifySessionClosing(session);
     this.#bySession.delete(session);
     this.#byBrowser.delete(tab.browser);
     this.#byId.delete(tab.id);
@@ -164,6 +334,8 @@ class DesktopExtensionTabRegistry extends EventEmitter {
       windowId: tab.window.docShell.outerWindowID,
       isPrivate: PrivateBrowsingUtils.isBrowserPrivate(tab.browser),
     });
+    tab.dispatchBindingEvent("TabSelect");
+    dispatchBrowserTabEvent(tab, "TabSelect", { previousTab: previous });
     return true;
   }
 
@@ -180,6 +352,10 @@ class DesktopExtensionTabRegistry extends EventEmitter {
 
   getForBrowser(browser) {
     return this.#byBrowser.get(browser) || null;
+  }
+
+  getForSession(session) {
+    return this.#bySession.get(session) || null;
   }
 
   tabsForWindow(window) {

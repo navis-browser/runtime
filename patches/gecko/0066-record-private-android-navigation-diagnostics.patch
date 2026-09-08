@@ -1,0 +1,105 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -77,6 +77,67 @@
+ let faviconBridge;
+ const pendingWindowSetups = new Set();
+ 
++let navigationDiagnosticPending = null;
++let navigationDiagnosticWriting = null;
++
++function persistNavigationDiagnostic(record) {
++  if (!Services.prefs.getBoolPref("navis.diagnostics.navigation", false)) return;
++  // Coalesce while a write is outstanding; retain no navigation history.
++  navigationDiagnosticPending = record;
++  if (navigationDiagnosticWriting) return;
++  navigationDiagnosticWriting = Promise.resolve().then(async () => {
++    try {
++      const path = PathUtils.join(PathUtils.profileDir, "navis-navigation-diagnostic.json");
++      while (navigationDiagnosticPending &&
++          Services.prefs.getBoolPref("navis.diagnostics.navigation", false)) {
++        const latest = navigationDiagnosticPending;
++        navigationDiagnosticPending = null;
++        await IOUtils.writeJSON(path, latest);
++      }
++    } catch {
++      // A diagnostic write failure must not affect the load.
++    }
++  }).finally(() => {
++    navigationDiagnosticPending = null;
++    navigationDiagnosticWriting = null;
++  });
++}
++
++// Never retain URLs, query strings, exception messages or arbitrary names.
++// The opt-in profile file contains only the latest anonymous phase record.
++function reportNavigationDiagnostic(phase, { uri, request, error } = {}) {
++  try {
++    const session = /^navis-android-session-([1-9][0-9]{0,15})(?::|$)/u
++      .exec(window.name)?.[1] ?? "unknown";
++    let rawScheme;
++    if (typeof uri === "string") {
++      rawScheme = /^([a-z][a-z0-9+.-]*):/iu.exec(uri)?.[1]?.toLowerCase();
++    } else {
++      try { rawScheme = request?.QueryInterface(Ci.nsIChannel)?.URI?.scheme; } catch {}
++    }
++    const scheme = ["http", "https", "about", "file", "data", "blob",
++      "moz-extension", "navis"].includes(rawScheme) ? rawScheme : "other";
++    const result = error?.result ?? request?.status;
++    const status = Number.isInteger(result)
++      ? `0x${(result >>> 0).toString(16).padStart(8, "0")}` : "unavailable";
++    const name = typeof error?.name === "string" &&
++      /^(?:Error|TypeError|RangeError|SyntaxError|SecurityError|AbortError|NetworkError|NS_ERROR_[A-Z0-9_]+)$/u.test(error.name)
++      ? error.name : "unknown";
++    const record = { phase, session, scheme, status, name };
++    if (phase === "load-error" ||
++        (phase === "stop" && request && !Components.isSuccessCode(request.status))) {
++      try {
++        Services.console.logStringMessage(
++          `NavisAndroid NavigationFailure phase=${phase} session=${session} scheme=${scheme} status=${status} name=${name}`
++        );
++      } catch {}
++    }
++    persistNavigationDiagnostic(record);
++  } catch {
++    // A missing channel/console must not replace the original failure.
++  }
++}
++
+ const commandListener = {
+   onEvent(event, data, callback) {
+     switch (event) {
+@@ -134,13 +195,19 @@
+       }
+       case "NavisAndroid:Load": {
+         const uri = data?.uri;
++        try {
++          if (typeof uri !== "string" || !uri) {
++            throw new TypeError("NavisAndroid:Load requires a non-empty URI");
++          }
++          browser.loadURI(Services.io.newURI(uri), {
++            triggeringPrincipal:
++              Services.scriptSecurityManager.getSystemPrincipal(),
++          });
++          reportNavigationDiagnostic("load-request", { uri });
++        } catch (error) {
++          reportNavigationDiagnostic("load-error", { uri, error });
++          throw error;
+-        if (typeof uri !== "string" || !uri) {
+-          throw new TypeError("NavisAndroid:Load requires a non-empty URI");
+         }
+-        browser.loadURI(Services.io.newURI(uri), {
+-          triggeringPrincipal:
+-            Services.scriptSecurityManager.getSystemPrincipal(),
+-        });
+         break;
+       }
+       case "NavisAndroid:LoadExtensionPopup": {
+@@ -666,6 +733,7 @@
+       dispatcher.dispatch("NavisAndroid:LoadComplete", {
+         succeeded: Boolean(request && Components.isSuccessCode(request.status)),
+       });
++      reportNavigationDiagnostic("stop", { request });
+       dispatchHistoryState();
+       dispatchSessionState();
+     }

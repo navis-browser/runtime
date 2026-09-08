@@ -1,0 +1,622 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+index 08fb7e2..4abca90 100644
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -50,8 +50,15 @@ const COMMANDS = [
+   "NavisAndroid:FlushSessionState",
+   "NavisAndroid:ExitFullscreen",
+   "NavisAndroid:Command",
++  "NavisAndroid:Query",
++  "NavisAndroid:RetryDownload",
+ ];
+ 
++const PRODUCT_QUERIES = new Set([
++  "product:initialize", "site:get", "site:clear", "data:clear",
++  "links:set", "links:copy", "session:can-close", "support:get",
++]);
++
+ const MAX_SESSION_STATE_CHARS = 1024 * 1024;
+ const MAX_SESSION_HISTORY_ENTRIES = 512;
+ const NEW_WINDOW_TIMEOUT_MS = 10_000;
+@@ -64,11 +71,64 @@ let fullscreenActive = false;
+ let shuttingDown = false;
+ let targetBridge;
+ let targetDispatcher;
++let devToolsHost;
+ const pendingWindowSetups = new Set();
+ 
+ const commandListener = {
+   onEvent(event, data, callback) {
+     switch (event) {
++      case "NavisAndroid:RetryDownload": {
++        try {
++          const httpURI = value => {
++            if (typeof value !== "string" || value.length > 65536) {
++              throw new TypeError("Invalid download retry URI");
++            }
++            const uri = Services.io.newURI(value);
++            if ((!uri.schemeIs("http") && !uri.schemeIs("https")) || uri.userPass) {
++              throw new TypeError("Download retry requires a credential-free HTTP(S) URI");
++            }
++            return uri;
++          };
++          const uri = httpURI(data?.uri);
++          const referrer = data?.referrer ? httpURI(data.referrer) : null;
++          const ReferrerInfo = Components.Constructor(
++            "@mozilla.org/referrer-info;1", "nsIReferrerInfo", "init"
++          );
++          browser.loadURI(uri, {
++            triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal(
++              browser.contentPrincipal.originAttributes
++            ),
++            referrerInfo: referrer ? new ReferrerInfo(
++              Ci.nsIReferrerInfo.STRICT_ORIGIN_WHEN_CROSS_ORIGIN, true, referrer
++            ) : null,
++            loadFlags: Ci.nsIWebNavigation.LOAD_FLAGS_IS_LINK,
++          });
++          callback?.onSuccess({ loaded: true });
++        } catch (error) {
++          callback?.onError(error?.message || "Download retry failed");
++        }
++        break;
++      }
++      case "NavisAndroid:Query": {
++        Promise.resolve().then(async () => {
++          if (!PRODUCT_QUERIES.has(data?.operation) ||
++              typeof data?.payload !== "string" || data.payload.length > 65536) {
++            throw new TypeError("Unknown or invalid Navis product query");
++          }
++          if (data.operation === "product:initialize") {
++            const { ensureNavisAndroidLocales } = ChromeUtils.importESModule(
++              "resource://gre/modules/NavisAndroidLocales.sys.mjs"
++            );
++            await ensureNavisAndroidLocales();
++          }
++          const product = ChromeUtils.importESModule(
++            "resource://gre/modules/navis/NavisAndroidProduct.sys.mjs"
++          );
++          return product.query(window, data.operation, JSON.parse(data.payload));
++        }).then(result => callback?.onSuccess({ payload: JSON.stringify(result ?? null) }))
++          .catch(error => callback?.onError(error?.message || "Product query failed"));
++        break;
++      }
+       case "NavisAndroid:Load": {
+         const uri = data?.uri;
+         if (typeof uri !== "string" || !uri) {
+@@ -771,6 +831,25 @@ function createNavisNativeTab(contentBrowser) {
+ }
+ 
+ function startup() {
++  const tools = /^navis-android-session-([1-9][0-9]*):tools-([1-9][0-9]*)-([a-z][a-z-]{0,31})$/.exec(window.name);
++  if (tools) {
++    // Toolbox windows never enter the content-tab/extension tab registry.
++    document.documentElement.setAttribute("windowtype", "navigator:navis-devtools");
++    dispatcher = EventDispatcher.for(window);
++    const { createNavisAndroidDevTools } = ChromeUtils.importESModule(
++      "resource://gre/modules/NavisAndroidDevTools.sys.mjs"
++    );
++    devToolsHost = createNavisAndroidDevTools(window);
++    devToolsHost.open(Number(tools[2]), tools[3]).then(() => {
++      if (!shuttingDown) dispatcher.dispatch("NavisAndroid:HostReady", {});
++    }).catch(error => {
++      Cu.reportError(error);
++      if (!shuttingDown) dispatcher.dispatch("NavisAndroid:HostReady", {
++        error: error?.message || "Could not open developer tools",
++      });
++    });
++    return;
++  }
+   // The private extension host is process-wide; starting it from the Navis
+   // chrome host keeps AddonManager ownership out of the Android product.
+   NavisAndroidWebExtensionHost.start().catch(Cu.reportError);
+@@ -862,6 +941,12 @@ function shutdown() {
+     return;
+   }
+   shuttingDown = true;
++  if (devToolsHost) {
++    devToolsHost.close();
++    devToolsHost = null;
++    dispatcher = null;
++    return;
++  }
+   NavisAndroidWebExtensionHost.onNativeTabClosed(window.tab);
+   if (!window.tab?.isPopup) {
+     NavisAndroidExtensionTabTopology.unregisterNativeTab(window.tab);
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+index ef7e3eb..3871d8e 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -259,6 +259,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+   private boolean mSessionClosedNotified;
+   private boolean mFullscreen;
+   private CompletableFuture<Boolean> mNewWindowOpenResult;
++  private boolean mDevToolsWindow;
+ 
+   public NavisAndroidSession(final long sessionId, final Delegate delegate) {
+     if (sessionId <= 0) {
+@@ -384,6 +385,47 @@ public final class NavisAndroidSession implements AutoCloseable {
+     return openTokenizedWindow(privateMode, "popup-" + popupTargetToken);
+   }
+ 
++  /** Opens an engine-owned chrome toolbox host, never an ordinary web-content tab. */
++  public CompletionStage<Boolean> openDevToolsWindow(
++      final boolean privateMode, final long targetSessionId, final String tool) {
++    ThreadUtils.assertOnUiThread();
++    ensureNotClosed();
++    if (targetSessionId <= 0 || targetSessionId == mSessionId
++        || tool == null || !tool.matches("[a-z][a-z-]{0,31}")) {
++      throw new IllegalArgumentException("Invalid developer tools target");
++    }
++    mDevToolsWindow = true;
++    final CompletionStage<Boolean> result =
++        openTokenizedWindow(privateMode, "tools-" + targetSessionId + "-" + tool);
++    final Runnable timeout = () -> failNewWindowOpen("Timed out opening developer tools");
++    mUiHandler.postDelayed(timeout, 45_000);
++    result.whenComplete((value, error) -> mUiHandler.removeCallbacks(timeout));
++    return result;
++  }
++
++  /** Bounded JSON transport for named product operations; no arbitrary script or pref access. */
++  public CompletionStage<String> querySession(final String operation, final String payload) {
++    ThreadUtils.assertOnUiThread();
++    ensureNotClosed();
++    final CompletableFuture<String> result = new CompletableFuture<>();
++    if (!mHostReady || operation == null || operation.length() > 64
++        || payload == null || payload.length() > 64 * 1024) {
++      result.completeExceptionally(new IllegalStateException("Session query is unavailable or invalid"));
++      return result;
++    }
++    final GeckoBundle request = new GeckoBundle(2);
++    request.putString("operation", operation);
++    request.putString("payload", payload);
++    final Runnable timeout = () -> result.completeExceptionally(
++        new IllegalStateException("Session query timed out: " + operation));
++    mUiHandler.postDelayed(timeout, 30_000);
++    result.whenComplete((value, error) -> mUiHandler.removeCallbacks(timeout));
++    mDispatcher.queryBundle("NavisAndroid:Query", request).withHandler(mUiHandler).accept(
++        response -> result.complete(response.getString("payload", "null")),
++        result::completeExceptionally);
++    return result;
++  }
++
+   private CompletionStage<Boolean> openTokenizedWindow(
+       final boolean privateMode, final String engineWindowToken) {
+     if (mOpenRequested || mNewWindowOpenResult != null) {
+@@ -445,6 +487,29 @@ public final class NavisAndroidSession implements AutoCloseable {
+     dispatchOrQueue(COMMAND_LOAD, data);
+   }
+ 
++  /** An explicit product retry; the host accepts only an HTTP(S) GET navigation. */
++  public CompletionStage<Boolean> retryDownload(final String uri, final String referrer) {
++    ThreadUtils.assertOnUiThread();
++    ensureNotClosed();
++    final CompletableFuture<Boolean> result = new CompletableFuture<>();
++    if (!mHostReady || mDevToolsWindow || uri == null || uri.length() > 64 * 1024
++        || (referrer != null && referrer.length() > 64 * 1024)) {
++      result.completeExceptionally(new IllegalStateException("Download retry context is unavailable"));
++      return result;
++    }
++    final GeckoBundle request = new GeckoBundle(2);
++    request.putString("uri", uri);
++    request.putString("referrer", referrer);
++    final Runnable timeout = () -> result.completeExceptionally(
++        new IllegalStateException("Download retry timed out"));
++    mUiHandler.postDelayed(timeout, NEW_WINDOW_TIMEOUT_MS);
++    result.whenComplete((value, error) -> mUiHandler.removeCallbacks(timeout));
++    mDispatcher.queryBundle("NavisAndroid:RetryDownload", request).withHandler(mUiHandler).accept(
++        response -> result.complete(response.getBoolean("loaded", false)),
++        result::completeExceptionally);
++    return result;
++  }
++
+   /**
+    * Arms this private window as the one popup transaction issued by the extension host.
+    * The chrome host verifies the id/token/URI against its current action transaction before it
+@@ -668,7 +733,13 @@ public final class NavisAndroidSession implements AutoCloseable {
+ 
+     switch (event) {
+       case EVENT_HOST_READY:
++        if (mDevToolsWindow && message.getString("error") != null) {
++          failNewWindowOpen(message.getString("error"));
++          mDelegate.onSessionError(mSessionId, message.getString("error"));
++          break;
++        }
+         mHostReady = true;
++        if (mDevToolsWindow) completeNewWindowOpen(true);
+         mDelegate.onHostReady(mSessionId);
+         while (!mPendingCommands.isEmpty()) {
+           final PendingCommand command = mPendingCommands.removeFirst();
+@@ -980,7 +1051,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+         () -> {
+           if (!mClosed && !mNativeWindowReady) {
+             mNativeWindowReady = true;
+-            completeNewWindowOpen(true);
++            if (!mDevToolsWindow) completeNewWindowOpen(true);
+             mDelegate.onNativeWindowReady(mSessionId);
+           }
+         });
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+index e43205e..1b12c6f 100644
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -15,8 +15,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   ExtensionProcessCrashObserver:
+     "resource://gre/modules/Extension.sys.mjs",
+   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
+-  GeckoViewRemoteDebugger:
+-    "resource://gre/modules/GeckoViewRemoteDebugger.sys.mjs",
+   Management: "resource://gre/modules/Extension.sys.mjs",
+   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
+   NavisAndroidExtensionTabTopology:
+@@ -31,7 +29,7 @@ const REGISTRY_URI =
+ const BUILTIN_IDS_PREF = "extensions.applicationBuiltins.allowedIds";
+ const PINNED_PREF = "extensions.navisAndroid.toolbarPinned";
+ const TEMP_DISABLED_PREF = "extensions.navisAndroid.temporaryDisabledIds";
+-const DEVELOPER_MODE_PREF = "devtools.debugger.remote-enabled";
++const DEVELOPER_MODE_PREF = "navis.extensions.developerMode";
+ const PRIVATE_PERMISSION = "internal:privateBrowsingAllowed";
+ 
+ const MAX_PACKAGE_BYTES = 200 * 1024 * 1024;
+@@ -669,7 +667,6 @@ class AndroidWebExtensionHost {
+   #operation = Promise.resolve();
+   #publishScheduled = false;
+   #developerTransition;
+-  #remoteDebuggerInitialized = false;
+   #processSpawningDisabled = false;
+   #popup;
+   #activeGrants = new Map();
+@@ -1866,20 +1863,20 @@ class AndroidWebExtensionHost {
+     this.#developerTransition = enabled;
+     try {
+       if (!enabled) {
+-        this.#setRemoteDebugger(false);
++        this.#setDeveloperPolicy(false);
+         await this.#disableTemporaryAddons();
+       } else {
+         await this.#restoreTemporaryAddons();
+-        this.#setRemoteDebugger(true);
++        this.#setDeveloperPolicy(true);
+       }
+       return await this.#commitInventory();
+     } catch (error) {
+       try {
+         if (previous) {
+           await this.#restoreTemporaryAddons();
+-          this.#setRemoteDebugger(true);
++          this.#setDeveloperPolicy(true);
+         } else {
+-          this.#setRemoteDebugger(false);
++          this.#setDeveloperPolicy(false);
+           await this.#disableTemporaryAddons();
+         }
+       } catch (rollbackError) {
+@@ -1894,29 +1891,18 @@ class AndroidWebExtensionHost {
+   async #reconcileDeveloperMode(enabled) {
+     if (enabled) {
+       await this.#restoreTemporaryAddons();
+-      this.#setRemoteDebugger(true);
++      this.#setDeveloperPolicy(true);
+     } else {
+-      this.#setRemoteDebugger(false);
++      this.#setDeveloperPolicy(false);
+       await this.#disableTemporaryAddons();
+     }
+   }
+ 
+-  #setRemoteDebugger(enabled) {
+-    if (!this.#remoteDebuggerInitialized) {
+-      lazy.GeckoViewRemoteDebugger.onInit("navigator:navis-android");
+-      this.#remoteDebuggerInitialized = true;
+-    }
+-    // DevToolsServer rejects a SocketListener while the remote-enabled pref is
+-    // false. Commit that engine policy before onEnable() attempts to bind the
+-    // Android abstract socket; the pref observer and the explicit call are
+-    // deliberately idempotent. Keeping the write in this helper also makes
+-    // reconciliation and rollback follow the same ordering.
++  #setDeveloperPolicy(enabled) {
++    // Temporary-extension development and the in-app toolbox do not expose a
++    // debugger socket. Keep the upstream ingress pref disabled after migration.
++    Services.prefs.setBoolPref("devtools.debugger.remote-enabled", false);
+     Services.prefs.setBoolPref(DEVELOPER_MODE_PREF, enabled);
+-    if (enabled) {
+-      lazy.GeckoViewRemoteDebugger.onEnable();
+-    } else {
+-      lazy.GeckoViewRemoteDebugger.onDisable();
+-    }
+   }
+ 
+   async #disableTemporaryAddons() {
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+index 38f470d..7975c01 100644
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -4,9 +4,18 @@
+ 
+ if CONFIG["MOZ_NAVIS_ANDROID_RUNTIME"]:
+     EXTRA_JS_MODULES += [
++        "NavisAndroidDevTools.sys.mjs",
+         "NavisAndroidGeckoProducer.sys.mjs",
++        "NavisAndroidLocales.sys.mjs",
+         "NavisAndroidTargetBridge.sys.mjs",
+     ]
++    EXTRA_JS_MODULES.navis += [
++        "/desktop-embedder/modules/DesktopCleanLinks.sys.mjs",
++        "NavisAndroidProduct.sys.mjs",
++    ]
++    FINAL_TARGET_FILES.modules.navis += [
++        "/navis/chrome/content/clean-links-policy.json",
++    ]
+     if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
+         EXTRA_JS_MODULES += [
+             "NavisAndroidBrowsingData.sys.mjs",
+diff --git a/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+new file mode 100644
+index 0000000..ce1f9d0
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+@@ -0,0 +1,106 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const TOOLS = new Set([
++  "inspector", "webconsole", "jsdebugger", "styleeditor", "netmonitor",
++  "storage", "memory", "performance", "accessibility", "application", "options",
++]);
++
++/** The shared Gecko toolbox, hosted by a Navis native window and local pipe. */
++export function createNavisAndroidDevTools(window) {
++  let frame;
++  let toolbox;
++  let client;
++  let commands;
++  let closed = false;
++  return {
++    async open(targetSessionId, tool) {
++      if (!Number.isSafeInteger(targetSessionId) || targetSessionId <= 0 || !TOOLS.has(tool)) {
++        throw new TypeError("Invalid developer tools target");
++      }
++      const targetWindow = [...Services.wm.getEnumerator("navigator:navis-android")]
++        .find(candidate => candidate.tab?.id === targetSessionId && !candidate.tab.isPopup);
++      const target = targetWindow?.browser;
++      if (!target?.browsingContext || targetWindow.closed) {
++        throw new Error("The inspected tab has closed");
++      }
++      const { PrivateBrowsingUtils } = ChromeUtils.importESModule(
++        "resource://gre/modules/PrivateBrowsingUtils.sys.mjs"
++      );
++      if (PrivateBrowsingUtils.isBrowserPrivate(target) !== PrivateBrowsingUtils.isWindowPrivate(window)) {
++        throw new Error("Developer tools privacy context must match the inspected tab");
++      }
++      const { ensureNavisAndroidLocales } = ChromeUtils.importESModule(
++        "resource://gre/modules/NavisAndroidLocales.sys.mjs"
++      );
++      await ensureNavisAndroidLocales();
++      if (closed) throw new Error("Developer tools host closed");
++
++      // This non-remote chrome frame is created only in a dedicated native host.
++      // Ordinary content never navigates to a privileged toolbox URL.
++      frame = window.document.createXULElement("browser");
++      frame.setAttribute("type", "content");
++      frame.setAttribute("flex", "1");
++      frame.setAttribute("disablehistory", "true");
++      frame.setAttribute("manualactiveness", "true");
++      frame.style.minWidth = "0";
++      frame.style.minHeight = "0";
++      window.document.documentElement.appendChild(frame);
++      const loaded = new Promise((resolve, reject) => {
++        const timer = window.setTimeout(() => reject(new Error("Toolbox document timed out")), 20_000);
++        frame.addEventListener("DOMContentLoaded", event => {
++          if (event.target.documentURI !== "about:devtools-toolbox") return;
++          window.clearTimeout(timer);
++          resolve();
++        }, { capture: true });
++      });
++      frame.loadURI(Services.io.newURI("about:devtools-toolbox"), {
++        triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
++      });
++      frame.docShellIsActive = true;
++      await loaded;
++      if (closed) throw new Error("Developer tools host closed");
++
++      const { require } = ChromeUtils.importESModule(
++        "resource://devtools/shared/loader/Loader.sys.mjs"
++      );
++      const { DevToolsServer } = require("devtools/server/devtools-server");
++      const { DevToolsClient } = require("devtools/client/devtools-client");
++      const { CommandsFactory } = require("devtools/shared/commands/commands-factory");
++      const { gDevTools } = require("devtools/client/framework/devtools");
++      const { Toolbox } = require("devtools/client/framework/toolbox");
++      DevToolsServer.init();
++      DevToolsServer.registerAllActors();
++      DevToolsServer.chromeWindowType = "navigator:navis-android";
++      DevToolsServer.setRootActor(require("resource://gre/modules/dbg-browser-actors.js").createRootActor);
++      client = new DevToolsClient(DevToolsServer.connectPipe());
++      await client.connect();
++      commands = await CommandsFactory.forRemoteTab(target.browserId, { client });
++      if (closed) {
++        await commands.destroy();
++        throw new Error("Developer tools host closed");
++      }
++      toolbox = await gDevTools.showToolbox(commands, {
++        toolId: tool,
++        hostType: Toolbox.HostType.PAGE,
++        hostOptions: { customIframe: frame },
++      });
++      if (closed) {
++        await toolbox.destroy();
++        throw new Error("Developer tools host closed");
++      }
++      window.document.title = "Developer tools";
++      console.info("NavisAndroid DevTools ready", { targetSessionId, tool, transport: "pipe" });
++    },
++    close() {
++      if (closed) return;
++      closed = true;
++      // Toolbox destruction releases its commands/client and target actors.
++      const cleanup = toolbox ? toolbox.destroy() : commands ? commands.destroy() : client?.close();
++      Promise.resolve(cleanup).catch(Cu.reportError);
++      frame?.remove();
++      frame = null;
++    },
++  };
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidLocales.sys.mjs b/mobile/shared/modules/navis/NavisAndroidLocales.sys.mjs
+new file mode 100644
+index 0000000..8ba6faa
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidLocales.sys.mjs
+@@ -0,0 +1,40 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import { AddonManager } from "resource://gre/modules/AddonManager.sys.mjs";
++
++const ID = "langpack-zh-CN@firefox.mozilla.org";
++const BASE = "resource://android/assets/navis_locales/zh-CN/";
++let readiness;
++
++/** Installs only the immutable, build-verified copy of the shared desktop locale. */
++export function ensureNavisAndroidLocales() {
++  if (!readiness) {
++    readiness = (async () => {
++      await AddonManager.readyPromise;
++      const metadata = await (await fetch(BASE + "metadata.json")).json();
++      if (metadata.id !== ID || metadata.locale !== "zh-CN" || typeof metadata.version !== "string") {
++        throw new Error("The packaged Navis language metadata is invalid");
++      }
++      let addon = await AddonManager.getAddonByID(ID);
++      if (addon && addon.scope !== AddonManager.SCOPE_APPLICATION) {
++        throw new Error("The application locale ID belongs to another install scope");
++      }
++      if (!addon || addon.version !== metadata.version || addon.getResourceURI("").spec !== BASE) {
++        addon = await AddonManager.installBuiltinAddon(BASE);
++      }
++      if (addon.id !== ID || addon.type !== "locale" || addon.version !== metadata.version ||
++          addon.scope !== AddonManager.SCOPE_APPLICATION) {
++        throw new Error("The built-in Navis language pack is invalid");
++      }
++      if (addon.userDisabled) await addon.enable();
++      await addon.startupPromise;
++      if (!addon.isActive) throw new Error("The built-in Navis language pack did not start");
++    })().catch(error => {
++      readiness = undefined;
++      throw error;
++    });
++  }
++  return readiness;
++}
+diff --git a/mobile/android/moz.configure b/mobile/android/moz.configure
+index 261c21e..b2d11a8 100644
+--- a/mobile/android/moz.configure
++++ b/mobile/android/moz.configure
+@@ -164,6 +164,9 @@ def navis_android_runtime(navis_core):
+ set_config("MOZ_NAVIS_ANDROID_RUNTIME", navis_android_runtime)
+ set_define("MOZ_NAVIS_ANDROID_RUNTIME", True, when=navis_android_runtime)
+ 
++# Navis exposes the same on-device page toolbox as its desktop Platform.
++imply_option("MOZ_DEVTOOLS", "all", when=navis_android_runtime)
++
+ 
+ @depends("--enable-observability-runtime")
+ def android_healthreport(observability):
+diff --git a/mobile/android/installer/package-manifest.in b/mobile/android/installer/package-manifest.in
+index e399578..c940f72 100644
+--- a/mobile/android/installer/package-manifest.in
++++ b/mobile/android/installer/package-manifest.in
+@@ -123,6 +123,12 @@
+ ; DevTools
+ @BINPATH@/chrome/devtools@JAREXT@
+ @BINPATH@/chrome/devtools.manifest
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++@BINPATH@/chrome/devtools-startup@JAREXT@
++@BINPATH@/chrome/devtools-startup.manifest
++@BINPATH@/@PREF_DIR@/debugger.js
++@BINPATH@/@PREF_DIR@/navis-devtools.js
++#endif
+ 
+ ; [Default Preferences]
+ ; All the pref files must be part of base to prevent migration bugs
+diff --git a/devtools/client/preferences/moz.build b/devtools/client/preferences/moz.build
+index 2ceb780..fd8a729 100644
+--- a/devtools/client/preferences/moz.build
++++ b/devtools/client/preferences/moz.build
+@@ -5,3 +5,12 @@
+ JS_PREFERENCE_FILES += [
+     "debugger.js",
+ ]
++
++if CONFIG["MOZ_NAVIS_ANDROID_RUNTIME"]:
++    GeneratedFile(
++        "navis-devtools.js",
++        script="generate-navis-prefs.py",
++        entry_point="generate",
++        inputs=["/browser/app/profile/firefox.js"],
++    )
++    JS_PREFERENCE_FILES += ["!navis-devtools.js"]
+diff --git a/devtools/client/preferences/generate-navis-prefs.py b/devtools/client/preferences/generate-navis-prefs.py
+new file mode 100644
+index 0000000..bf3c4eb
+--- /dev/null
++++ b/devtools/client/preferences/generate-navis-prefs.py
+@@ -0,0 +1,23 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++"""Reuse the desktop toolbox defaults without packaging Firefox product prefs."""
++
++import io
++
++import buildconfig
++from mozbuild.preprocessor import Preprocessor
++
++
++def generate(output, source):
++    with open(source, encoding="utf-8") as stream:
++        desktop = stream.read()
++    start = desktop.index("// Toolbox preferences\n")
++    end = desktop.index("// FirstStartup service", start)
++    toolbox = io.StringIO(desktop[start:end])
++    toolbox.name = source
++    preprocessor = Preprocessor()
++    preprocessor.context.update(buildconfig.defines)
++    preprocessor.out = output
++    preprocessor.do_include(toolbox)
+diff --git a/devtools/client/framework/toolbox-hosts.js b/devtools/client/framework/toolbox-hosts.js
+index c6db4ec..a34dc08 100644
+--- a/devtools/client/framework/toolbox-hosts.js
++++ b/devtools/client/framework/toolbox-hosts.js
+@@ -474,7 +474,14 @@ class PageHost {
+   raise() {
+     // See @constructor, for the page host, the frame is also the browser
+     // element.
+-    focusTab(this.frame.documentGlobal.gBrowser.getTabForBrowser(this.frame));
++    const browserWindow = this.frame.documentGlobal;
++    if (browserWindow.gBrowser) {
++      focusTab(browserWindow.gBrowser.getTabForBrowser(this.frame));
++    } else {
++      // A product-owned chrome host may embed the toolbox without tabbrowser.
++      browserWindow.focus();
++      this.frame.focus();
++    }
+   }
+ 
+   // Do nothing.
+diff --git a/devtools/startup/DevToolsStartup.sys.mjs b/devtools/startup/DevToolsStartup.sys.mjs
+index b2f8fc2..2c0f480 100644
+--- a/devtools/startup/DevToolsStartup.sys.mjs
++++ b/devtools/startup/DevToolsStartup.sys.mjs
+@@ -357,6 +357,11 @@ export class DevToolsStartup {
+   }
+ 
+   handle(cmdLine) {
++    if (AppConstants.platform === "android") {
++      // Android products host the toolbox themselves. Do not register Firefox
++      // desktop toolbar hooks or remote command-line listener entry points.
++      return;
++    }
+     if (AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
+       if (cmdLine.state == Ci.nsICommandLine.STATE_INITIAL_LAUNCH) {
+         Services.obs.addObserver(

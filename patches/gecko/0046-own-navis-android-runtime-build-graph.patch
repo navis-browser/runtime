@@ -1,0 +1,259 @@
+diff --git a/mobile/android/gradle.configure b/mobile/android/gradle.configure
+index d5830a886051..36741f725135 100644
+--- a/mobile/android/gradle.configure
++++ b/mobile/android/gradle.configure
+@@ -67,6 +67,9 @@ def gradle_android_build_config():
+         geckoview=namespace(
+             variant=variant("debug"),
+         ),
++        navis_runtime=namespace(
++            variant=variant("debug"),
++        ),
+         geckoview_example=namespace(
+             variant=variant("debug"),
+         ),
+@@ -176,17 +179,26 @@ def gradle_android_variant_name(build_config):
+ 
+     return namespace(
+         geckoview=uncapitalize(build_config.geckoview.variant.name),
++        navis_runtime=uncapitalize(build_config.navis_runtime.variant.name),
+     )
+ 
+ 
+ set_config(
+     "GRADLE_ANDROID_GECKOVIEW_VARIANT_NAME", gradle_android_variant_name.geckoview
+ )
++set_config(
++    "GRADLE_ANDROID_NAVIS_RUNTIME_VARIANT_NAME",
++    gradle_android_variant_name.navis_runtime,
++)
+ 
+ 
+-@dependable
+-def gradle_android_generate_sdk_bindings_tasks():
++@depends(android_subproject)
++def gradle_android_generate_sdk_bindings_tasks(subproject):
+     """Gradle tasks run by |mach android generate-sdk-bindings|."""
++    if subproject == "navis":
++        return [
++            "navis-runtime-android:generateSDKBindings",
++        ]
+     return [
+         "geckoview:generateSDKBindings",
+     ]
+@@ -198,9 +210,15 @@ set_config(
+ )
+ 
+ 
+-@depends(gradle_android_build_config)
+-def gradle_android_generate_generated_jni_wrappers_tasks(build_config):
++@depends(gradle_android_build_config, android_subproject)
++def gradle_android_generate_generated_jni_wrappers_tasks(build_config, subproject):
+     """Gradle tasks run by |mach android generate-generated-jni-wrappers|."""
++    if subproject == "navis":
++        return [
++            "navis-runtime-android:generateJNIWrappersForGenerated{navis.variant.name}".format(
++                navis=build_config.navis_runtime
++            ),
++        ]
+     return [
+         "geckoview:generateJNIWrappersForGenerated{geckoview.variant.name}".format(
+             geckoview=build_config.geckoview
+@@ -358,9 +376,15 @@ imply_option("--disable-android-bundle", False, when="--enable-address-sanitiz
+ 
+ 
+-@depends(gradle_android_build_config)
+-def gradle_android_archive_geckoview_tasks(build_config):
++@depends(gradle_android_build_config, android_subproject)
++def gradle_android_archive_geckoview_tasks(build_config, subproject):
+     """Gradle tasks run by |mach android archive-geckoview|."""
++    if subproject == "navis":
++        return [
++            "navis:assemble{navis.variant.name}".format(
++                navis=build_config.navis_runtime
++            ),
++        ]
+     tasks = [
+         "geckoview:assemble{geckoview.variant.name}".format(
+             geckoview=build_config.geckoview
+         ),
+diff --git a/mobile/android/gradle/plugins/conventions/src/main/java/org/mozilla/conventions/MachTasksPlugin.kt b/mobile/android/gradle/plugins/conventions/src/main/java/org/mozilla/conventions/MachTasksPlugin.kt
+index f6781b05c173..f1c23f7d3827 100644
+--- a/mobile/android/gradle/plugins/conventions/src/main/java/org/mozilla/conventions/MachTasksPlugin.kt
++++ b/mobile/android/gradle/plugins/conventions/src/main/java/org/mozilla/conventions/MachTasksPlugin.kt
+@@ -291,6 +291,11 @@ class MachTasksPlugin : Plugin<Project> {
+         topobjdir: String,
+         substs: Map<*, *>
+     ) {
++        val stageProject = if (substs["MOZ_NAVIS_ANDROID_RUNTIME"].isTruthy()) {
++            "navis-android"
++        } else {
++            "geckoview"
++        }
+         project.tasks.register("machStagePackage", MachExec::class.java).configure {
+             group = "mach"
+             description = "Runs `./mach build stage-package`"
+@@ -328,8 +333,8 @@ class MachTasksPlugin : Plugin<Project> {
+ 
+             inputs.files(project.tasks.named("machBuildFaster"))
+ 
+-            outputs.dir("${topobjdir}/dist/geckoview/assets")
+-            outputs.dir("${topobjdir}/dist/geckoview/lib")
++            outputs.dir("${topobjdir}/dist/${stageProject}/assets")
++            outputs.dir("${topobjdir}/dist/${stageProject}/lib")
+ 
+             standardOutput = System.out
+             errorOutput = System.err
+diff --git a/mobile/android/installer/Makefile.in b/mobile/android/installer/Makefile.in
+index e3459a0e3e6a..79e8535f2a1e 100644
+--- a/mobile/android/installer/Makefile.in
++++ b/mobile/android/installer/Makefile.in
+@@ -52,7 +52,12 @@ ifdef MOZ_ARTIFACT_BUILDS
+ DEFINES += -DMOZ_ARTIFACT_BUILDS=1
+ endif
+ 
++ifdef MOZ_NAVIS_ANDROID_RUNTIME
++DEFINES += -DMOZ_NAVIS_ANDROID_RUNTIME=1
++MOZ_PKG_DIR = navis-android
++else
+ MOZ_PKG_DIR = geckoview
++endif
+ 
+ ifdef MOZ_ANDROID_FAT_AAR_ARCHITECTURES
+ DEFINES += -DMOZ_ANDROID_FAT_AAR_ARCHITECTURES=1
+diff --git a/mobile/android/installer/package-manifest.in b/mobile/android/installer/package-manifest.in
+index e244c91a8368..7d01cff2fe5b 100644
+--- a/mobile/android/installer/package-manifest.in
++++ b/mobile/android/installer/package-manifest.in
+@@ -126,6 +126,9 @@
+ #ifndef MOZ_ANDROID_FAT_AAR_ARCHITECTURES
+ @BINPATH@/@ANDROID_CPU_ARCH@/greprefs.js
+ @BINPATH@/@PREF_DIR@/@ANDROID_CPU_ARCH@/geckoview-prefs.js
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++@BINPATH@/@PREF_DIR@/@ANDROID_CPU_ARCH@/navis-prefs.js
++#endif
+ #else
+ @BINPATH@/*/greprefs.js
+ @BINPATH@/@PREF_DIR@/*/geckoview-prefs.js
+@@ -188,7 +188,12 @@
+ @BINPATH@/chrome/geckoview@JAREXT@
+ @BINPATH@/chrome/geckoview.manifest
+ 
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++@BINPATH@/chrome/navis-android@JAREXT@
++@BINPATH@/chrome/navis-android.manifest
++#else
+ @BINPATH@/components/GeckoView.manifest
++#endif
+ 
+ ; WebDriver (Marionette, Remote Agent) remote protocols
+ #ifdef ENABLE_WEBDRIVER
+diff --git a/mobile/android/moz.build b/mobile/android/moz.build
+index 89b667c7278c..0069305531f2 100644
+--- a/mobile/android/moz.build
++++ b/mobile/android/moz.build
+@@ -29,9 +29,12 @@ config_keys = (
+     "MOZ_ANDROID_CONTENT_SERVICE_ISOLATED_PROCESS",
+ )
+ flags = ["%s=%s" % (k, CONFIG[k] if CONFIG[k] else "") for k in config_keys]
++android_runtime_project = (
++    "navis-runtime-android" if CONFIG["MOZ_NAVIS_ANDROID_RUNTIME"] else "geckoview"
++)
+ 
+ GeneratedFile(
+-    ("geckoview/src/main/AndroidManifest_overlay.xml",),
++    ("%s/src/main/AndroidManifest_overlay.xml" % android_runtime_project,),
+     script="gen_from_jinja.py",
+     inputs=["geckoview/src/main/AndroidManifest_overlay.jinja"],
+     flags=flags,
+@@ -39,7 +42,8 @@ GeneratedFile(
+ 
+ GeneratedFile(
+     (
+-        "geckoview/src/main/java/org/mozilla/gecko/process/GeckoChildProcessServices.java",
++        "%s/src/main/java/org/mozilla/gecko/process/GeckoChildProcessServices.java"
++        % android_runtime_project,
+     ),
+     script="gen_from_jinja.py",
+     inputs=[
+@@ -49,14 +53,18 @@ GeneratedFile(
+ )
+ 
+ GeneratedFile(
+-    ("geckoview/src/main/java/org/mozilla/gecko/util/XPCOMError.java",),
++    (
++        "%s/src/main/java/org/mozilla/gecko/util/XPCOMError.java"
++        % android_runtime_project,
++    ),
+     script="/xpcom/base/ErrorList.py",
+     entry_point="gen_jinja",
+     inputs=["geckoview/src/main/java/org/mozilla/gecko/util/XPCOMError.jinja"],
+ )
+ 
+ GeneratedFile(
+-    "geckoview/src/main/java/org/mozilla/geckoview/CrashReport.java",
++    "%s/src/main/java/org/mozilla/geckoview/CrashReport.java"
++    % android_runtime_project,
+     script="/toolkit/crashreporter/annotations/generate.py",
+     inputs=["!/toolkit/crashreporter/annotations/validated.yaml"],
+ )
+diff --git a/settings.gradle b/settings.gradle
+index b50f3a40f35f..c2e48428a419 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -44,13 +44,29 @@ if (gradle.ext.mozconfig.substs.MOZ_APPSERVICES_IN_TREE) {
+ // but it's hard to automatically arrange better.
+ System.setProperty('android.home', gradle.mozconfig.substs.ANDROID_SDK_ROOT)
+ 
+-include ':annotations', ':messaging_example', ':port_messaging_example'
+-include ':geckoview'
+-include ':android-components'
++def isNavisAndroid = gradle.ext.mozconfig.substs.MOZ_ANDROID_SUBPROJECT == "navis"
+ 
++include ':annotations'
+ project(':annotations').projectDir = new File("${gradle.mozconfig.topsrcdir}/mobile/android/annotations")
+-project(':geckoview').projectDir = new File("${gradle.mozconfig.topsrcdir}/mobile/android/geckoview")
+-project(':android-components').projectDir = new File("${gradle.mozconfig.topsrcdir}/mobile/android/android-components")
++
++if (isNavisAndroid) {
++    include ':navis-runtime-android'
++    project(':navis-runtime-android').projectDir = new File(
++        "${gradle.mozconfig.topsrcdir}/navis-android/runtime",
++    )
++
++    include ':navis'
++    project(':navis').projectDir = new File("${gradle.mozconfig.topsrcdir}/navis-android")
++} else {
++    include ':messaging_example', ':port_messaging_example'
++    include ':geckoview'
++    include ':android-components'
++
++    project(':geckoview').projectDir = new File("${gradle.mozconfig.topsrcdir}/mobile/android/geckoview")
++    project(':android-components').projectDir = new File("${gradle.mozconfig.topsrcdir}/mobile/android/android-components")
++    project(':messaging_example').projectDir = new File('mobile/android/examples/messaging_example/app')
++    project(':port_messaging_example').projectDir = new File('mobile/android/examples/port_messaging_example/app')
++}
+ 
+ if (!gradle.mozconfig.substs.MOZ_ANDROID_SUBPROJECT || gradle.mozconfig.substs.MOZ_ANDROID_SUBPROJECT == "fenix") {
+     include ':fenix'
+@@ -64,10 +80,6 @@ if (!gradle.mozconfig.substs.MOZ_ANDROID_SUBPROJECT || gradle.mozconfig.substs.M
+     include ':focus-android'
+     project(':focus-android').projectDir = new File("${gradle.mozconfig.topsrcdir}/mobile/android/focus-android/app")
+ }
+-if (gradle.mozconfig.substs.MOZ_ANDROID_SUBPROJECT == "navis") {
+-    include ':navis'
+-    project(':navis').projectDir = new File("${gradle.mozconfig.topsrcdir}/navis-android")
+-}
+ if (!gradle.mozconfig.substs.MOZ_ANDROID_SUBPROJECT || gradle.mozconfig.substs.MOZ_ANDROID_SUBPROJECT == "geckoview_example") {
+     include ':components:samples-acorn-components'
+     include ':components:samples-browser'
+@@ -88,9 +100,6 @@ if (hasProperty("androidFormatLintTest")) {
+     project(':androidFormatLintTest').projectDir = new File("${gradle.mozconfig.topsrcdir}/tools/lint/test/files/android-format")
+ }
+ 
+-project(':messaging_example').projectDir = new File('mobile/android/examples/messaging_example/app')
+-project(':port_messaging_example').projectDir = new File('mobile/android/examples/port_messaging_example/app')
+-
+ // Print BUILDSTATUS lines for build profile markers.
+ //
+ // Listeners configured here are "more" global: they get events for (isolated)

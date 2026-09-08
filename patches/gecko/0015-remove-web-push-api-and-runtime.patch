@@ -745,3 +745,279 @@ index e3e936c7206652786de77f231c9224123ea5f98a..034fe6afe340a46052c19f8e52992667
  
  #include "nsNetCID.h"
  #include "nsParserUtils.h"
+diff --git a/mobile/shared/actors/moz.build b/mobile/shared/actors/moz.build
+--- a/mobile/shared/actors/moz.build
++++ b/mobile/shared/actors/moz.build
+@@ -24,7 +24,6 @@ FINAL_TARGET_FILES.actors += [
+     "GeckoViewPrompterChild.sys.mjs",
+     "GeckoViewPrompterParent.sys.mjs",
+     "GeckoViewPromptParent.sys.mjs",
+-    "GeckoViewPushParent.sys.mjs",
+     "GeckoViewSettingsChild.sys.mjs",
+     "LoadURIDelegateChild.sys.mjs",
+     "LoadURIDelegateParent.sys.mjs",
+@@ -38,4 +37,7 @@ FINAL_TARGET_FILES.actors += [
+     "SelectionActionDelegateParent.sys.mjs",
+ ]
+ 
++if CONFIG["MOZ_WEB_PUSH"]:
++    FINAL_TARGET_FILES.actors += ["GeckoViewPushParent.sys.mjs"]
++
+ MOCHITEST_MANIFESTS += ["tests/mochitests/mochitest.toml"]
+diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+--- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+@@ -45,13 +45,16 @@ const JSPROCESSACTORS = {
+       ],
+     },
+   },
+-  GeckoViewPush: {
++};
++
++if (AppConstants.MOZ_WEB_PUSH) {
++  JSPROCESSACTORS.GeckoViewPush = {
+     parent: {
+       esModuleURI: "resource:///actors/GeckoViewPushParent.sys.mjs",
+     },
+     includeParent: true,
+-  },
+-};
++  };
++}
+ 
+ const JSWINDOWACTORS = {
+   LoadURIDelegate: {
+@@ -150,10 +153,12 @@ export class GeckoViewStartup {
+           ],
+         });
+ 
+-        GeckoViewUtils.addLazyGetter(this, "GeckoViewPushController", {
+-          module: "resource://gre/modules/GeckoViewPushController.sys.mjs",
+-          ged: ["GeckoView:PushEvent", "GeckoView:PushSubscriptionChanged"],
+-        });
++        if (AppConstants.MOZ_WEB_PUSH) {
++          GeckoViewUtils.addLazyGetter(this, "GeckoViewPushController", {
++            module: "resource://gre/modules/GeckoViewPushController.sys.mjs",
++            ged: ["GeckoView:PushEvent", "GeckoView:PushSubscriptionChanged"],
++          });
++        }
+ 
+         GeckoViewUtils.addLazyPrefObserver(
+           {
+diff --git a/mobile/shared/components/geckoview/components.conf b/mobile/shared/components/geckoview/components.conf
+--- a/mobile/shared/components/geckoview/components.conf
++++ b/mobile/shared/components/geckoview/components.conf
+@@ -31,12 +31,6 @@ Classes = [
+         'esModule': 'resource://gre/modules/GeckoViewPermission.sys.mjs',
+         'constructor': 'GeckoViewPermission',
+     },
+-    {
+-        'cid': '{a54d84d7-98a4-4fec-b664-e42e512ae9cc}',
+-        'contract_ids': ['@mozilla.org/push/Service;1'],
+-        'esModule': 'resource://gre/modules/GeckoViewPush.sys.mjs',
+-        'constructor': 'PushService',
+-    },
+     {
+         'cid': '{fc4bec74-ddd0-4ea8-9a66-9a5081258e32}',
+         'contract_ids': ['@mozilla.org/parent/colorpicker;1'],
+@@ -83,6 +76,16 @@ Classes = [
+     },
+ ]
+ 
++if defined('MOZ_WEB_PUSH'):
++    Classes += [
++        {
++            'cid': '{a54d84d7-98a4-4fec-b664-e42e512ae9cc}',
++            'contract_ids': ['@mozilla.org/push/Service;1'],
++            'esModule': 'resource://gre/modules/GeckoViewPush.sys.mjs',
++            'constructor': 'PushService',
++        },
++    ]
++
+ if defined('MOZ_GECKOVIEW_HISTORY'):
+     Classes += [
+         {
+diff --git a/mobile/shared/components/geckoview/moz.build b/mobile/shared/components/geckoview/moz.build
+--- a/mobile/shared/components/geckoview/moz.build
++++ b/mobile/shared/components/geckoview/moz.build
+@@ -26,7 +26,6 @@ EXTRA_JS_MODULES += [
+     "GeckoViewPreferences.sys.mjs",
+     "GeckoViewPrompt.sys.mjs",
+     "GeckoViewPrompter.sys.mjs",
+-    "GeckoViewPush.sys.mjs",
+     "GeckoViewServiceWorker.sys.mjs",
+     "GeckoViewStartup.sys.mjs",
+     "LoginStorageDelegate.sys.mjs",
+@@ -37,4 +36,7 @@ EXTRA_JS_MODULES += [
+     "ShareDelegate.sys.mjs",
+ ]
+ 
++if CONFIG["MOZ_WEB_PUSH"]:
++    EXTRA_JS_MODULES += ["GeckoViewPush.sys.mjs"]
++
+ FINAL_LIBRARY = "xul"
+diff --git a/mobile/shared/modules/geckoview/moz.build b/mobile/shared/modules/geckoview/moz.build
+--- a/mobile/shared/modules/geckoview/moz.build
++++ b/mobile/shared/modules/geckoview/moz.build
+@@ -24,7 +24,6 @@ EXTRA_JS_MODULES += [
+     "GeckoViewPageExtractor.sys.mjs",
+     "GeckoViewProcessHangMonitor.sys.mjs",
+     "GeckoViewProgress.sys.mjs",
+-    "GeckoViewPushController.sys.mjs",
+     "GeckoViewRemoteDebugger.sys.mjs",
+     "GeckoViewSelectionAction.sys.mjs",
+     "GeckoViewSessionStore.sys.mjs",
+@@ -41,5 +40,8 @@ EXTRA_JS_MODULES += [
+     "Messaging.sys.mjs",
+ ]
+ 
++if CONFIG["MOZ_WEB_PUSH"]:
++    EXTRA_JS_MODULES += ["GeckoViewPushController.sys.mjs"]
++
+ if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
+     EXTRA_JS_MODULES += ["NimbusGeckoViewQATelemetry.sys.mjs"]
+diff --git a/toolkit/components/cleardata/ClearDataService.sys.mjs b/toolkit/components/cleardata/ClearDataService.sys.mjs
+--- a/toolkit/components/cleardata/ClearDataService.sys.mjs
++++ b/toolkit/components/cleardata/ClearDataService.sys.mjs
+@@ -1187,7 +1187,10 @@ const PushNotificationsCleaner = {
+    * @returns {Promise} a promise which resolves once data has been cleared.
+    */
+   _deleteByRootDomain(aDomain, aOriginAttributesPattern = null) {
+-    if (!Services.prefs.getBoolPref("dom.push.enabled", false)) {
++    if (
++      !AppConstants.MOZ_WEB_PUSH ||
++      !Services.prefs.getBoolPref("dom.push.enabled", false)
++    ) {
+       return Promise.resolve();
+     }
+ 
+@@ -1214,7 +1217,10 @@ const PushNotificationsCleaner = {
+   },
+ 
+   deleteByPrincipal(aPrincipal) {
+-    if (!Services.prefs.getBoolPref("dom.push.enabled", false)) {
++    if (
++      !AppConstants.MOZ_WEB_PUSH ||
++      !Services.prefs.getBoolPref("dom.push.enabled", false)
++    ) {
+       return Promise.resolve();
+     }
+ 
+@@ -1237,7 +1243,10 @@ const PushNotificationsCleaner = {
+   },
+ 
+   deleteAll() {
+-    if (!Services.prefs.getBoolPref("dom.push.enabled", false)) {
++    if (
++      !AppConstants.MOZ_WEB_PUSH ||
++      !Services.prefs.getBoolPref("dom.push.enabled", false)
++    ) {
+       return Promise.resolve();
+     }
+ 
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -206,5 +206,12 @@ export var AppConstants = Object.freeze({
+   false,
+ #endif
+ 
++  MOZ_WEB_PUSH:
++#ifdef MOZ_WEB_PUSH
++  true,
++#else
++  false,
++#endif
++
+   DLL_PREFIX: "@DLL_PREFIX@",
+   DLL_SUFFIX: "@DLL_SUFFIX@",
+diff --git a/devtools/server/actors/worker/service-worker-registration.js b/devtools/server/actors/worker/service-worker-registration.js
+index 326a57da12a5..57243f04ceb0 100644
+--- a/devtools/server/actors/worker/service-worker-registration.js
++++ b/devtools/server/actors/worker/service-worker-registration.js
+@@ -19,6 +19,12 @@ const {
+ const {
+   ServiceWorkerActor,
+ } = require("resource://devtools/server/actors/worker/service-worker.js");
++const { AppConstants } = ChromeUtils.importESModule(
++  "resource://gre/modules/AppConstants.sys.mjs",
++  { global: "contextual" }
++);
++
++const HAS_PUSH_SERVICE = AppConstants.MOZ_WEB_PUSH;
+ 
+ XPCOMUtils.defineLazyServiceGetter(
+   this,
+@@ -27,12 +33,14 @@ XPCOMUtils.defineLazyServiceGetter(
+   Ci.nsIServiceWorkerManager
+ );
+ 
+-XPCOMUtils.defineLazyServiceGetter(
+-  this,
+-  "PushService",
+-  "@mozilla.org/push/Service;1",
+-  Ci.nsIPushService
+-);
++if (HAS_PUSH_SERVICE) {
++  XPCOMUtils.defineLazyServiceGetter(
++    this,
++    "PushService",
++    "@mozilla.org/push/Service;1",
++    Ci.nsIPushService
++  );
++}
+ 
+ class ServiceWorkerRegistrationActor extends Actor {
+   /**
+@@ -56,7 +64,9 @@ class ServiceWorkerRegistrationActor extends Actor {
+ 
+     this._createServiceWorkerActors();
+ 
+-    Services.obs.addObserver(this, PushService.subscriptionModifiedTopic);
++    if (HAS_PUSH_SERVICE) {
++      Services.obs.addObserver(this, PushService.subscriptionModifiedTopic);
++    }
+   }
+ 
+   onChange() {
+@@ -99,7 +109,9 @@ class ServiceWorkerRegistrationActor extends Actor {
+       this.allowShutdown();
+     }
+ 
+-    Services.obs.removeObserver(this, PushService.subscriptionModifiedTopic);
++    if (HAS_PUSH_SERVICE) {
++      Services.obs.removeObserver(this, PushService.subscriptionModifiedTopic);
++    }
+     this._registration.removeListener(this);
+     this._registration = null;
+     if (this._pushSubscriptionActor) {
+@@ -119,6 +131,9 @@ class ServiceWorkerRegistrationActor extends Actor {
+    * Standard observer interface to listen to push messages and changes.
+    */
+   observe(subject, topic, data) {
++    if (!HAS_PUSH_SERVICE) {
++      return;
++    }
+     const scope = this._registration.scope;
+     if (data !== scope) {
+       // This event doesn't concern us, pretend nothing happened.
+@@ -168,6 +183,9 @@ class ServiceWorkerRegistrationActor extends Actor {
+   }
+ 
+   push() {
++    if (!HAS_PUSH_SERVICE) {
++      return;
++    }
+     const { principal, scope } = this._registration;
+     const originAttributes = ChromeUtils.originAttributesToSuffix(
+       principal.originAttributes
+@@ -207,6 +225,9 @@ class ServiceWorkerRegistrationActor extends Actor {
+   }
+ 
+   getPushSubscription() {
++    if (!HAS_PUSH_SERVICE) {
++      return Promise.resolve(null);
++    }
+     const registration = this._registration;
+     let pushSubscriptionActor = this._pushSubscriptionActor;
+     if (pushSubscriptionActor) {

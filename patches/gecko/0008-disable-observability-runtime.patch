@@ -209,10 +209,13 @@ index 00fb5e6d23..a7f3a401ea 100644
      "Headers.webidl",
      "Highlight.webidl",
      "HighlightRegistry.webidl",
-@@ -1142,6 +1139,13 @@ WEBIDL_FILES = [
+@@ -1142,6 +1139,16 @@ WEBIDL_FILES = [
      "XSLTProcessor.webidl",
  ]
  
++if not CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    WEBIDL_FILES.remove("PrivateAttribution.webidl")
++
 +if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
 +    WEBIDL_FILES += [
 +        "Glean.webidl",
@@ -1314,6 +1317,23 @@ index 0000000000..5f40031e47
 +void RecordPowerMetrics() {}
 +
 +}  // namespace mozilla::glean
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -96,6 +96,13 @@ component_dirs = [
+     "xulstore",
+ ]
+ 
++if not CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    component_dirs = [
++        directory
++        for directory in component_dirs
++        if directory not in ("captchadetection", "dap")
++    ]
++
+ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+     excluded_component_dirs = [
+         "aboutcheckerboard",
 diff --git a/toolkit/components/glean/moz.build b/toolkit/components/glean/moz.build
 index 22dfab5a45..e6a8447093 100644
 --- a/toolkit/components/glean/moz.build
@@ -1833,3 +1853,428 @@ index 0b0e8a138e..9acde9ac99 100644
  
    nsCOMPtr<nsIFile> xreBinDirectory;
    xreBinDirectory = mDirProvider.GetGREBinDir();
+diff --git a/mobile/shared/chrome/geckoview/geckoview.js b/mobile/shared/chrome/geckoview/geckoview.js
+--- a/mobile/shared/chrome/geckoview/geckoview.js
++++ b/mobile/shared/chrome/geckoview/geckoview.js
+@@ -9,6 +9,9 @@ var { DelayedInit } = ChromeUtils.importESModule(
+ var { XPCOMUtils } = ChromeUtils.importESModule(
+   "resource://gre/modules/XPCOMUtils.sys.mjs"
+ );
++var { AppConstants } = ChromeUtils.importESModule(
++  "resource://gre/modules/AppConstants.sys.mjs"
++);
+ 
+ ChromeUtils.defineESModuleGetters(this, {
+   Blocklist: "resource://gre/modules/Blocklist.sys.mjs",
+@@ -21,10 +24,15 @@ ChromeUtils.defineESModuleGetters(this, {
+   RemoteSecuritySettings:
+     "resource://gre/modules/psm/RemoteSecuritySettings.sys.mjs",
+   SafeBrowsing: "resource://gre/modules/SafeBrowsing.sys.mjs",
+-  CaptchaDetectionPingUtils:
+-    "resource://gre/modules/CaptchaDetectionPingUtils.sys.mjs",
+ });
+ 
++if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++  ChromeUtils.defineESModuleGetters(this, {
++    CaptchaDetectionPingUtils:
++      "resource://gre/modules/CaptchaDetectionPingUtils.sys.mjs",
++  });
++}
++
+ ChromeUtils.defineLazyGetter(this, "WindowEventDispatcher", () =>
+   EventDispatcher.for(window)
+ );
+@@ -806,7 +814,9 @@ function startup() {
+     InitLater(() => {
+       // It's enough to run this once to set up FOG.
+       // (See also bug 1730026.)
+-      Services.fog.registerCustomPings();
++      if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++        Services.fog.registerCustomPings();
++      }
+     });
+ 
+     InitLater(() => {
+@@ -815,13 +825,15 @@ function startup() {
+       Blocklist.loadBlocklistAsync();
+     });
+ 
+-    InitLater(() => {
+-      // Call the init function for the CaptchaDetectionPingUtils module.
+-      // This function adds pref observers that flushes the ping. It also
+-      // submits the ping if it has data and has been about 24 hours since the
+-      // last submission.
+-      CaptchaDetectionPingUtils.init();
+-    });
++    if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      InitLater(() => {
++        // Call the init function for the CaptchaDetectionPingUtils module.
++        // This function adds pref observers that flushes the ping. It also
++        // submits the ping if it has data and has been about 24 hours since the
++        // last submission.
++        CaptchaDetectionPingUtils.init();
++      });
++    }
+ 
+     // This should always go last, since the idle tasks (except for the ones with
+     // timeouts) should execute in order. Note that this observer notification is
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -1138,16 +1138,28 @@ def check_history_backend(places, geckoview_history, desktop_embedder_history):
+         die("Exactly one history backend must be enabled.")
+ 
+ 
++@depends(mozilla_official, observability_runtime)
++def telemetry_reporting_default(official, observability):
++    return bool(official and observability)
++
++
+ option(
+     env="MOZ_TELEMETRY_REPORTING",
+-    default=mozilla_official,
++    default=telemetry_reporting_default,
+     help="Enable telemetry reporting",
+ )
+ 
+-set_define("MOZ_TELEMETRY_REPORTING", True, when="MOZ_TELEMETRY_REPORTING")
+ 
++@depends("MOZ_TELEMETRY_REPORTING", observability_runtime)
++def telemetry_reporting(reporting, observability):
++    if reporting and not observability:
++        die("MOZ_TELEMETRY_REPORTING requires the observability runtime")
++    return bool(reporting)
++
++set_define("MOZ_TELEMETRY_REPORTING", True, when=telemetry_reporting)
+ 
+-@depends("MOZ_TELEMETRY_REPORTING", milestone.is_nightly)
++
++@depends(telemetry_reporting, milestone.is_nightly)
+ def telemetry_on_by_default(reporting, is_nightly):
+     return reporting and is_nightly
+ 
+@@ -4515,10 +4528,10 @@ with only_when(artifact_builds & local_ml):
+ set_config(
+     "GECKO_TRACE_ENABLE",
+     True,
+-    when=moz_debug | milestone.is_early_beta_or_earlier,
++    when=observability_runtime & (moz_debug | milestone.is_early_beta_or_earlier),
+ )
+ set_define(
+     "GECKO_TRACE_ENABLE",
+     True,
+-    when=moz_debug | milestone.is_early_beta_or_earlier,
++    when=observability_runtime & (moz_debug | milestone.is_early_beta_or_earlier),
+ )
+diff --git a/browser/components/BrowserGlue.sys.mjs b/browser/components/BrowserGlue.sys.mjs
+--- a/browser/components/BrowserGlue.sys.mjs
++++ b/browser/components/BrowserGlue.sys.mjs
+@@ -1274,7 +1274,9 @@ BrowserGlue.prototype = {
+ 
+       {
+         name: "DAPTelemetrySender.startup",
+-        condition: AppConstants.MOZ_TELEMETRY_REPORTING,
++        condition:
++          AppConstants.MOZ_OBSERVABILITY_RUNTIME &&
++          AppConstants.MOZ_TELEMETRY_REPORTING,
+         task: async () => {
+           await lazy.DAPTelemetrySender.startup();
+           await lazy.DAPVisitCounter.startup();
+diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
+--- a/dom/base/Navigator.cpp
++++ b/dom/base/Navigator.cpp
+@@ -22,7 +22,9 @@
+ #include "nsIClassOfService.h"
+ #include "nsIContentPolicy.h"
+ #include "nsIHttpProtocolHandler.h"
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ #include "nsIPrivateAttributionService.h"
++#endif
+ #include "nsISupportsPriority.h"
+ #include "nsIWebProtocolHandlerRegistrar.h"
+ #include "nsIXULAppInfo.h"
+@@ -57,7 +59,9 @@
+ #include "mozilla/dom/ModelContext.h"
+ #include "mozilla/dom/NavigatorLogin.h"
+ #include "mozilla/dom/Permissions.h"
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ #include "mozilla/dom/PrivateAttribution.h"
++#endif
+ #include "mozilla/dom/ServiceWorkerContainer.h"
+ #include "mozilla/dom/StorageManager.h"
+ #include "mozilla/dom/TCPSocket.h"
+@@ -160,7 +164,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocks)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLogin)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mModelContext)
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPrivateAttribution)
++#endif
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mUserActivation)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWakeLock)
+ 
+@@ -261,7 +267,9 @@ void Navigator::Invalidate() {
+ 
+   mModelContext = nullptr;
+ 
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   mPrivateAttribution = nullptr;
++#endif
+ 
+   mUserActivation = nullptr;
+ 
+@@ -2352,12 +2360,14 @@ dom::ModelContext* Navigator::ModelContext() {
+   return mModelContext;
+ }
+ 
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ dom::PrivateAttribution* Navigator::PrivateAttribution() {
+   if (!mPrivateAttribution) {
+     mPrivateAttribution = new dom::PrivateAttribution(GetWindow()->AsGlobal());
+   }
+   return mPrivateAttribution;
+ }
++#endif
+ 
+ /* static */
+ bool Navigator::Webdriver() {
+diff --git a/dom/base/Navigator.h b/dom/base/Navigator.h
+--- a/dom/base/Navigator.h
++++ b/dom/base/Navigator.h
+@@ -45,7 +45,9 @@ class Clipboard;
+ class LockManager;
+ class ModelContext;
+ class NavigatorLogin;
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ class PrivateAttribution;
++#endif
+ class HTMLMediaElement;
+ class AudioContext;
+ class WakeLockJS;
+@@ -222,7 +224,9 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   dom::LockManager* Locks();
+   NavigatorLogin* Login();
+   dom::ModelContext* ModelContext();
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   dom::PrivateAttribution* PrivateAttribution();
++#endif
+ 
+   static bool Webdriver();
+ 
+@@ -325,7 +329,9 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   RefPtr<LockManager> mLocks;
+   RefPtr<NavigatorLogin> mLogin;
+   RefPtr<dom::ModelContext> mModelContext;
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   RefPtr<dom::PrivateAttribution> mPrivateAttribution;
++#endif
+   RefPtr<dom::UserActivation> mUserActivation;
+   RefPtr<dom::WakeLockJS> mWakeLock;
+ };
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -220,7 +220,9 @@
+ #include "nsINetworkLinkService.h"
+ #include "nsIObserverService.h"
+ #include "nsIParentChannel.h"
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ #include "nsIPrivateAttributionService.h"
++#endif
+ #include "nsIScriptError.h"
+ #include "nsIScriptSecurityManager.h"
+ #include "nsIServiceWorkerManager.h"
+@@ -1265,6 +1267,7 @@ mozilla::ipc::IPCResult ContentParent::RecvCreateGMPService() {
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ IPCResult ContentParent::RecvAttributionEvent(
+     const nsACString& aHost, PrivateAttributionImpressionType aType,
+     uint32_t aIndex, const nsAString& aAd, const nsACString& aTargetHost) {
+@@ -1293,6 +1296,7 @@ IPCResult ContentParent::RecvAttributionConversion(
+       aSourceHosts);
+   return IPC_OK();
+ }
++#endif
+ 
+ static mozilla::glean::security::FissionPrincipalsExtra
+ GetAndLogPrincipalValidationFailure(nsIPrincipal* aPrincipal,
+diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
+--- a/dom/ipc/ContentParent.h
++++ b/dom/ipc/ContentParent.h
+@@ -518,6 +518,7 @@ class ContentParent final : public PContentParent,
+     return PContentParent::RecvPHalConstructor(aActor);
+   }
+ 
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   mozilla::ipc::IPCResult RecvAttributionEvent(
+       const nsACString& aHost, PrivateAttributionImpressionType aType,
+       uint32_t aIndex, const nsAString& aAd, const nsACString& aTargetHost);
+@@ -526,5 +527,6 @@ class ContentParent final : public PContentParent,
+       const Maybe<PrivateAttributionImpressionType>& aImpressionType,
+       const nsTArray<nsString>& aAds, const nsTArray<nsCString>& aSourceHosts);
++#endif
+ 
+ #ifndef MOZ_DESKTOP_EMBEDDER
+   PHeapSnapshotTempFileHelperParent* AllocPHeapSnapshotTempFileHelperParent();
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -179,7 +179,9 @@ using mozilla::dom::Wireframe from "mozilla/dom/DocumentBinding.h";
+ using mozilla::PerfStats::MetricMask from "mozilla/PerfStats.h";
+ using nsIDNSService::ResolverMode from "nsIDNSService.h";
+ using mozilla::dom::UserActivation::Modifiers from "mozilla/dom/UserActivation.h";
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+ using mozilla::dom::PrivateAttributionImpressionType from "mozilla/dom/PrivateAttributionIPCUtils.h";
++#endif
+ using nsIClipboard::ClipboardType from "nsIClipboard.h";
+ using nsIUrlClassifierFeature::listType from "nsIUrlClassifierFeature.h";
+ using mozilla::dom::ReferrerPolicy from "mozilla/dom/ReferrerPolicyBinding.h";
+@@ -1984,6 +1986,7 @@ parent:
+     async KillGPUProcess();
+ #endif
+ 
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   async AttributionEvent(nsCString aSourceHost,
+                          PrivateAttributionImpressionType aType,
+                          uint32_t aIndex, nsString aAd, nsCString aTargetHost);
+@@ -1994,6 +1997,7 @@ parent:
+                               PrivateAttributionImpressionType? aImpressionType,
+                               nsString[] aAds,
+                               nsCString[] aImpressionSourceHosts);
++#endif
+ };
+ 
+ }
+diff --git a/dom/moz.build b/dom/moz.build
+--- a/dom/moz.build
++++ b/dom/moz.build
+@@ -115,6 +115,9 @@ if CONFIG["MOZ_LOCAL_ML"]:
+     DIRS += ["onnx"]
+ 
+ 
++if not CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    DIRS.remove("privateattribution")
++
+ TEST_DIRS += [
+     "tests",
+     "imptests",
+diff --git a/dom/webidl/Navigator.webidl b/dom/webidl/Navigator.webidl
+--- a/dom/webidl/Navigator.webidl
++++ b/dom/webidl/Navigator.webidl
+@@ -407,8 +407,10 @@ partial interface Navigator {
+ 
+ [SecureContext]
+ partial interface Navigator {
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   [SameObject, Trial="PrivateAttributionV2"]
+   readonly attribute PrivateAttribution privateAttribution;
++#endif
+ };
+ 
+ // https://w3c-fedid.github.io/login-status/#login-status-javascript
+diff --git a/mobile/android/geckoview/build.gradle b/mobile/android/geckoview/build.gradle
+--- a/mobile/android/geckoview/build.gradle
++++ b/mobile/android/geckoview/build.gradle
+@@ -162,7 +162,8 @@ def gleanVersion = libs.versions.glean.get()
+ configurations {
+     api {
+         outgoing {
+-            if (!mozconfig.substs.MOZ_ANDROID_GECKOVIEW_LITE) {
++            if (!mozconfig.substs.MOZ_ANDROID_GECKOVIEW_LITE
++                    && mozconfig.substs.MOZ_OBSERVABILITY_RUNTIME) {
+                 // The omni build provides glean-native
+                 capability("org.mozilla.telemetry:glean-native:${gleanVersion}")
+             }
+diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+--- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+@@ -12,12 +12,17 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   ActorManagerParent: "resource://gre/modules/ActorManagerParent.sys.mjs",
+   DoHController: "moz-src:///toolkit/components/doh/DoHController.sys.mjs",
+   EventDispatcher: "resource://gre/modules/Messaging.sys.mjs",
+-  NimbusGeckoViewQATelemetry:
+-    "resource://gre/modules/NimbusGeckoViewQATelemetry.sys.mjs",
+   PdfJs: "resource://pdf.js/PdfJs.sys.mjs",
+   GeckoViewPreferences: "resource://gre/modules/GeckoViewPreferences.sys.mjs",
+ });
+ 
++if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++  ChromeUtils.defineESModuleGetters(lazy, {
++    NimbusGeckoViewQATelemetry:
++      "resource://gre/modules/NimbusGeckoViewQATelemetry.sys.mjs",
++  });
++}
++
+ const { debug, warn } = GeckoViewUtils.initLogging("Startup");
+ 
+ function InitLater(fn, object, name) {
+@@ -328,7 +334,9 @@ export class GeckoViewStartup {
+         Services.obs.addObserver(this, "browser-idle-startup-tasks-finished");
+         Services.obs.addObserver(this, "handlersvc-store-initialized");
+ 
+-        lazy.NimbusGeckoViewQATelemetry.init();
++        if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++          lazy.NimbusGeckoViewQATelemetry.init();
++        }
+ 
+         Services.obs.notifyObservers(null, "geckoview-startup-complete");
+         break;
+diff --git a/mobile/shared/modules/geckoview/moz.build b/mobile/shared/modules/geckoview/moz.build
+--- a/mobile/shared/modules/geckoview/moz.build
++++ b/mobile/shared/modules/geckoview/moz.build
+@@ -40,8 +40,10 @@ EXTRA_JS_MODULES += [
+     "LoadURIDelegate.sys.mjs",
+     "MediaUtils.sys.mjs",
+     "Messaging.sys.mjs",
+-    "NimbusGeckoViewQATelemetry.sys.mjs",
+ ]
+ 
++if CONFIG["MOZ_OBSERVABILITY_RUNTIME"]:
++    EXTRA_JS_MODULES += ["NimbusGeckoViewQATelemetry.sys.mjs"]
++
+ XPCSHELL_TESTS_MANIFESTS += ["test/xpcshell/xpcshell.toml"]
+ MOCHITEST_MANIFESTS += ["test/mochitest/mochitest.toml"]
+diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
+--- a/toolkit/modules/ActorManagerParent.sys.mjs
++++ b/toolkit/modules/ActorManagerParent.sys.mjs
+@@ -859,6 +859,11 @@ if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
+   delete JSPROCESSACTORS.TranslationsEngine;
+ }
+ 
++if (!AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++  delete JSWINDOWACTORS.CaptchaDetection;
++  delete JSWINDOWACTORS.CaptchaDetectionCommunication;
++}
++
+ if (!AppConstants.MOZ_WEBEXTENSIONS_RUNTIME) {
+   delete JSPROCESSACTORS.ExtensionContent;
+   delete JSPROCESSACTORS.ProcessConduits;
+diff --git a/mobile/android/moz.configure b/mobile/android/moz.configure
+--- a/mobile/android/moz.configure
++++ b/mobile/android/moz.configure
+@@ -130,7 +130,6 @@ set_config("MOZ_ANDROID_DEBUGGABLE", android_debuggable)
+ 
+ 
+ imply_option("MOZ_NORMANDY", False)
+-imply_option("MOZ_SERVICES_HEALTHREPORT", True)
+ imply_option("MOZ_GECKOVIEW_HISTORY", True)
+ 
+ imply_option("MOZ_APP_UA_NAME", "Firefox")
+@@ -154,6 +153,15 @@ def check_target(target):
+ 
+ include("../shared/moz.configure")
+ include("../../toolkit/moz.configure")
++
++
++@depends("--enable-observability-runtime")
++def android_healthreport(observability):
++    return bool(observability)
++
++
++imply_option("MOZ_SERVICES_HEALTHREPORT", android_healthreport)
++
+ include("../../build/moz.configure/android-sdk.configure")
+ include("../../build/moz.configure/java.configure")
+ include("gradle.configure")

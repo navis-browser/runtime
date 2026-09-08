@@ -1,0 +1,370 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: willvar <0@willvar.tw>
+Date: Fri, 4 Sep 2026 01:08:00 +0800
+Subject: [PATCH] Add opt-in desktop page developer tools
+
+---
+diff --git a/devtools/startup/DevToolsStartup.sys.mjs b/devtools/startup/DevToolsStartup.sys.mjs
+index ab008a13b4a6..b2f8fc2ef966 100644
+--- a/devtools/startup/DevToolsStartup.sys.mjs
++++ b/devtools/startup/DevToolsStartup.sys.mjs
+@@ -357,6 +357,16 @@ export class DevToolsStartup {
+   }
+ 
+   handle(cmdLine) {
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
++      if (cmdLine.state == Ci.nsICommandLine.STATE_INITIAL_LAUNCH) {
++        Services.obs.addObserver(
++          this.onWindowReady,
++          "browser-delayed-startup-finished"
++        );
++      }
++      return;
++    }
++
+     const flags = this.readCommandLineFlags(cmdLine);
+ 
+     // handle() can be called after browser startup (e.g. opening links from other apps).
+@@ -566,6 +576,11 @@ export class DevToolsStartup {
+    * @param {Window} window
+    */
+   onWindowReady(window) {
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
++      JsonView.initialize();
++      return;
++    }
++
+     if (
+       this.isDisabledByPolicy() ||
+       AppConstants.MOZ_APP_NAME == "thunderbird"
+diff --git a/netwerk/protocol/about/nsAboutProtocolHandler.cpp b/netwerk/protocol/about/nsAboutProtocolHandler.cpp
+index 8337daae876a..d314d63a7521 100644
+--- a/netwerk/protocol/about/nsAboutProtocolHandler.cpp
++++ b/netwerk/protocol/about/nsAboutProtocolHandler.cpp
+@@ -33,6 +33,11 @@ static bool IsDesktopEmbedderEngineAboutURI(nsIURI* aURI) {
+   if (NS_FAILED(NS_GetAboutModuleName(aURI, name))) {
+     return false;
+   }
++#  ifdef MOZ_DESKTOP_EMBEDDER_DEVTOOLS
++  if (name.EqualsLiteral("devtools-toolbox")) {
++    return true;
++  }
++#  endif
+   return name.EqualsLiteral("blank") || name.EqualsLiteral("srcdoc") ||
+          name.EqualsLiteral("neterror") || name.EqualsLiteral("certerror") ||
+          name.EqualsLiteral("httpsonlyerror") ||
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+index 77c63476f013..124e8bd637d7 100644
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -51,7 +51,38 @@ option(
+ )
+ set_config("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+ set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+-imply_option("MOZ_DEVTOOLS", "none", when="--enable-desktop-embedder")
++
++option(
++    "--enable-desktop-embedder-devtools",
++    help="Build Gecko page developer tools for the desktop embedder",
++)
++
++
++@depends("--enable-desktop-embedder-devtools", "--enable-desktop-embedder")
++def desktop_embedder_devtools(value, desktop_embedder):
++    if value and not desktop_embedder:
++        die(
++            "--enable-desktop-embedder-devtools requires "
++            "--enable-desktop-embedder"
++        )
++    return bool(value)
++
++
++set_config("MOZ_DESKTOP_EMBEDDER_DEVTOOLS", desktop_embedder_devtools)
++set_define("MOZ_DESKTOP_EMBEDDER_DEVTOOLS", True, when=desktop_embedder_devtools)
++
++
++@depends(desktop_embedder_devtools)
++def desktop_embedder_devtools_mode(value):
++    return "all" if value else "none"
++
++
++imply_option(
++    "MOZ_DEVTOOLS",
++    desktop_embedder_devtools_mode,
++    reason="--enable-desktop-embedder",
++    when="--enable-desktop-embedder",
++)
+ imply_option(
+     "MOZ_DESKTOP_EMBEDDER_HISTORY", True, when="--enable-desktop-embedder"
+ )
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -128,8 +128,9 @@ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+         "thumbnails",
+         "timermanager",
+         "translations",
+-        "viewsource",
+     ]
++    if not CONFIG["MOZ_DESKTOP_EMBEDDER_DEVTOOLS"]:
++        excluded_component_dirs += ["viewsource"]
+     component_dirs = [
+         directory
+         for directory in component_dirs
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index 854d9e3f0590..adbec5114c6b 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -161,6 +161,13 @@ export const AppConstants = Object.freeze({
+   Object.freeze([]),
+ #endif
+ 
++  MOZ_DESKTOP_EMBEDDER_DEVTOOLS:
++#ifdef MOZ_DESKTOP_EMBEDDER_DEVTOOLS
++  true,
++#else
++  false,
++#endif
++
+   ENABLE_TESTS:
+ #ifdef ENABLE_TESTS
+   true,
+diff --git a/dom/base/ChromeUtils.h b/dom/base/ChromeUtils.h
+--- a/dom/base/ChromeUtils.h
++++ b/dom/base/ChromeUtils.h
+@@ -40,6 +40,6 @@ class WindowProxyHolder;
+ 
+ class ChromeUtils {
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+  private:
+   // Implemented in devtools/shared/heapsnapshot/HeapSnapshot.cpp
+   static void SaveHeapSnapshotShared(GlobalObject& global,
+diff --git a/dom/chrome-webidl/ChromeUtils.webidl b/dom/chrome-webidl/ChromeUtils.webidl
+--- a/dom/chrome-webidl/ChromeUtils.webidl
++++ b/dom/chrome-webidl/ChromeUtils.webidl
+@@ -119,7 +119,7 @@ dictionary ClearResourceCacheOptions {
+  */
+ [ChromeOnly, Exposed=(Window,Worker)]
+ namespace ChromeUtils {
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   /**
+    * Get the |NodeId| for the given JS Object.
+    * |NodeId| is the identifier of |JS::ubi::Node|.
+@@ -1253,7 +1253,7 @@ dictionary ImportESModuleOptionsDictionary {
+  * set of globals, the root has an edge to each global, and an edge for each
+  * incoming JS reference to the selected Zones.
+  */
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ dictionary HeapSnapshotBoundaries {
+   sequence<object> globals;
+   object           debugger;
+diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
+--- a/dom/ipc/ContentChild.cpp
++++ b/dom/ipc/ContentChild.cpp
+@@ -49,7 +49,7 @@
+ #include "mozilla/StorageAccessAPIHelper.h"
+ #include "mozilla/TelemetryIPC.h"
+ #include "mozilla/WebBrowserPersistDocumentChild.h"
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ #  include "mozilla/devtools/HeapSnapshotTempFileHelperChild.h"
+ #endif
+ #include "mozilla/dom/AutoSuppressEventHandlingAndSuspend.h"
+@@ -1956,7 +1956,7 @@ bool ContentChild::DeallocPHalChild(PHalChild* aHal) {
+   return true;
+ }
+ 
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ devtools::PHeapSnapshotTempFileHelperChild*
+ ContentChild::AllocPHeapSnapshotTempFileHelperChild() {
+   return devtools::HeapSnapshotTempFileHelperChild::Create();
+diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
+--- a/dom/ipc/ContentChild.h
++++ b/dom/ipc/ContentChild.h
+@@ -184,7 +184,7 @@ class ContentChild final : public PContentChild,
+   PHalChild* AllocPHalChild();
+   bool DeallocPHalChild(PHalChild*);
+ 
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   PHeapSnapshotTempFileHelperChild* AllocPHeapSnapshotTempFileHelperChild();
+ 
+   bool DeallocPHeapSnapshotTempFileHelperChild(
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -78,7 +78,7 @@
+ #include "mozilla/UniquePtrExtensions.h"
+ #include "mozilla/WebBrowserPersistDocumentParent.h"
+ #include "mozilla/XREAppData.h"
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ #  include "mozilla/devtools/HeapSnapshotTempFileHelperParent.h"
+ #endif
+ #include "mozilla/dom/BlobURLProtocolHandler.h"
+@@ -4576,7 +4576,7 @@ bool ContentParent::DeallocPHalParent(hal_sandbox::PHalParent* aHal) {
+   return true;
+ }
+ 
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ devtools::PHeapSnapshotTempFileHelperParent*
+ ContentParent::AllocPHeapSnapshotTempFileHelperParent() {
+   return devtools::HeapSnapshotTempFileHelperParent::Create();
+diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
+--- a/dom/ipc/ContentParent.h
++++ b/dom/ipc/ContentParent.h
+@@ -529,7 +529,7 @@ class ContentParent final : public PContentParent,
+       const nsTArray<nsString>& aAds, const nsTArray<nsCString>& aSourceHosts);
+ #endif
+ 
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   PHeapSnapshotTempFileHelperParent* AllocPHeapSnapshotTempFileHelperParent();
+ #endif
+ 
+@@ -922,7 +922,7 @@ class ContentParent final : public PContentParent,
+ 
+   bool DeallocPHalParent(PHalParent*);
+ 
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   bool DeallocPHeapSnapshotTempFileHelperParent(
+       PHeapSnapshotTempFileHelperParent*);
+ #endif
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -15,7 +15,7 @@ include protocol PExtensions;
+ include protocol PExternalHelperApp;
+ include protocol PHandlerService;
+ include protocol PHal;
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ include protocol PHeapSnapshotTempFileHelper;
+ #endif
+ include protocol PProcessHangMonitor;
+@@ -514,7 +514,7 @@ sync protocol PContent
+     manages PExternalHelperApp;
+     manages PHal;
+     manages PHandlerService;
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+     manages PHeapSnapshotTempFileHelper;
+ #endif
+     manages PRemotePrintJob;
+@@ -1159,7 +1159,7 @@ parent:
+ 
+     [Nested=inside_cpow] async PHal();
+ 
+-#ifndef MOZ_DESKTOP_EMBEDDER
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+     async PHeapSnapshotTempFileHelper();
+ #endif
+
+diff --git a/devtools/client/locales/en-US/responsive.properties b/devtools/client/locales/en-US/responsive.properties
+index 9c9876fe7969..1144470c2181 100644
+--- a/devtools/client/locales/en-US/responsive.properties
++++ b/devtools/client/locales/en-US/responsive.properties
+@@ -25,6 +25,12 @@ responsive.rotate=Rotate viewport
+ # device selector.
+ responsive.responsiveMode=Responsive
+ 
++# LOCALIZATION NOTE (responsive.viewportWidth): Accessible label for the viewport width field.
++responsive.viewportWidth=Viewport width
++
++# LOCALIZATION NOTE (responsive.viewportHeight): Accessible label for the viewport height field.
++responsive.viewportHeight=Viewport height
++
+ # LOCALIZATION NOTE (responsive.enableTouch): Tooltip text for the touch
+ # simulation button when it's disabled.
+ responsive.enableTouch=Enable touch simulation
+diff --git a/devtools/client/responsive/components/ViewportDimension.js b/devtools/client/responsive/components/ViewportDimension.js
+index 48536b22cec8..0d455d970825 100644
+--- a/devtools/client/responsive/components/ViewportDimension.js
++++ b/devtools/client/responsive/components/ViewportDimension.js
+@@ -17,6 +17,9 @@ const {
+   MIN_VIEWPORT_DIMENSION,
+ } = require("resource://devtools/client/responsive/constants.js");
+ const Types = require("resource://devtools/client/responsive/types.js");
++const {
++  getStr,
++} = require("resource://devtools/client/responsive/utils/l10n.js");
+ 
+ loader.lazyRequireGetter(
+   this,
+@@ -219,6 +222,7 @@ class ViewportDimension extends PureComponent {
+           (this.state.isWidthValid ? "" : " invalid"),
+         size: 4,
+         type: "number",
++        "aria-label": getStr("responsive.viewportWidth"),
+         value: this.state.width,
+         onBlur: this.onInputBlur,
+         onChange: this.onInputChange,
+@@ -241,6 +245,7 @@ class ViewportDimension extends PureComponent {
+           (this.state.isHeightValid ? "" : " invalid"),
+         size: 4,
+         type: "number",
++        "aria-label": getStr("responsive.viewportHeight"),
+         value: this.state.height,
+         onBlur: this.onInputBlur,
+         onChange: this.onInputChange,
+diff --git a/devtools/shared/performance-new/recording-utils.sys.mjs b/devtools/shared/performance-new/recording-utils.sys.mjs
+index 8969dad70f8c..d0848395e2d7 100644
+--- a/devtools/shared/performance-new/recording-utils.sys.mjs
++++ b/devtools/shared/performance-new/recording-utils.sys.mjs
+@@ -14,11 +14,31 @@
+  * @type {GetActiveBrowserID}
+  */
+ export function getActiveBrowserID() {
+-  const win = Services.wm.getMostRecentBrowserWindow();
++  const browserWindow = Services.wm.getMostRecentBrowserWindow();
++  const candidates = [
++    browserWindow,
++    Services.focus.activeWindow,
++    Services.focus.activeWindow?.opener,
++  ];
++  for (const win of candidates) {
++    const browserId =
++      win?.gBrowser?.selectedBrowser?.browsingContext?.browserId;
++    if (browserId) {
++      return browserId;
++    }
++  }
+ 
+-  const browserId = win?.gBrowser?.selectedBrowser?.browsingContext?.browserId;
+-  if (browserId) {
+-    return browserId;
++  // Product-neutral embedders may use a chrome window type other than
++  // navigator:browser, so getMostRecentBrowserWindow() legitimately returns
++  // null even though their local-tab facade exposes gBrowser. The focused
++  // window path above handles ordinary and separate toolboxes; this final
++  // fallback also covers a temporarily unfocused application window.
++  for (const win of Services.wm.getEnumerator(null)) {
++    const browserId =
++      win?.gBrowser?.selectedBrowser?.browsingContext?.browserId;
++    if (browserId) {
++      return browserId;
++    }
+   }
+ 
+   console.error(
+diff --git a/toolkit/locales/en-US/toolkit/branding/brandings.ftl b/toolkit/locales/en-US/toolkit/branding/brandings.ftl
+index 97f695334a1f..6fa0d0a5eea2 100644
+--- a/toolkit/locales/en-US/toolkit/branding/brandings.ftl
++++ b/toolkit/locales/en-US/toolkit/branding/brandings.ftl
+@@ -22,7 +22,7 @@
+ -send-brand-name = Firefox Send
+ -screenshots-brand-name = Firefox Screenshots
+ -mozilla-vpn-brand-name = Mozilla VPN
+--profiler-brand-name = Firefox Profiler
++-profiler-brand-name = { -brand-shorter-name } Profiler
+ -translations-brand-name = Firefox Translations
+ -focus-brand-name = Firefox Focus
+ -relay-brand-name = Firefox Relay
+-- 
+2.51.0

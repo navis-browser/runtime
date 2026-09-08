@@ -108,6 +108,7 @@ export function ensureDesktopEmbedderActorsRegistered() {
     child: {
       esModuleURI: "resource://gre/modules/DesktopInternalPageChild.sys.mjs",
       events: {
+        NavisAppearanceCommand: { wantUntrusted: true },
         NavisSettingsCommand: { wantUntrusted: true },
         NavisDiagnosticsCommand: { wantUntrusted: true },
         NavisManagementCommand: { wantUntrusted: true },

@@ -1,0 +1,246 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -37,6 +37,8 @@
+ const { NavisAndroidExtensionTabTopology } = ChromeUtils.importESModule(
+   "resource://gre/modules/NavisAndroidExtensionTabTopology.sys.mjs"
+ );
++const { registerNavisAndroidFaviconActors, createNavisAndroidFaviconBridge } =
++  ChromeUtils.importESModule("resource://gre/modules/NavisAndroidFavicon.sys.mjs");
+ 
+ const COMMANDS = [
+   "NavisAndroid:Load",
+@@ -72,6 +74,7 @@
+ let targetBridge;
+ let targetDispatcher;
+ let devToolsHost;
++let faviconBridge;
+ const pendingWindowSetups = new Set();
+ 
+ const commandListener = {
+@@ -656,6 +659,7 @@
+       return;
+     }
+     if (flags & Ci.nsIWebProgressListener.STATE_START) {
++      faviconBridge?.invalidate();
+       dispatcher.dispatch("NavisAndroid:Loading", { loading: true });
+     } else if (flags & Ci.nsIWebProgressListener.STATE_STOP) {
+       dispatcher.dispatch("NavisAndroid:Loading", { loading: false });
+@@ -667,13 +671,16 @@
+     }
+   },
+ 
+-  onLocationChange(webProgress, request, location) {
++  onLocationChange(webProgress, request, location, flags) {
+     if (!webProgress.isTopLevel) {
+       return;
+     }
+     dispatcher.dispatch("NavisAndroid:Location", {
+       uri: location?.spec ?? "",
+     });
++    if (!(flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT)) {
++      faviconBridge?.invalidate();
++    }
+     dispatchHistoryState();
+   },
+ 
+@@ -856,7 +863,15 @@
+   dispatcher = EventDispatcher.for(window);
+   registerFullscreenActors();
+   registerTargetActors();
++  registerNavisAndroidFaviconActors();
+   browser = createRemoteBrowser();
++  faviconBridge = createNavisAndroidFaviconBridge({
++    browser,
++    document,
++    publish: data => {
++      if (!shuttingDown) dispatcher.dispatch("NavisAndroid:Favicon", data);
++    },
++  });
+   // This product-owned peer is the native tab consumed by ext-android's
+   // WindowTracker/TabTracker. It is not a GeckoView Tab or ModuleManager.
+   window.tab = createNavisNativeTab(browser);
+@@ -937,6 +952,8 @@
+ }
+ 
+ function shutdown() {
++  faviconBridge?.close();
++  faviconBridge = null;
+   if (!dispatcher) {
+     return;
+   }
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -4,7 +4,10 @@
+ 
+ if CONFIG["MOZ_NAVIS_ANDROID_RUNTIME"]:
+     EXTRA_JS_MODULES += [
++        "/desktop-embedder/components/DesktopFaviconChild.sys.mjs",
++        "/desktop-embedder/components/DesktopFaviconParent.sys.mjs",
+         "NavisAndroidDevTools.sys.mjs",
++        "NavisAndroidFavicon.sys.mjs",
+         "NavisAndroidGeckoProducer.sys.mjs",
+         "NavisAndroidLocales.sys.mjs",
+         "NavisAndroidTargetBridge.sys.mjs",
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -50,6 +50,7 @@
+   private static final String EVENT_HOST_READY = "NavisAndroid:HostReady";
+   private static final String EVENT_LOCATION = "NavisAndroid:Location";
+   private static final String EVENT_TITLE = "NavisAndroid:Title";
++  private static final String EVENT_FAVICON = "NavisAndroid:Favicon";
+   private static final String EVENT_LOADING = "NavisAndroid:Loading";
+   private static final String EVENT_LOAD_COMPLETE = "NavisAndroid:LoadComplete";
+   private static final String EVENT_SESSION_STATE = "NavisAndroid:SessionState";
+@@ -96,6 +97,9 @@
+ 
+     void onTitleChanged(long sessionId, String title);
+ 
++    /** A bounded PNG produced by Gecko for the current top-level document. */
++    default void onFaviconChanged(long sessionId, String pageUri, String png) {}
++
+     void onLoadingChanged(long sessionId, boolean loading);
+ 
+     void onLoadCompleted(long sessionId, boolean succeeded);
+@@ -326,6 +330,7 @@
+         EVENT_HOST_READY,
+         EVENT_LOCATION,
+         EVENT_TITLE,
++        EVENT_FAVICON,
+         EVENT_LOADING,
+         EVENT_LOAD_COMPLETE,
+         EVENT_SESSION_STATE,
+@@ -752,6 +757,14 @@
+       case EVENT_TITLE:
+         mDelegate.onTitleChanged(mSessionId, message.getString("title", ""));
+         break;
++      case EVENT_FAVICON:
++        final String pageUri = message.getString("pageURL", "");
++        final String png = message.getString("png", "");
++        if (pageUri.length() <= 65536 && png.length() <= 65536
++            && (png.isEmpty() || png.startsWith("data:image/png;base64,"))) {
++          mDelegate.onFaviconChanged(mSessionId, pageUri, png);
++        }
++        break;
+       case EVENT_LOADING:
+         mDelegate.onLoadingChanged(mSessionId, message.getBoolean("loading", false));
+         break;
+@@ -1294,6 +1307,7 @@
+         EVENT_HOST_READY,
+         EVENT_LOCATION,
+         EVENT_TITLE,
++        EVENT_FAVICON,
+         EVENT_LOADING,
+         EVENT_LOAD_COMPLETE,
+         EVENT_SESSION_STATE,
+diff --git a/mobile/shared/modules/navis/NavisAndroidFavicon.sys.mjs b/mobile/shared/modules/navis/NavisAndroidFavicon.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidFavicon.sys.mjs
+@@ -0,0 +1,104 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++let registered = false;
++const MAX_SOURCE_CHARS = 768 * 1024;
++const MAX_PNG_CHARS = 64 * 1024;
++const ICON_SIZE = 64;
++
++export function registerNavisAndroidFaviconActors() {
++  if (registered) return;
++  // Reuse the desktop producer and its content-principal network policy.
++  ChromeUtils.registerWindowActor("DesktopFavicon", {
++    parent: { esModuleURI: "resource://gre/modules/DesktopFaviconParent.sys.mjs" },
++    child: {
++      esModuleURI: "resource://gre/modules/DesktopFaviconChild.sys.mjs",
++      events: {
++        DOMHeadElementParsed: {}, DOMLinkAdded: {}, DOMLinkChanged: {},
++        pageshow: {}, pagehide: { createActor: false },
++      },
++    },
++    matches: ["http://*/*", "https://*/*"],
++    messageManagerGroups: ["browsers"],
++  });
++  registered = true;
++}
++
++/** Receives already authenticated image bytes, never arbitrary network URLs. */
++export function createNavisAndroidFaviconBridge({ browser, document, publish }) {
++  let generation = 0;
++  let closed = false;
++  let pendingImage = null;
++
++  const current = (actor, pageURL, token) => {
++    try {
++      return !closed && token === generation && actor.manager?.isCurrentGlobal &&
++        browser.browsingContext?.currentWindowGlobal === actor.manager &&
++        browser.currentURI?.spec === pageURL;
++    } catch {
++      return false;
++    }
++  };
++
++  function cancelImage() {
++    pendingImage?.removeAttribute("src");
++    pendingImage = null;
++  }
++
++  async function receive(actor, data) {
++    const pageURL = data?.pageURL;
++    const source = data?.iconURL;
++    if (!current(actor, pageURL, generation) || typeof pageURL !== "string" ||
++        !/^https?:\/\//iu.test(pageURL) || typeof source !== "string" ||
++        source.length > MAX_SOURCE_CHARS ||
++        !/^data:image\/(?:avif|bmp|gif|jpeg|png|svg\+xml|vnd\.microsoft\.icon|webp|x-icon)[;,]/iu.test(source)) {
++      return;
++    }
++    const token = ++generation;
++    cancelImage();
++    const image = document.createElementNS("http://www.w3.org/1999/xhtml", "img");
++    pendingImage = image;
++    image.decoding = "async";
++    // Only inert image data enters this privileged decoder. SVG external
++    // resources/scripts are disabled by Gecko's image-document semantics.
++    image.src = source;
++    try {
++      await image.decode();
++      if (!current(actor, pageURL, token) || image.naturalWidth <= 0 ||
++          image.naturalHeight <= 0 || image.naturalWidth > 4096 ||
++          image.naturalHeight > 4096) return;
++      const canvas = document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
++      canvas.width = canvas.height = ICON_SIZE;
++      const scale = ICON_SIZE / Math.max(image.naturalWidth, image.naturalHeight);
++      const width = image.naturalWidth * scale;
++      const height = image.naturalHeight * scale;
++      canvas.getContext("2d").drawImage(image,
++        (ICON_SIZE - width) / 2, (ICON_SIZE - height) / 2, width, height);
++      const png = canvas.toDataURL("image/png");
++      if (current(actor, pageURL, token) && png.startsWith("data:image/png;base64,") &&
++          png.length <= MAX_PNG_CHARS) publish({ pageURL, png });
++    } catch {
++      // Bad or aborted image decoding leaves the native default placeholder.
++    } finally {
++      if (pendingImage === image) cancelImage();
++    }
++  }
++
++  browser.desktopEmbedderFaviconChanged = receive;
++  return {
++    invalidate() {
++      if (closed) return;
++      generation++;
++      cancelImage();
++      publish({ pageURL: browser.currentURI?.spec ?? "", png: "" });
++    },
++    close() {
++      if (closed) return;
++      closed = true;
++      generation++;
++      cancelImage();
++      browser.desktopEmbedderFaviconChanged = null;
++    },
++  };
++}

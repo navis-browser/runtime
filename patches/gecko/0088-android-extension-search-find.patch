@@ -1,0 +1,248 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+@@ -25,7 +25,7 @@
+       "bookmarks:list", "bookmarks:create", "bookmarks:update", "bookmarks:move",
+       "bookmarks:remove", "bookmarks:removeTree", "topSites:list",
+       "history:search", "history:visits", "history:add", "history:deleteUrl",
+-      "history:deleteRange", "history:deleteAll"));
++      "history:deleteRange", "history:deleteAll", "search:get", "search:resolve"));
+   public static final class Request {
+     public final String extensionId, operation, arguments;
+     public final boolean privateMode, privateBrowsingAllowed;
+diff --git a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+@@ -10,6 +10,7 @@
+   ...["list", "create", "update", "move", "remove", "removeTree"].map(name => [`bookmarks:${name}`, "bookmarks"]),
+   ["topSites:list", "topSites"],
+   ...["search", "visits", "add", "deleteUrl", "deleteRange", "deleteAll"].map(name => [`history:${name}`, "history"]),
++  ["search:get", "search"], ["search:resolve", "search"],
+ ]);
+ function checkAccess(extension, permission, context = null) {
+   if (!extension || extension.hasShutdown || context?.unloaded ||
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -90,6 +90,7 @@
+   "dns",
+   "downloads",
+   "downloads.open",
++  "find",
+   "history",
+   "idle",
+   "management",
+@@ -100,6 +101,7 @@
+   "privacy",
+   "proxy",
+   "scripting",
++  "search",
+   "storage",
+   "tabs",
+   "topSites",
+diff --git a/mobile/shared/components/extensions/ext-android.json b/mobile/shared/components/extensions/ext-android.json
+--- a/mobile/shared/components/extensions/ext-android.json
++++ b/mobile/shared/components/extensions/ext-android.json
+@@ -1,4 +1,16 @@
+ {
++  "find": {
++    "url": "chrome://geckoview/content/ext-find.js",
++    "schema": "chrome://geckoview/content/schemas/find.json",
++    "scopes": ["addon_parent"],
++    "paths": [["find"]]
++  },
++  "search": {
++    "url": "chrome://geckoview/content/ext-search.js",
++    "schema": "chrome://geckoview/content/schemas/search.json",
++    "scopes": ["addon_parent"],
++    "paths": [["search"]]
++  },
+   "history": {
+     "url": "chrome://geckoview/content/ext-history.js",
+     "schema": "chrome://geckoview/content/schemas/history.json",
+diff --git a/mobile/shared/components/extensions/jar.mn b/mobile/shared/components/extensions/jar.mn
+--- a/mobile/shared/components/extensions/jar.mn
++++ b/mobile/shared/components/extensions/jar.mn
+@@ -8,6 +8,11 @@
+     content/ext-bookmarks.js
+     content/ext-history.js
+     content/ext-topSites.js
++    content/ext-search.js
++    content/ext-find.js
++    content/ext-find-gecko.js (../../../../browser/components/extensions/parent/ext-find.js)
++    content/schemas/search.json (../../../../browser/components/extensions/schemas/search.json)
++    content/schemas/find.json (../../../../browser/components/extensions/schemas/find.json)
+     content/schemas/bookmarks.json (../../../../browser/components/extensions/schemas/bookmarks.json)
+     content/schemas/history.json (../../../../browser/components/extensions/schemas/history.json)
+     content/schemas/top_sites.json (../../../../browser/components/extensions/schemas/top_sites.json)
+diff --git a/mobile/shared/components/extensions/ext-search.js b/mobile/shared/components/extensions/ext-search.js
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/components/extensions/ext-search.js
+@@ -0,0 +1,90 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++{
++  const { NavisAndroidExtensionProfile } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionProfile.sys.mjs"
++  );
++  const { NavisAndroidExtensionTabBridge } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidWebExtensionHost.sys.mjs"
++  );
++  const { ExtensionError } = ExtensionUtils;
++
++  function checkContext(context) {
++    if (context.unloaded || context.extension.hasShutdown ||
++        !context.extension.hasPermission("search") ||
++        (context.incognito && !context.privateBrowsingAllowed)) {
++      throw new ExtensionError("Extension search access is not allowed");
++    }
++  }
++
++  this.search = class extends ExtensionAPI {
++    getAPI(context) {
++      const { extension } = context;
++      async function open(query, engine, properties, fallback) {
++        checkContext(context);
++        if (properties.tabId != null && properties.disposition != null) {
++          throw new ExtensionError("tabId and disposition cannot be combined");
++        }
++        if (typeof query !== "string" || !query.trim() || query.length > 8192) {
++          throw new ExtensionError("A bounded search query is required");
++        }
++        const disposition = properties.disposition || fallback;
++        if (!["CURRENT_TAB", "NEW_TAB", "NEW_WINDOW"].includes(disposition)) {
++          throw new ExtensionError("Invalid search disposition");
++        }
++        const target = properties.tabId != null
++          ? tabTracker.getTab(properties.tabId)
++          : disposition === "CURRENT_TAB" ? tabTracker.activeTab : null;
++        if ((properties.tabId != null || disposition === "CURRENT_TAB") &&
++            (!target || !extension.tabManager.canAccessTab(target))) {
++          throw new ExtensionError("The search target is not accessible");
++        }
++        const { url } = await NavisAndroidExtensionProfile.request(extension, context,
++          "search:resolve", { query, engine: engine ?? null });
++        checkContext(context);
++        if (typeof url !== "string" || !/^https?:\/\//.test(url) ||
++            !context.checkLoadURL(url, { dontReportErrors: true })) {
++          throw new ExtensionError("Invalid search URL");
++        }
++        if (target) {
++          // Re-resolve the exact captured target, not a newly active tab after the await.
++          if (tabTracker.getTab(target.id, null) !== target ||
++              !extension.tabManager.canAccessTab(target)) {
++            throw new ExtensionError("The search target is no longer available");
++          }
++          await NavisAndroidExtensionTabBridge.update(extension.id, target.id, { url });
++        } else if (disposition === "NEW_TAB") {
++          await NavisAndroidExtensionTabBridge.create(extension.id, { url, active: true });
++        } else {
++          // Use the actual windows backend; never pretend a new tab is a new window.
++          const create = await context.apiCan.asyncFindAPIPath("windows.create");
++          checkContext(context);
++          if (typeof create !== "function") throw new ExtensionError("The windows backend is unavailable");
++          const active = tabTracker.activeTab;
++          if (!active || !extension.tabManager.canAccessTab(active)) {
++            throw new ExtensionError("The active search window is not accessible");
++          }
++          const { PrivateBrowsingUtils } = ChromeUtils.importESModule(
++            "resource://gre/modules/PrivateBrowsingUtils.sys.mjs"
++          );
++          await create({ url, incognito: PrivateBrowsingUtils.isBrowserPrivate(active.browser) });
++        }
++      }
++      return { search: {
++        get() {
++          checkContext(context);
++          return NavisAndroidExtensionProfile.request(extension, context, "search:get");
++        },
++        search(properties) {
++          return open(properties.query, properties.engine, properties, "NEW_TAB");
++        },
++        query(properties) {
++          return open(properties.text, null, properties, "CURRENT_TAB");
++        },
++      } };
++    }
++  };
++}
+diff --git a/mobile/shared/components/extensions/ext-find.js b/mobile/shared/components/extensions/ext-find.js
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/components/extensions/ext-find.js
+@@ -0,0 +1,70 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++
++// Keep Gecko's frame traversal, range/rect calculation and highlighting intact.
++Services.scriptloader.loadSubScript("chrome://geckoview/content/ext-find-gecko.js", this);
++
++{
++  const GeckoFind = this.find;
++  const { ExtensionError } = ExtensionUtils;
++  const queues = new WeakMap();
++
++  function capture(context, tabId) {
++    const tab = tabId == null ? tabTracker.activeTab : tabTracker.getTab(tabId);
++    const browser = tab?.linkedBrowser;
++    const global = browser?.browsingContext?.currentWindowGlobal;
++    function check() {
++      if (context.unloaded || context.extension.hasShutdown ||
++          !context.extension.hasPermission("find") || !tab || !browser || !global ||
++          (context.incognito && !context.privateBrowsingAllowed) ||
++          tabTracker.getTab(tab.id, null) !== tab ||
++          !context.extension.tabManager.canAccessTab(tab) ||
++          browser.navisNativePresentation !== false ||
++          browser.browsingContext?.currentWindowGlobal !== global) {
++        throw new ExtensionError("The find target is not an accessible web document");
++      }
++    }
++    check();
++    return { browser, tabId: tab.id, check };
++  }
++
++  // Gecko caches result ranges per top-level actor. Serialize calls on the same
++  // browser so a late old-document result cannot overwrite a newer search cache.
++  function enqueue(target, operation) {
++    const previous = queues.get(target.browser) || Promise.resolve();
++    const next = previous.catch(() => {}).then(async () => {
++      target.check();
++      const result = await operation();
++      target.check();
++      return result;
++    });
++    queues.set(target.browser, next);
++    const release = () => {
++      if (queues.get(target.browser) === next) queues.delete(target.browser);
++    };
++    next.then(release, release);
++    return next;
++  }
++
++  this.find = class extends GeckoFind {
++    getAPI(context) {
++      const upstream = super.getAPI(context).find;
++      return { find: {
++        async find(queryphrase, params = {}) {
++          const target = capture(context, params?.tabId);
++          return enqueue(target, () => upstream.find(queryphrase, { ...params, tabId: target.tabId }));
++        },
++        async highlightResults(params = {}) {
++          const target = capture(context, params?.tabId);
++          return enqueue(target, () => upstream.highlightResults({ ...params, tabId: target.tabId }));
++        },
++        async removeHighlighting(tabId) {
++          const target = capture(context, tabId);
++          return enqueue(target, () => upstream.removeHighlighting(target.tabId));
++        },
++      } };
++    }
++  };
++}
+

@@ -1,0 +1,11 @@
+diff --git a/devtools/client/preferences/generate-navis-prefs.py b/devtools/client/preferences/generate-navis-prefs.py
+--- a/devtools/client/preferences/generate-navis-prefs.py
++++ b/devtools/client/preferences/generate-navis-prefs.py
+@@ -18,6 +18,6 @@ def generate(output, source):
+     toolbox = io.StringIO(desktop[start:end])
+     toolbox.name = source
+     preprocessor = Preprocessor()
+-    preprocessor.context.update(buildconfig.defines)
++    preprocessor.context.update(buildconfig.defines["ALLDEFINES"])
+     preprocessor.out = output
+     preprocessor.do_include(toolbox)

@@ -1,6 +1,6 @@
-# Navis 1.0 Linux x86_64 release graph. This profile deliberately avoids
-# compiler caches and Cargo incremental state so the shipped graph can be
-# reconstructed from an empty object directory.
+# Navis 1.0 Linux x86_64 release graph. The reviewed source freeze, release
+# options and dedicated object directory define the graph. sccache accelerates
+# recompilation without making cached objects release evidence.
 export MOZ_REQUIRE_SIGNING=1
 
 ac_add_options --enable-project=navis
@@ -17,13 +17,17 @@ ac_add_options --disable-printing
 ac_add_options --disable-ctypes
 ac_add_options --disable-backgroundtasks
 ac_add_options --enable-desktop-embedder
+ac_add_options --enable-desktop-embedder-devtools
 ac_add_options --enable-webextensions-runtime
 ac_add_options --disable-observability-runtime
 ac_add_options --disable-webrtc
 ac_add_options --disable-cargo-incremental
+ac_add_options --with-ccache=sccache
 ac_add_options --host=x86_64-unknown-linux-gnu
 ac_add_options --target=x86_64-unknown-linux-gnu
 
 mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-navis-runtime-release
-mk_add_options AUTOCLOBBER=1
+# Candidate builds must fail for an explicit clobber decision instead of
+# silently deleting the reviewed incremental graph.
+mk_add_options AUTOCLOBBER=
 mk_add_options MOZ_MAKE_FLAGS="-j16"

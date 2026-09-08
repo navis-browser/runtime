@@ -5,14 +5,21 @@
 EXTRA_JS_MODULES += [
     "DesktopAddressInput.sys.mjs",
     "DesktopCleanLinks.sys.mjs",
+    "DesktopDownloadPreferences.sys.mjs",
     "DesktopEngine.sys.mjs",
     "DesktopExtensionMenus.sys.mjs",
     "DesktopExtensionTabs.sys.mjs",
     "DesktopInternalPages.sys.mjs",
     "DesktopLocale.sys.mjs",
     "DesktopProcessIsolation.sys.mjs",
+    "DesktopProductPages.sys.mjs",
+    "DesktopProfileManagement.sys.mjs",
     "DesktopProfileStore.sys.mjs",
     "DesktopTabMetrics.sys.mjs",
+    "NavisSearchPolicy.sys.mjs",
+    "NavisSearchService.sys.mjs",
+    "NavisSettingsPolicy.sys.mjs",
+    "NavisSuggestionPolicy.sys.mjs",
 ]
 
 if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
@@ -23,6 +30,9 @@ if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
         "DesktopExtensionPermissionPrompts.sys.mjs",
         "DesktopExtensionPopupHost.sys.mjs",
     ]
+
+if CONFIG["MOZ_DESKTOP_EMBEDDER_DEVTOOLS"]:
+    EXTRA_JS_MODULES += ["DesktopDevTools.sys.mjs"]
 
 FINAL_TARGET_FILES.modules += [
     "AboutNewTab.sys.mjs",

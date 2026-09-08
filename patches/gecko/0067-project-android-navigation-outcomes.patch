@@ -1,0 +1,200 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -105,7 +105,7 @@
+ 
+ // Never retain URLs, query strings, exception messages or arbitrary names.
+ // The opt-in profile file contains only the latest anonymous phase record.
+-function reportNavigationDiagnostic(phase, { uri, request, error } = {}) {
++function reportNavigationDiagnostic(phase, { uri, request, error, status: loadStatus } = {}) {
+   try {
+     const session = /^navis-android-session-([1-9][0-9]{0,15})(?::|$)/u
+       .exec(window.name)?.[1] ?? "unknown";
+@@ -117,7 +117,7 @@
+     }
+     const scheme = ["http", "https", "about", "file", "data", "blob",
+       "moz-extension", "navis"].includes(rawScheme) ? rawScheme : "other";
+-    const result = error?.result ?? request?.status;
++    const result = error?.result ?? loadStatus;
+     const status = Number.isInteger(result)
+       ? `0x${(result >>> 0).toString(16).padStart(8, "0")}` : "unavailable";
+     const name = typeof error?.name === "string" &&
+@@ -125,7 +125,7 @@
+       ? error.name : "unknown";
+     const record = { phase, session, scheme, status, name };
+     if (phase === "load-error" ||
+-        (phase === "stop" && request && !Components.isSuccessCode(request.status))) {
++        (phase === "stop" && Number.isInteger(result) && !Components.isSuccessCode(result))) {
+       try {
+         Services.console.logStringMessage(
+           `NavisAndroid NavigationFailure phase=${phase} session=${session} scheme=${scheme} status=${status} name=${name}`
+@@ -712,28 +712,86 @@
+   },
+ };
+ 
++// NETWORK events have one START/STOP pair per document, including redirects.
++// RemoteWebProgressRequest is reconstructed for every IPC event, so neither
++// object identity nor URL is a reliable request key. Overlapping pairs are
++// deliberately uncorrelated (generation 0), not attributed to the newest load.
++class AndroidNavigationProgress {
++  generation = 0;
++  pending = 0;
++  overlapping = false;
++  errorPage = false;
++
++  start() {
++    this.pending++;
++    this.overlapping ||= this.pending > 1;
++    this.errorPage = false;
++    return ++this.generation;
++  }
++
++  uri(request) {
++    try {
++      return request.QueryInterface(Ci.nsIChannel).URI.spec.slice(0, 65536);
++    } catch (_) {
++      return "";
++    }
++  }
++
++  location(sameDocument, errorPage) {
++    if (!sameDocument) this.errorPage = errorPage;
++    return { generation: this.generation, sameDocument, errorPage: this.errorPage };
++  }
++
++  complete(request, status) {
++    const generation = !this.pending || this.overlapping ? 0 : this.generation;
++    if (this.pending && !--this.pending) this.overlapping = false;
++    const statusKnown = Number.isInteger(status);
++    const actualStatus = statusKnown ? status | 0 : 0;
++    const cancelled = [
++      Cr.NS_BINDING_ABORTED,
++      Cr.NS_BINDING_REDIRECTED,
++      Cr.NS_BINDING_RETARGETED,
++      Cr.NS_ERROR_ABORT,
++    ].some(value => (value | 0) === actualStatus);
++    return {
++      generation,
++      status: actualStatus,
++      statusKnown,
++      cancelled,
++      errorPage: this.errorPage,
++      uri: this.uri(request),
++    };
++  }
++}
++
++const navigationProgress = new AndroidNavigationProgress();
++
+ const progressListener = {
+   QueryInterface: ChromeUtils.generateQI([
+     "nsIWebProgressListener",
+     "nsISupportsWeakReference",
+   ]),
+ 
+-  onStateChange(webProgress, request, flags) {
+-    if (
+-      !webProgress.isTopLevel ||
+-      !(flags & Ci.nsIWebProgressListener.STATE_IS_NETWORK)
+-    ) {
++  onStateChange(webProgress, request, flags, status) {
++    if (!webProgress.isTopLevel) {
++      return;
++    }
++    if (!(flags & Ci.nsIWebProgressListener.STATE_IS_NETWORK)) {
+       return;
+     }
+     if (flags & Ci.nsIWebProgressListener.STATE_START) {
+       faviconBridge?.invalidate();
+-      dispatcher.dispatch("NavisAndroid:Loading", { loading: true });
+-    } else if (flags & Ci.nsIWebProgressListener.STATE_STOP) {
+-      dispatcher.dispatch("NavisAndroid:Loading", { loading: false });
+-      dispatcher.dispatch("NavisAndroid:LoadComplete", {
+-        succeeded: Boolean(request && Components.isSuccessCode(request.status)),
++      dispatcher.dispatch("NavisAndroid:Loading", {
++        loading: true,
++        generation: navigationProgress.start(),
++        uri: navigationProgress.uri(request),
+       });
+-      reportNavigationDiagnostic("stop", { request });
++    } else if (flags & Ci.nsIWebProgressListener.STATE_STOP) {
++      const result = navigationProgress.complete(request, status);
++      if (result) {
++        dispatcher.dispatch("NavisAndroid:LoadComplete", result);
++      }
++      reportNavigationDiagnostic("stop", { request, status });
+       dispatchHistoryState();
+       dispatchSessionState();
+     }
+@@ -743,10 +801,14 @@
+     if (!webProgress.isTopLevel) {
+       return;
+     }
++    const navigation = navigationProgress.location(
++      Boolean(flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT),
++      Boolean(flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_ERROR_PAGE)
++    );
+     dispatcher.dispatch("NavisAndroid:Location", {
+       uri: location?.spec ?? "",
+       browsingContextId: browser.browsingContext.id,
+-      sameDocument: Boolean(flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT),
++      ...navigation,
+     });
+     if (!(flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT)) {
+       faviconBridge?.invalidate();
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -93,16 +93,20 @@
+ 
+     void onHostReady(long sessionId);
+ 
+-    void onLocationChanged(long sessionId, String uri);
++    void onLocationChanged(
++        long sessionId, String uri, long generation, boolean sameDocument, boolean errorPage);
+ 
+     void onTitleChanged(long sessionId, String title);
+ 
+     /** A bounded PNG produced by Gecko for the current top-level document. */
+     default void onFaviconChanged(long sessionId, String pageUri, String png) {}
+ 
+-    void onLoadingChanged(long sessionId, boolean loading);
++    void onLoadStarted(long sessionId, long generation, String uri);
+ 
+-    void onLoadCompleted(long sessionId, boolean succeeded);
++    /** Real top-level nsresult; unknown/cancelled is not a failed document. */
++    void onLoadCompleted(
++        long sessionId, long generation, int status, boolean statusKnown,
++        boolean cancelled, boolean errorPage, String uri);
+ 
+     void onSessionStateChanged(long sessionId, String serializedState);
+ 
+@@ -775,7 +779,9 @@
+         if (!message.getBoolean("sameDocument", false)) {
+           NavisAndroidWebAuthn.invalidateSession(mSessionId);
+         }
+-        mDelegate.onLocationChanged(mSessionId, message.getString("uri", ""));
++        mDelegate.onLocationChanged(
++            mSessionId, message.getString("uri", ""), message.getLong("generation", 0),
++            message.getBoolean("sameDocument", false), message.getBoolean("errorPage", false));
+         break;
+       case EVENT_TITLE:
+         mDelegate.onTitleChanged(mSessionId, message.getString("title", ""));
+@@ -791,11 +797,15 @@
+       case EVENT_LOADING:
+         if (message.getBoolean("loading", false)) {
+           NavisAndroidWebAuthn.invalidateSession(mSessionId);
++          mDelegate.onLoadStarted(
++              mSessionId, message.getLong("generation", 0), message.getString("uri", ""));
+         }
+-        mDelegate.onLoadingChanged(mSessionId, message.getBoolean("loading", false));
+         break;
+       case EVENT_LOAD_COMPLETE:
+-        mDelegate.onLoadCompleted(mSessionId, message.getBoolean("succeeded", false));
++        mDelegate.onLoadCompleted(
++            mSessionId, message.getLong("generation", 0), message.getInt("status", 0),
++            message.getBoolean("statusKnown", false), message.getBoolean("cancelled", false),
++            message.getBoolean("errorPage", false), message.getString("uri", ""));
+         break;
+       case EVENT_SESSION_STATE:
+         final String serializedState = message.getString("state", "");

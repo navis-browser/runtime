@@ -1,0 +1,108 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -248,9 +248,11 @@
+   private final java.util.HashSet<String> mOwnedShortcuts = new java.util.HashSet<>();
+ 
+   private View mInputView;
++  private Object mSurface;
+ 
+   private boolean mOpenRequested;
+   private boolean mNativeWindowReady;
++  private boolean mCompositorAttached;
+   private boolean mHostReady;
+   private boolean mClosed;
+   private boolean mDispatcherReleased;
+@@ -285,7 +287,7 @@
+                   return;
+                 }
+                 mSurfaceBounds.offsetTo(left, top);
+-                if (mOpenRequested && !mClosed) {
++                if (mOpenRequested && !mClosed && mCompositorAttached) {
+                   mCompositor.onBoundsChanged(
+                       left, top, mSurfaceBounds.width(), mSurfaceBounds.height());
+                 }
+@@ -530,13 +532,15 @@
+       throw new IllegalArgumentException("A non-empty render surface is required");
+     }
+     mSurfaceBounds.set(x, y, x + width, y + height);
+-    mCompositor.syncResumeResizeCompositor(x, y, width, height, surface);
++    mSurface = surface;
++    resumeSurfaceIfAttached();
+   }
+ 
+   /** Pauses the compositor synchronously before Android invalidates the render Surface. */
+   public void onSurfaceDestroyed() {
+     ThreadUtils.assertOnUiThread();
+-    if (!mClosed && mOpenRequested) {
++    mSurface = null;
++    if (!mClosed && mOpenRequested && mCompositorAttached) {
+       mCompositor.syncPauseCompositor();
+     }
+   }
+@@ -548,7 +552,9 @@
+       throw new IllegalArgumentException("bounds must not be negative");
+     }
+     mSurfaceBounds.set(left, top, left + width, top + height);
+-    mCompositor.onBoundsChanged(left, top, width, height);
++    if (mCompositorAttached) {
++      mCompositor.onBoundsChanged(left, top, width, height);
++    }
+   }
+ 
+   /**
+@@ -1006,6 +1012,8 @@
+     ThreadUtils.runOnUiThread(
+         () -> {
+           if (!mClosed) {
++            mCompositorAttached = true;
++            resumeSurfaceIfAttached();
+             mDelegate.onCompositorAttached(mSessionId);
+           }
+         });
+@@ -1014,12 +1022,34 @@
+   private void onCompositorDetached() {
+     ThreadUtils.runOnUiThread(
+         () -> {
++          mCompositorAttached = false;
+           if (!mClosed) {
+             mDelegate.onCompositorDetached(mSessionId);
+           }
+         });
+   }
+ 
++  /**
++   * Replays the latest Android Surface only after C++ has attached the compositor's weak JNI
++   * owner. A newly-created product Session can become active before its asynchronous Gecko
++   * window exists; calling a generated native method during that interval dereferences an empty
++   * native handle.
++   */
++  private void resumeSurfaceIfAttached() {
++    if (!mCompositorAttached
++        || mClosed
++        || mSurface == null
++        || mSurfaceBounds.isEmpty()) {
++      return;
++    }
++    mCompositor.syncResumeResizeCompositor(
++        mSurfaceBounds.left,
++        mSurfaceBounds.top,
++        mSurfaceBounds.width(),
++        mSurfaceBounds.height(),
++        mSurface);
++  }
++
+   private void onNewSurfaceRequired() {
+     ThreadUtils.runOnUiThread(
+         () -> {
+@@ -1101,8 +1131,10 @@
+     }
+     mClosed = true;
+     mHostReady = false;
++    mCompositorAttached = false;
+     mOwnedShortcuts.clear();
+     clearInputView();
++    mSurface = null;
+     mSurfaceBounds.setEmpty();
+     mPendingCommands.clear();
+     completeNewWindowOpen(false);

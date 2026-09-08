@@ -4,6 +4,14 @@
 
 const ROUTE_DEFINITIONS = Object.freeze(
   [
+    ...["processes", "profiles", "credits"].map(id => ({
+      id,
+      route: "",
+      path: "/",
+      titleId: `internal.${id}.title`,
+      descriptionId: `internal.${id}.description`,
+      listed: true,
+    })),
     {
       id: "newtab",
       route: "",
@@ -84,6 +92,19 @@ const ROUTE_DEFINITIONS = Object.freeze(
       descriptionId: "internal.help.description",
       listed: false,
     },
+    ...[
+      ["search", "settings.searchEngine"],
+      ["privacy", "settings.privacySecurity"],
+      ["appearance", "settings.appearance"],
+      ["downloads", "settings.downloadConfiguration"],
+    ].map(([route, titleId]) => ({
+      id: "settings",
+      route,
+      path: `/${route}`,
+      titleId,
+      descriptionId: "internal.settings.description",
+      listed: false,
+    })),
   ].map(route =>
     Object.freeze({
       ...route,

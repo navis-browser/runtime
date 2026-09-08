@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { E10SUtils } from "resource://gre/modules/E10SUtils.sys.mjs";
+import { ContentDOMReference } from "resource://gre/modules/ContentDOMReference.sys.mjs";
 import {
   InlineSpellChecker,
   SpellCheckHelper,
@@ -44,7 +45,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       this.#handlePointerDown(event);
       return;
     }
-    this.#handleContextMenu(event).catch(error => {
+    this.#handleContextMenu(event).catch((error) => {
       console.error("Desktop context-menu preparation failed", error);
     });
   }
@@ -68,7 +69,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       !event.isTrusted ||
       event.defaultPrevented ||
       !SUPPORTED_DOCUMENT_SCHEMES.has(
-        this.contentWindow.document.documentURIObject?.scheme
+        this.contentWindow.document.documentURIObject?.scheme,
       )
     ) {
       return;
@@ -86,14 +87,16 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
     const textControl = this.#textControl(target);
     const editable = this.#isEditable(target, textControl);
     const selectedText = this.#selectedText(target, textControl);
+    const password = Boolean(textControl) &&
+      this.contentWindow.HTMLInputElement.isInstance(textControl) && textControl.type === "password";
     const linkUrl = this.#safeURL(link?.href, document.baseURI);
     const imageUrl = this.#safeURL(
       image?.currentSrc || image?.src,
-      document.baseURI
+      document.baseURI,
     );
     const mediaUrl = this.#safeURL(
       media?.currentSrc || media?.src,
-      document.baseURI
+      document.baseURI,
     );
     const hasSelection = Boolean(selectedText);
 
@@ -117,9 +120,10 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       ...this.#targetItems({ linkUrl, imageUrl, mediaUrl, media }),
       ...spellcheck.items,
       ...this.#editItems(document, editable, hasSelection),
+      command("inspect-element", "developer"),
     ];
 
-    this.#commands = new Map(items.map(item => [item.id, item]));
+    this.#commands = new Map(items.map((item) => [item.id, item]));
     this.#values = Object.freeze({
       linkUrl: linkUrl?.href || "",
       imageUrl: imageUrl?.href || "",
@@ -136,10 +140,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       items,
       context: {
         editable,
-        password:
-          Boolean(textControl) &&
-          this.contentWindow.HTMLInputElement.isInstance(textControl) &&
-          textControl.type === "password",
+        password,
         hasSelection,
         misspelled: spellcheck.suggestions.length > 0,
         link: Boolean(linkUrl),
@@ -151,6 +152,8 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       imageUrl: imageUrl?.href || "",
       mediaUrl: mediaUrl?.href || "",
       selectedText: selectedText.slice(0, MAX_SELECTION_LENGTH),
+      selectionSearchText: !password && selectedText.length <= 8192 ? selectedText : "",
+      targetIdentifier: ContentDOMReference.get(target),
     });
   }
 
@@ -166,8 +169,8 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       command(media.muted ? "unmute-media" : "mute-media", "media"),
       command(
         media.controls ? "hide-media-controls" : "show-media-controls",
-        "media"
-      )
+        "media",
+      ),
     );
     this.#appendAddressItems(items, "media", mediaUrl);
     return items;
@@ -205,7 +208,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
   async #spellcheckItems(event, token, target) {
     const editFlags = SpellCheckHelper.isEditable(
       event.composedTarget,
-      this.contentWindow
+      this.contentWindow,
     );
     if (!(editFlags & SpellCheckHelper.SPELLCHECKABLE)) {
       return { checker: null, items: [], suggestions: [] };
@@ -216,7 +219,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       editor = event.composedTarget.editor;
     } else {
       editor = this.contentWindow.docShell.editingSession.getEditorForWindow(
-        this.contentWindow
+        this.contentWindow,
       );
     }
     if (!editor) {
@@ -239,7 +242,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
     try {
       candidates = await checker.mInlineSpellChecker.spellChecker.suggest(
         checker.mMisspelling,
-        MAX_SPELL_SUGGESTIONS
+        MAX_SPELL_SUGGESTIONS,
       );
     } catch {}
     if (token !== this.#token || this.#target !== target) {
@@ -478,7 +481,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
     ) {
       return textControl.value.slice(
         textControl.selectionStart,
-        textControl.selectionEnd
+        textControl.selectionEnd,
       );
     }
     const selection = target.documentGlobal.getSelection();

@@ -1,0 +1,37 @@
+diff --git a/devtools/client/themes/toolbox.css b/devtools/client/themes/toolbox.css
+index 2d20ee26b2cbab174b18511d790b2d458358e008..9b235879ec5475cc21e250718d3282b6d938c17a 100644
+--- a/devtools/client/themes/toolbox.css
++++ b/devtools/client/themes/toolbox.css
+@@ -27,7 +27,7 @@
+   border: 2px solid transparent;
+   border-radius: 2px;
+   align-items: center;
+-  font-size: 12px;
++  font-size: var(--theme-body-font-size);
+   white-space: nowrap;
+   text-overflow: ellipsis;
+   overflow: hidden;
+@@ -282,7 +282,7 @@
+ }
+ 
+ .devtools-tab-label {
+-  font-size: 12px;
++  font-size: var(--theme-body-font-size);
+   mask-image: linear-gradient(to left, transparent 0, black 6px);
+   /* Set the end padding on the label to make sure the label gets faded out properly */
+   padding-inline-end: 8px;
+diff --git a/devtools/client/themes/variables.css b/devtools/client/themes/variables.css
+index 7279fc515e1da4292855d528253bab83c1566e1c..7c7815ab41d8f203595627f9e91cf7e8411232d5 100644
+--- a/devtools/client/themes/variables.css
++++ b/devtools/client/themes/variables.css
+@@ -27,8 +27,8 @@
+ 
+ :root {
+   /* Text sizes */
+-  --theme-body-font-size: 11px;
+-  --theme-code-font-size: 11px;
++  --theme-body-font-size: 14px;
++  --theme-code-font-size: 14px;
+   --theme-code-line-height: calc(15 / 11);
+ 
+   /* Toolbar size (excluding borders) */

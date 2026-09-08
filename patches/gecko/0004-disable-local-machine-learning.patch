@@ -162,3 +162,139 @@ index 0374344a4e..d54bc21e8c 100644
  TESTING_JS_MODULES += [
      "AboutAddonsTestUtils.sys.mjs",
      "AddonTestUtils.sys.mjs",
+diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+--- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+@@ -4,6 +4,7 @@
+ 
+ import { DelayedInit } from "resource://gre/modules/DelayedInit.sys.mjs";
+ import { GeckoViewUtils } from "resource://gre/modules/GeckoViewUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = {};
+ 
+@@ -236,31 +237,37 @@ export class GeckoViewStartup {
+           ]);
+         }
+ 
+-        GeckoViewUtils.addLazyGetter(this, "GeckoViewAIFeatures", {
+-          module: "resource://gre/modules/GeckoViewAIFeatures.sys.mjs",
+-          ged: [
+-            "GeckoView:AIFeature:ListFeatures",
+-            "GeckoView:AIFeature:SetEnabled",
+-            "GeckoView:AIFeature:MakeAvailable",
+-          ],
+-        });
+-
+-        GeckoViewUtils.addLazyGetter(this, "GeckoViewTranslationsSettings", {
+-          module: "resource://gre/modules/GeckoViewTranslations.sys.mjs",
+-          ged: [
+-            "GeckoView:Translations:IsTranslationEngineSupported",
+-            "GeckoView:Translations:PreferredLanguages",
+-            "GeckoView:Translations:ManageModel",
+-            "GeckoView:Translations:TranslationInformation",
+-            "GeckoView:Translations:ModelInformation",
+-            "GeckoView:Translations:GetLanguageSetting",
+-            "GeckoView:Translations:GetLanguageSettings",
+-            "GeckoView:Translations:SetLanguageSettings",
+-            "GeckoView:Translations:GetNeverTranslateSpecifiedSites",
+-            "GeckoView:Translations:SetNeverTranslateSpecifiedSite",
+-            "GeckoView:Translations:GetTranslateDownloadSize",
+-          ],
+-        });
++        if (AppConstants.MOZ_LOCAL_ML) {
++          GeckoViewUtils.addLazyGetter(this, "GeckoViewAIFeatures", {
++            module: "resource://gre/modules/GeckoViewAIFeatures.sys.mjs",
++            ged: [
++              "GeckoView:AIFeature:ListFeatures",
++              "GeckoView:AIFeature:SetEnabled",
++              "GeckoView:AIFeature:MakeAvailable",
++            ],
++          });
++
++          GeckoViewUtils.addLazyGetter(
++            this,
++            "GeckoViewTranslationsSettings",
++            {
++              module: "resource://gre/modules/GeckoViewTranslations.sys.mjs",
++              ged: [
++                "GeckoView:Translations:IsTranslationEngineSupported",
++                "GeckoView:Translations:PreferredLanguages",
++                "GeckoView:Translations:ManageModel",
++                "GeckoView:Translations:TranslationInformation",
++                "GeckoView:Translations:ModelInformation",
++                "GeckoView:Translations:GetLanguageSetting",
++                "GeckoView:Translations:GetLanguageSettings",
++                "GeckoView:Translations:SetLanguageSettings",
++                "GeckoView:Translations:GetNeverTranslateSpecifiedSites",
++                "GeckoView:Translations:SetNeverTranslateSpecifiedSite",
++                "GeckoView:Translations:GetTranslateDownloadSize",
++              ],
++            }
++          );
++        }
+ 
+         GeckoViewUtils.addLazyGetter(this, "GeckoViewPageExtractor", {
+           module: "resource://gre/modules/GeckoViewPageExtractor.sys.mjs",
+diff --git a/mobile/shared/modules/geckoview/moz.build b/mobile/shared/modules/geckoview/moz.build
+--- a/mobile/shared/modules/geckoview/moz.build
++++ b/mobile/shared/modules/geckoview/moz.build
+@@ -9,7 +9,6 @@ EXTRA_JS_MODULES += [
+     "GeckoViewActorChild.sys.mjs",
+     "GeckoViewActorManager.sys.mjs",
+     "GeckoViewActorParent.sys.mjs",
+-    "GeckoViewAIFeatures.sys.mjs",
+     "GeckoViewAutocomplete.sys.mjs",
+     "GeckoViewAutofill.sys.mjs",
+     "GeckoViewClipboardPermission.sys.mjs",
+@@ -34,7 +33,6 @@ EXTRA_JS_MODULES += [
+     "GeckoViewTelemetry.sys.mjs",
+     "GeckoViewTestUtils.sys.mjs",
+     "GeckoViewTrackingDB.sys.mjs",
+-    "GeckoViewTranslations.sys.mjs",
+     "GeckoViewUtils.sys.mjs",
+     "GeckoViewWebExtension.sys.mjs",
+     "LoadURIDelegate.sys.mjs",
+@@ -46,3 +44,9 @@ EXTRA_JS_MODULES += [
+ 
+ XPCSHELL_TESTS_MANIFESTS += ["test/xpcshell/xpcshell.toml"]
+ MOCHITEST_MANIFESTS += ["test/mochitest/mochitest.toml"]
++
++if CONFIG["MOZ_LOCAL_ML"]:
++    EXTRA_JS_MODULES += [
++        "GeckoViewAIFeatures.sys.mjs",
++        "GeckoViewTranslations.sys.mjs",
++    ]
+diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
+--- a/toolkit/modules/ActorManagerParent.sys.mjs
++++ b/toolkit/modules/ActorManagerParent.sys.mjs
+@@ -699,6 +699,12 @@ if (!Services.prefs.getBoolPref("browser.pagedata.enabled", false)) {
+   };
+ }
+ 
++if (!AppConstants.MOZ_LOCAL_ML) {
++  delete JSPROCESSACTORS.MLEngine;
++  delete JSPROCESSACTORS.TranslationsEngine;
++  delete JSWINDOWACTORS.Translations;
++}
++
+ if (AppConstants.platform != "android") {
+   // Note that GeckoView has another implementation in mobile/android/actors.
+   JSWINDOWACTORS.Select = {
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -157,6 +157,13 @@ export var AppConstants = Object.freeze({
+ 
+   MOZ_GECKOVIEW_HISTORY: @MOZ_GECKOVIEW_HISTORY_BOOL@,
+ 
++  MOZ_LOCAL_ML:
++#ifdef MOZ_LOCAL_ML
++  true,
++#else
++  false,
++#endif
++
+   DLL_PREFIX: "@DLL_PREFIX@",
+   DLL_SUFFIX: "@DLL_SUFFIX@",
+ 

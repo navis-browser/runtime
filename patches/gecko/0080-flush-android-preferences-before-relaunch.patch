@@ -1,0 +1,29 @@
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -61,7 +61,7 @@
+ 
+ const PRODUCT_QUERIES = new Set([
+   "product:initialize", "site:get", "site:clear", "data:clear",
+-  "links:set", "links:copy", "session:can-close", "support:get",
++  "links:set", "links:copy", "prefs:flush", "session:can-close", "support:get",
+ ]);
+ 
+ const MAX_SESSION_STATE_CHARS = 1024 * 1024;
+diff --git a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+@@ -176,6 +176,13 @@
+       await prepareDesktopCleanLinks();
+       return { url: projectDesktopCopiedLink(data.url) };
+     }
++    case "prefs:flush": {
++      // In this ESR, null schedules an asynchronous save. An explicit PrefF
++      // uses Gecko's blocking write queue, so the reply cannot race that write
++      // when Android subsequently terminates its old browser process.
++      Services.prefs.savePrefFile(Services.dirsvc.get("PrefF", Ci.nsIFile));
++      return { flushed: true };
++    }
+     case "session:can-close": {
+       const context = browser.browsingContext;
+       const global = context?.currentWindowGlobal;

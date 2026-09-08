@@ -1,0 +1,336 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+new file mode 100644
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionProfile.java
+@@ -0,0 +1,92 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++package org.mozilla.gecko.navis;
++
++import android.os.Handler;
++import android.os.Looper;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.Set;
++import java.util.concurrent.CompletionStage;
++import org.mozilla.gecko.EventDispatcher;
++import org.mozilla.gecko.util.BundleEventListener;
++import org.mozilla.gecko.util.EventCallback;
++import org.mozilla.gecko.util.GeckoBundle;
++import org.mozilla.gecko.util.ThreadUtils;
++
++/** Private Runtime peer, without a web-content actor or arbitrary Session lookup. */
++public final class NavisAndroidExtensionProfile implements AutoCloseable {
++  private static final String COMMAND = "NavisAndroid:ExtensionProfile:Request";
++  private static final String CHANGED = "NavisAndroid:ExtensionProfile:BookmarksChanged";
++  private static final Set<String> OPERATIONS = new HashSet<>(Arrays.asList(
++      "bookmarks:list", "bookmarks:create", "bookmarks:update", "bookmarks:move",
++      "bookmarks:remove", "bookmarks:removeTree", "topSites:list"));
++  public static final class Request {
++    public final String extensionId, operation, arguments;
++    public final boolean privateMode, privateBrowsingAllowed;
++    Request(final GeckoBundle message) {
++      if (message == null) throw new IllegalArgumentException("Missing profile request");
++      extensionId = message.getString("extensionId", "");
++      operation = message.getString("operation", "");
++      arguments = message.getString("arguments", "{}");
++      privateMode = message.getBoolean("privateMode", false);
++      privateBrowsingAllowed = message.getBoolean("privateBrowsingAllowed", false);
++      if (extensionId.isEmpty() || extensionId.length() > 256 || !OPERATIONS.contains(operation)
++          || arguments.length() > 128 * 1024 || (privateMode && !privateBrowsingAllowed)) {
++        throw new IllegalArgumentException("Invalid extension profile request");
++      }
++    }
++  }
++  public interface Delegate { CompletionStage<String> request(Request request); }
++  private static NavisAndroidExtensionProfile sInstance;
++  private final EventDispatcher mDispatcher = EventDispatcher.byName("navis-android-extension-profile");
++  private final Handler mHandler = new Handler(Looper.getMainLooper());
++  private final Delegate mDelegate;
++  private final Set<EventCallback> mPending = new HashSet<>();
++  private final BundleEventListener mListener = this::onMessage;
++  private boolean mClosed;
++  private NavisAndroidExtensionProfile(final Delegate delegate) {
++    mDelegate = delegate;
++    mDispatcher.registerUiThreadListener(mListener, COMMAND);
++  }
++  public static synchronized NavisAndroidExtensionProfile install(final Delegate delegate) {
++    ThreadUtils.assertOnUiThread();
++    if (sInstance != null || delegate == null) throw new IllegalStateException("Profile peer is already installed");
++    sInstance = new NavisAndroidExtensionProfile(delegate);
++    return sInstance;
++  }
++  private void onMessage(final String event, final GeckoBundle message, final EventCallback callback) {
++    ThreadUtils.assertOnUiThread();
++    if (callback == null) return;
++    if (mClosed || !COMMAND.equals(event)) { callback.sendError("Extension profile peer is unavailable"); return; }
++    try {
++      final CompletionStage<String> stage = mDelegate.request(new Request(message));
++      if (stage == null) throw new IllegalStateException("Missing profile result");
++      mPending.add(callback);
++      stage.whenComplete((value, error) -> mHandler.post(() -> {
++        if (!mPending.remove(callback)) return;
++        if (error != null || value == null) callback.sendError("Extension profile operation failed");
++        else callback.sendSuccess(value);
++      }));
++    } catch (final RuntimeException error) { callback.sendError("Extension profile request was rejected"); }
++  }
++  public void publishBookmarkChange(final String json) {
++    ThreadUtils.assertOnUiThread();
++    if (mClosed) return;
++    final GeckoBundle data = new GeckoBundle(1);
++    data.putString("json", json);
++    mDispatcher.dispatch(CHANGED, data);
++  }
++  @Override public void close() {
++    ThreadUtils.assertOnUiThread();
++    if (mClosed) return;
++    mClosed = true;
++    synchronized (NavisAndroidExtensionProfile.class) { if (sInstance == this) sInstance = null; }
++    mDispatcher.unregisterUiThreadListener(mListener, COMMAND);
++    for (final EventCallback callback : new ArrayList<>(mPending)) callback.sendError("Extension profile peer is closed");
++    mPending.clear();
++    mDispatcher.shutdown();
++  }
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidExtensionProfile.sys.mjs
+@@ -0,0 +1,88 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++const { EventDispatcher } = ChromeUtils.importESModule("resource://gre/modules/Messaging.sys.mjs");
++const { ExtensionError } = ChromeUtils.importESModule("resource://gre/modules/ExtensionUtils.sys.mjs");
++const dispatcher = EventDispatcher.byName("navis-android-extension-profile");
++const CHANGED = "NavisAndroid:ExtensionProfile:BookmarksChanged";
++const OPERATIONS = new Map([
++  ...["list", "create", "update", "move", "remove", "removeTree"].map(name => [`bookmarks:${name}`, "bookmarks"]),
++  ["topSites:list", "topSites"],
++]);
++function checkAccess(extension, permission, context = null) {
++  if (!extension || extension.hasShutdown || context?.unloaded ||
++      !extension.hasPermission(permission) || (context?.incognito && !extension.privateBrowsingAllowed)) {
++    throw new ExtensionError("Extension profile access is not allowed");
++  }
++}
++function root(children) {
++  return { id: "root", title: "", type: "folder", ...(children ? { children } : {}) };
++}
++function tree(entries, id = "root") {
++  const nodes = new Map(entries.map(entry => [entry.id, { ...entry }]));
++  nodes.set("root", root());
++  for (const node of nodes.values()) if (node.type === "folder") node.children = [];
++  for (const node of entries) {
++    const parent = nodes.get(node.parentId);
++    if (!parent?.children) throw new ExtensionError("Invalid bookmark tree");
++    parent.children.push(nodes.get(node.id));
++  }
++  for (const node of nodes.values()) node.children?.sort((a, b) => a.index - b.index);
++  const selected = nodes.get(id);
++  if (!selected) throw new ExtensionError("Bookmark does not exist");
++  return selected;
++}
++/** Sibling index shifts are not explicit moves; subtree removal is one event. */
++function changes({ before, after, movedId }) {
++  const old = new Map(before.map(node => [node.id, node]));
++  const current = new Map(after.map(node => [node.id, node]));
++  const result = [];
++  for (const node of before) {
++    if (!current.has(node.id) && (node.parentId === "root" || current.has(node.parentId))) {
++      result.push(["onRemoved", node.id, { parentId: node.parentId, index: node.index, node: tree(before, node.id) }]);
++    }
++  }
++  for (const node of after) {
++    const previous = old.get(node.id);
++    if (!previous) { result.push(["onCreated", node.id, node]); continue; }
++    const changed = {};
++    if (previous.title !== node.title) changed.title = node.title;
++    if (previous.url !== node.url) changed.url = node.url;
++    if (Object.keys(changed).length) result.push(["onChanged", node.id, changed]);
++    if (previous.parentId !== node.parentId || (node.id === movedId && previous.index !== node.index)) {
++      result.push(["onMoved", node.id, { parentId: node.parentId, index: node.index,
++        oldParentId: previous.parentId, oldIndex: previous.index }]);
++    }
++  }
++  return result;
++}
++export const NavisAndroidExtensionProfile = Object.freeze({
++  root, tree, changes,
++  async request(extension, context, operation, args = {}) {
++    const permission = OPERATIONS.get(operation);
++    if (!permission) throw new ExtensionError("Unsupported extension profile operation");
++    checkAccess(extension, permission, context);
++    let response;
++    try {
++      response = await dispatcher.sendRequestForResult("NavisAndroid:ExtensionProfile:Request", {
++        extensionId: extension.id, operation, arguments: JSON.stringify(args),
++        privateMode: !!context?.incognito, privateBrowsingAllowed: !!extension.privateBrowsingAllowed,
++      });
++    } catch { throw new ExtensionError("Extension profile operation failed"); }
++    // Drop data after revoke/uninstall or context destruction, even if the database operation completed.
++    checkAccess(extension, permission, context);
++    return JSON.parse(response);
++  },
++  register(extension, event, fire) {
++    checkAccess(extension, "bookmarks");
++    const listener = { onEvent(_name, data) {
++      try { checkAccess(extension, "bookmarks"); } catch { return; }
++      for (const [name, ...args] of changes(JSON.parse(data.json))) if (name === event) fire.async(...args);
++    } };
++    dispatcher.registerListener(listener, [CHANGED]);
++    return {
++      unregister() { dispatcher.unregisterListener(listener, [CHANGED]); },
++      convert(newFire) { fire = newFire; },
++    };
++  },
++});
+diff --git a/mobile/shared/components/extensions/ext-bookmarks.js b/mobile/shared/components/extensions/ext-bookmarks.js
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/components/extensions/ext-bookmarks.js
+@@ -0,0 +1,43 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++{
++  const { NavisAndroidExtensionProfile: profile } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionProfile.sys.mjs");
++  this.bookmarks = class extends ExtensionAPIPersistent {
++    PERSISTENT_EVENTS = Object.fromEntries(["onCreated", "onChanged", "onMoved", "onRemoved"].map(
++      event => [event, ({ fire }) => profile.register(this.extension, event, fire)]));
++    getAPI(context) {
++      const call = (operation, args) => profile.request(this.extension, context, `bookmarks:${operation}`, args);
++      const list = () => call("list");
++      const requireNode = (entries, id) => {
++        if (id === "root") return profile.root();
++        const node = entries.find(entry => entry.id === id);
++        if (!node) throw new ExtensionUtils.ExtensionError("Bookmark does not exist");
++        return node;
++      };
++      return { bookmarks: {
++        ...Object.fromEntries(Object.keys(this.PERSISTENT_EVENTS).map(event => [event,
++          new EventManager({ context, module: "bookmarks", event, extensionApi: this }).api()])),
++        async get(ids) { const entries = await list(); return (Array.isArray(ids) ? ids : [ids]).map(id => requireNode(entries, id)); },
++        async getChildren(id) { const entries = await list(); requireNode(entries, id); return entries.filter(node => node.parentId === id).sort((a, b) => a.index - b.index); },
++        async getTree() { return [profile.tree(await list())]; },
++        async getSubTree(id) { return [profile.tree(await list(), id)]; },
++        async getRecent(count) { return (await list()).filter(node => node.type === "bookmark").sort((a, b) => b.dateAdded - a.dateAdded).slice(0, count); },
++        async search(query) {
++          const options = typeof query === "string" ? { query } : query;
++          const needle = (options.query || "").toLocaleLowerCase();
++          return (await list()).filter(node => (options.url === undefined || node.url === options.url) &&
++            (options.title === undefined || node.title === options.title) &&
++            (!needle || node.title.toLocaleLowerCase().includes(needle) || node.url?.toLocaleLowerCase().includes(needle)));
++        },
++        create(details) { return call("create", details); },
++        update(id, details) { return call("update", { ...details, id }); },
++        move(id, details) { return call("move", { ...details, id }); },
++        async remove(id) { await call("remove", { id }); },
++        async removeTree(id) { await call("removeTree", { id }); },
++      } };
++    }
++  };
++}
+diff --git a/mobile/shared/components/extensions/ext-topSites.js b/mobile/shared/components/extensions/ext-topSites.js
+new file mode 100644
+--- /dev/null
++++ b/mobile/shared/components/extensions/ext-topSites.js
+@@ -0,0 +1,29 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++"use strict";
++{
++  const { NavisAndroidExtensionProfile: profile } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidExtensionProfile.sys.mjs");
++  function domain(url) {
++    try { return Services.eTLD.getBaseDomain(Services.io.newURI(url)); }
++    catch { try { return Services.io.newURI(url).host; } catch { return url; } }
++  }
++  this.topSites = class extends ExtensionAPI {
++    getAPI(context) {
++      return { topSites: { get: async (options = {}) => {
++        const entries = await profile.request(this.extension, context, "topSites:list");
++        const seen = new Set();
++        const results = [];
++        for (const entry of entries) {
++          const key = domain(entry.url);
++          if (options.onePerDomain !== false && seen.has(key)) continue;
++          seen.add(key);
++          results.push({ url: entry.url, title: entry.title, type: "url" });
++          if (results.length >= Math.min(options.limit ?? 12, 100)) break;
++        }
++        return results;
++      } } };
++    }
++  };
++}
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -22,6 +22,7 @@
+     if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
+         EXTRA_JS_MODULES += [
+             "NavisAndroidBrowsingData.sys.mjs",
+             "NavisAndroidCommandRegistry.sys.mjs",
+             "NavisAndroidContextMenus.sys.mjs",
++            "NavisAndroidExtensionProfile.sys.mjs",
+             "NavisAndroidExtensionTabTopology.sys.mjs",
+diff --git a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidWebExtensionHost.sys.mjs
+@@ -80,6 +80,7 @@
+   "activeTab",
+   "alarms",
+   "browserSettings",
++  "bookmarks",
+   "browsingData",
+   "clipboardRead",
+   "clipboardWrite",
+@@ -100,6 +101,7 @@
+   "scripting",
+   "storage",
+   "tabs",
++  "topSites",
+   "unlimitedStorage",
+   "webNavigation",
+   "webRequest",
+diff --git a/mobile/shared/components/extensions/jar.mn b/mobile/shared/components/extensions/jar.mn
+--- a/mobile/shared/components/extensions/jar.mn
++++ b/mobile/shared/components/extensions/jar.mn
+@@ -5,6 +5,10 @@
+ geckoview.jar:
+     content/ext-android.js
+     content/ext-android.json
++    content/ext-bookmarks.js
++    content/ext-topSites.js
++    content/schemas/bookmarks.json (../../../../browser/components/extensions/schemas/bookmarks.json)
++    content/schemas/top_sites.json (../../../../browser/components/extensions/schemas/top_sites.json)
+     content/ext-browserAction.js
+     content/ext-c-android.js
+     content/ext-c-tabs.js
+diff --git a/mobile/shared/components/extensions/ext-android.json b/mobile/shared/components/extensions/ext-android.json
+--- a/mobile/shared/components/extensions/ext-android.json
++++ b/mobile/shared/components/extensions/ext-android.json
+@@ -1,4 +1,16 @@
+ {
++  "bookmarks": {
++    "url": "chrome://geckoview/content/ext-bookmarks.js",
++    "schema": "chrome://geckoview/content/schemas/bookmarks.json",
++    "scopes": ["addon_parent"],
++    "paths": [["bookmarks"]]
++  },
++  "topSites": {
++    "url": "chrome://geckoview/content/ext-topSites.js",
++    "schema": "chrome://geckoview/content/schemas/top_sites.json",
++    "scopes": ["addon_parent"],
++    "paths": [["topSites"]]
++  },
+   "browserAction": {
+     "url": "chrome://geckoview/content/ext-browserAction.js",
+     "schema": "chrome://extensions/content/schemas/browser_action.json",

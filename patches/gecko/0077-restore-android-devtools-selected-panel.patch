@@ -1,0 +1,25 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+--- a/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+@@ -16,7 +16,8 @@
+   let closed = false;
+   return {
+     async open(targetSessionId, tool) {
+-      if (!Number.isSafeInteger(targetSessionId) || targetSessionId <= 0 || !TOOLS.has(tool)) {
++      if (!Number.isSafeInteger(targetSessionId) || targetSessionId <= 0 ||
++          (tool !== "default" && !TOOLS.has(tool))) {
+         throw new TypeError("Invalid developer tools target");
+       }
+       const targetWindow = [...Services.wm.getEnumerator("navigator:navis-android")]
+@@ -82,7 +83,10 @@
+         throw new Error("Developer tools host closed");
+       }
+       toolbox = await gDevTools.showToolbox(commands, {
+-        toolId: tool,
++        // The private window-name token cannot carry null. An ordinary menu
++        // opening leaves selection to Gecko's persisted LAST_TOOL preference;
++        // explicit Inspect still supplies "inspector".
++        toolId: tool === "default" ? undefined : tool,
+         hostType: Toolbox.HostType.PAGE,
+         hostOptions: { customIframe: frame },
+       });
