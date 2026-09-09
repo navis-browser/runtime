@@ -39,3 +39,5 @@ FINAL_TARGET_FILES.modules += [
     "BrowserWindowTracker.sys.mjs",
     "ExtensionBrowsingData.sys.mjs",
 ]
+
+FINAL_TARGET_FILES.modules["navis-licenses"] += ["licenses/source-code.txt"]

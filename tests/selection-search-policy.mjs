@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 import assert from "node:assert/strict";
 import {classifyAddressInput, projectSelectionSearch} from "../embedder/modules/DesktopAddressInput.sys.mjs";
 const provider = {id: "custom", name: "My engine"};

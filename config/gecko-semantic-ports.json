@@ -1614,16 +1614,16 @@
       "order": 106,
       "id": "android-colorpicker-packaged-license",
       "patch": "patches/gecko/0106-package-android-colorpicker-license.patch",
-      "sha256": "5fb907b00d57c8faf3e2d4ffd6f23602cc09c7cda3e248e8a88680179ab5c0e5",
+      "sha256": "331b1a5feddbd802e9d2b26c298ea3dcd86342b8e325bf82bf412b493ffa5558",
       "classification": "android-offline-license-packaging",
-      "intent": "Include the Android color-picker library attribution and complete license in the Android module graph actually traversed by the runtime build.",
+      "intent": "Include the Android color-picker attribution/license and shared source-distribution directions in the Android module graph actually traversed by the runtime build.",
       "invariants": [
         "Only the Navis Android runtime adds the library notice; desktop packaging does not claim the Android UI dependency.",
         "The packaged modules/navis-licenses path matches the fixed resource URI in the shared offline credits reader.",
         "The application-owned notice preserves the unmodified pinned upstream Apache 2.0 license and attribution.",
         "This resource declaration does not change native code, JNI, extension policy or the Kotlin/Compose toolchain."
       ],
-      "port_review": "Review the Android mobile/shared/modules/navis graph, not the untraversed desktop module graph. Verify the final APK assets/omni.ja contains the exact modules/navis-licenses/colorpicker-compose-1.1.4.txt bytes and that shared credits can read it offline."
+      "port_review": "Review the Android mobile/shared/modules/navis graph, not the untraversed desktop module graph. Verify the final APK assets/omni.ja contains the exact modules/navis-licenses/colorpicker-compose-1.1.4.txt and source-code.txt bytes and that shared credits can read them offline."
     },
     {
       "order": 107,

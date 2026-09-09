@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
+
 
 """Verify that the shared Navis Core contract is 64-bit architecture neutral."""
 

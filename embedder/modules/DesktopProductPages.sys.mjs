@@ -134,6 +134,7 @@ export async function getAdditionalSupportDiagnostics(runtime = null) {
 // Fixed packaged resources only; Android UI additions use the same offline reader.
 const ANDROID_LICENSE_NOTICES = Object.freeze([
   "resource://gre/modules/navis-licenses/colorpicker-compose-1.1.4.txt",
+  "resource://android/assets/navis-licenses/android-dependencies.txt",
 ]);
 
 async function readPackagedLicense(uri) {
@@ -159,9 +160,10 @@ export async function getNavisLicenseText() {
     licenses = (async () => {
       const html = await readPackagedLicense("chrome://global/content/license.html");
       const gecko = Cc["@mozilla.org/parserutils;1"].getService(Ci.nsIParserUtils).convertToPlainText(html, 0, 0);
+      const source = await readPackagedLicense("resource://gre/modules/navis-licenses/source-code.txt");
       const additional = Services.appinfo.OS === "Android"
         ? await Promise.all(ANDROID_LICENSE_NOTICES.map(readPackagedLicense)) : [];
-      return [gecko, ...additional].join("\n\n");
+      return [source, gecko, ...additional].join("\n\n");
     })().catch(error => { licenses = null; throw error; });
   }
   return licenses;

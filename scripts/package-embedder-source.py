@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 
 """Build or verify a deterministic Desktop Gecko Embedder source package."""
 

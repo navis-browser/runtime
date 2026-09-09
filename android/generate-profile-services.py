@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
+
 """Give concurrently running Navis profiles independent Gecko child services."""
 
 import argparse

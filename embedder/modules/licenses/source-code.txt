@@ -1,0 +1,21 @@
+Navis source and license information
+
+Navis-owned software is distributed under the Mozilla Public License 2.0. Third-party components retain their own licenses. The included Gecko catalogue describes its native dependencies; Android additionally includes a report for its resolved runtime dependencies. Bundled extensions include their own license, font, filter and library notices.
+
+Corresponding source for this build must be supplied by its distributor. Look beside the original application download for source archives and a manifest identifying the exact Navis, Runtime and Platform revisions, Gecko pin and semantic-port series. If those materials are missing, request them from the distributor. The upstream links below identify components; they do not contain Navis modifications and do not replace the distributor's source obligation. No public Navis source hosting is asserted by this notice.
+
+Gecko upstream: https://github.com/mozilla-firefox/firefox
+The matching revision and Navis modifications are recorded in Runtime's vendor/gecko.json, config/gecko-semantic-ports.json and patches/gecko/. The complete matching covered source, build configuration and source-access instructions must accompany the source offer.
+
+Bundled uBlock Origin 1.74.0: GPL-3.0-or-later
+Copyright Raymond Hill and contributors.
+Source: https://github.com/gorhill/uBlock/tree/6dd2d95e50d134a477a4e183343c0b26e9147123
+Source archive: https://github.com/gorhill/uBlock/archive/6dd2d95e50d134a477a4e183343c0b26e9147123.tar.gz
+Include its build scripts and required subdependency sources when providing corresponding source. The distributor remains responsible for availability. Desktop retains the original signed XPI; Android extracts its unchanged entries into APK assets. LICENSE.txt and nested license notices are retained in both forms.
+
+Mozilla translation source: https://github.com/mozilla-l10n/firefox-l10n
+The matching signed source language archive, version and hash are identified in Platform's gecko-chrome/locales/zh-CN/metadata.json.
+
+License terms: https://www.mozilla.org/MPL/2.0/
+GPL source distribution: https://www.gnu.org/licenses/gpl-3.0.html#section6
+Software licensing does not grant a right to misrepresent a modified build as an official Navis release or imply endorsement by third-party projects.

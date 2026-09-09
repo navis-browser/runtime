@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 // Execute the upstream launch algorithm at its OS boundary; never open a file/app.
 import assert from "node:assert/strict";
 import vm from "node:vm";

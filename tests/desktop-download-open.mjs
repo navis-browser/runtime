@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 // Real Core method under boundary stubs: never launches an application/file.
 import assert from "node:assert/strict";
 import vm from "node:vm";

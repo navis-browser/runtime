@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 user_pref("browser.dom.window.dump.enabled", true);
 user_pref("devtools.console.stdout.chrome", true);
 user_pref("desktop.embedder.shell.autoclose", true);

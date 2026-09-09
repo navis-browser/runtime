@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
+
 
 """Integration tests for the deterministic Gecko ESR review dossier."""
 

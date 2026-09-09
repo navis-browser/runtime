@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
+
 
 """Drive a packaged Navis process through Gecko's direct WebDriver BiDi API."""
 
