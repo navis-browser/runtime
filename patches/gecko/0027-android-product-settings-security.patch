@@ -1,0 +1,698 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidBrowsingData.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidBrowsingData.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e69801fa3661a17cf7e28a6f9d59cc82e160d5e
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidBrowsingData.java
+@@ -0,0 +1,212 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import android.os.Handler;
++import android.os.Looper;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.Set;
++import java.util.concurrent.CompletionStage;
++import org.mozilla.gecko.EventDispatcher;
++import org.mozilla.gecko.util.BundleEventListener;
++import org.mozilla.gecko.util.EventCallback;
++import org.mozilla.gecko.util.GeckoBundle;
++import org.mozilla.gecko.util.ThreadUtils;
++
++/** Process-wide direct-runtime peer for product-owned browsing data. */
++public final class NavisAndroidBrowsingData implements AutoCloseable {
++  private static final String DISPATCHER_NAME = "navis-android-browsing-data";
++  private static final String COMMAND_CLEAR = "NavisAndroid:BrowsingData:ClearProduct";
++  private static final Set<String> PRODUCT_TYPES =
++      new HashSet<>(Arrays.asList("history", "passwords", "downloads"));
++  private static final int MAX_EXTENSION_ID = 256;
++  private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
++
++  public static final class Request {
++    public final String extensionId;
++    public final String dataType;
++    public final long since;
++    public final boolean privateMode;
++
++    private Request(final GeckoBundle bundle) {
++      extensionId = bounded(bundle.getString("extensionId", ""));
++      dataType = bundle.getString("dataType", "");
++      since = bundle.getLong("since", 0L);
++      privateMode = bundle.getBoolean("privateMode", false);
++      if (extensionId.isEmpty()
++          || dataType.isEmpty()
++          || !PRODUCT_TYPES.contains(dataType)
++          || since < 0L
++          || since > MAX_SAFE_INTEGER) {
++        throw new IllegalArgumentException("Invalid Navis browsing-data request");
++      }
++    }
++
++    public static Request fromBundle(final GeckoBundle bundle) {
++      if (bundle == null) {
++        throw new IllegalArgumentException("Missing browsing-data request");
++      }
++      return new Request(bundle);
++    }
++
++    private static String bounded(final String value) {
++      if (value == null || value.length() > MAX_EXTENSION_ID) {
++        return "";
++      }
++      return value;
++    }
++  }
++
++  public interface Delegate {
++    /** Returns true only after the product store has durably completed the clear. */
++    CompletionStage<Boolean> clear(Request request);
++  }
++
++  private static NavisAndroidBrowsingData sInstance;
++
++  private final Delegate mDelegate;
++  private final EventDispatcher mDispatcher;
++  private final BundleEventListener mListener = this::handleMessage;
++  private final Handler mUiHandler = new Handler(Looper.getMainLooper());
++  private final Set<PendingCommand> mPending = new HashSet<>();
++  private boolean mClosed;
++
++  private NavisAndroidBrowsingData(final Delegate delegate) {
++    mDelegate = delegate;
++    mDispatcher = EventDispatcher.byName(DISPATCHER_NAME);
++    mDispatcher.registerUiThreadListener(mListener, COMMAND_CLEAR);
++  }
++
++  public static synchronized NavisAndroidBrowsingData install(final Delegate delegate) {
++    ThreadUtils.assertOnUiThread();
++    if (delegate == null) {
++      throw new NullPointerException("delegate");
++    }
++    if (sInstance != null) {
++      throw new IllegalStateException("Only one Navis browsing-data peer may be installed");
++    }
++    sInstance = new NavisAndroidBrowsingData(delegate);
++    return sInstance;
++  }
++
++  private void handleMessage(
++      final String event, final GeckoBundle message, final EventCallback callback) {
++    ThreadUtils.assertOnUiThread();
++    if (callback == null) {
++      return;
++    }
++    if (mClosed) {
++      callback.sendError("Navis browsing-data peer is closed");
++      return;
++    }
++    if (!COMMAND_CLEAR.equals(event)) {
++      callback.sendError("Unknown Navis browsing-data operation");
++      return;
++    }
++
++    final Request request;
++    final CompletionStage<Boolean> stage;
++    try {
++      request = Request.fromBundle(message);
++      stage = mDelegate.clear(request);
++      if (stage == null) {
++        throw new IllegalStateException("Product data delegate returned no result");
++      }
++    } catch (final Throwable error) {
++      callback.sendError(publicMessage(error));
++      return;
++    }
++
++    final PendingCommand pending = new PendingCommand(callback);
++    mPending.add(pending);
++    stage.whenComplete(
++        (cleared, error) ->
++            onUi(
++                () -> {
++                  if (error != null) {
++                    pending.fail(error);
++                  } else if (!Boolean.TRUE.equals(cleared)) {
++                    pending.fail(new IllegalStateException("Product data clear was rejected"));
++                  } else {
++                    pending.succeed();
++                  }
++                }));
++  }
++
++  @Override
++  public void close() {
++    ThreadUtils.assertOnUiThread();
++    synchronized (NavisAndroidBrowsingData.class) {
++      if (mClosed) {
++        return;
++      }
++      mClosed = true;
++      if (sInstance == this) {
++        sInstance = null;
++      }
++    }
++    mDispatcher.unregisterUiThreadListener(mListener, COMMAND_CLEAR);
++    for (final PendingCommand pending : new ArrayList<>(mPending)) {
++      pending.fail(new IllegalStateException("Navis browsing-data peer is closed"));
++    }
++    mPending.clear();
++    mDispatcher.shutdown();
++  }
++
++  private void onUi(final Runnable action) {
++    if (Looper.myLooper() == Looper.getMainLooper()) {
++      action.run();
++    } else {
++      mUiHandler.post(action);
++    }
++  }
++
++  private static String publicMessage(final Throwable error) {
++    Throwable current = error;
++    while (current instanceof java.util.concurrent.CompletionException
++        && current.getCause() != null) {
++      current = current.getCause();
++    }
++    final String message = current.getMessage();
++    return message == null || message.isEmpty()
++        ? "Navis product data clear failed"
++        : message;
++  }
++
++  private final class PendingCommand {
++    private final EventCallback mCallback;
++    private boolean mFinished;
++
++    PendingCommand(final EventCallback callback) {
++      mCallback = callback;
++    }
++
++    void succeed() {
++      if (finish()) {
++        mCallback.sendSuccess(true);
++      }
++    }
++
++    void fail(final Throwable error) {
++      onUi(
++          () -> {
++            if (finish()) {
++              mCallback.sendError(publicMessage(error));
++            }
++          });
++    }
++
++    private boolean finish() {
++      if (mFinished) {
++        return false;
++      }
++      mFinished = true;
++      mPending.remove(this);
++      return true;
++    }
++  }
++}
+diff --git a/mobile/shared/components/extensions/ExtensionBrowsingData.sys.mjs b/mobile/shared/components/extensions/ExtensionBrowsingData.sys.mjs
+index affd79d4de8c7bb512c3f93b44b06096e6956c97..16d330201a7c26715ff3a71776c393b711811cda 100644
+--- a/mobile/shared/components/extensions/ExtensionBrowsingData.sys.mjs
++++ b/mobile/shared/components/extensions/ExtensionBrowsingData.sys.mjs
+@@ -2,16 +2,22 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ import { ExtensionUtils } from "resource://gre/modules/ExtensionUtils.sys.mjs";
+ 
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+   EventDispatcher: "resource://gre/modules/Messaging.sys.mjs",
++  NavisAndroidBrowsingData:
++    "resource://gre/modules/NavisAndroidBrowsingData.sys.mjs",
+ });
+ 
+ const { ExtensionError } = ExtensionUtils;
+ 
++const isDirectAndroid =
++  AppConstants.platform === "android" && AppConstants.MOZ_NAVIS_CORE;
++
+ export class BrowsingDataDelegate {
+   constructor(extension) {
+     this.extension = extension;
+@@ -30,10 +36,34 @@ export class BrowsingDataDelegate {
+   }
+ 
+   async settings() {
++    if (isDirectAndroid) {
++      // Gecko clears engine-owned site data; the direct Runtime peer clears
++      // Navis-owned history, password and download-history stores.
++      return {
++        options: { since: 0 },
++        dataToRemove: {
++          cache: true, cookies: true, history: true, formData: false,
++          downloads: true, indexedDB: true, localStorage: true,
++          passwords: true, serviceWorkers: true, serverBoundCertificates: false,
++          pluginData: false,
++        },
++        dataRemovalPermitted: {
++          cache: true, cookies: true, history: true, formData: false,
++          downloads: true, indexedDB: true, localStorage: true,
++          passwords: true, serviceWorkers: true, serverBoundCertificates: false,
++          pluginData: false,
++        },
++      };
++    }
+     return this.sendRequestForResult("GeckoView:BrowsingData:GetSettings");
+   }
+ 
+   async sendClear(dataType, options) {
++    if (isDirectAndroid) {
++      return lazy.NavisAndroidBrowsingData.clearProduct(
++        dataType, options, this.extension.id
++      );
++    }
+     const { since } = options;
+     return this.sendRequestForResult("GeckoView:BrowsingData:Clear", {
+       dataType,
+diff --git a/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs b/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs
+index 316bafd2b24b3efc1c936428d6c1df5abd788382..4c19ccad4585b59bee272488d42b1715d28a7cd9 100644
+--- a/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs
+@@ -3,6 +3,7 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ import { GeckoViewUtils } from "resource://gre/modules/GeckoViewUtils.sys.mjs";
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = {};
+ 
+@@ -164,9 +165,11 @@ export class GeckoViewPermission {
+     const requestId = Services.uuid.generateUUID().toString().slice(1, -1);
+     this.#pendingShownRequests.set(requestId, aRequest);
+ 
++    const navisRuntime = AppConstants.MOZ_NAVIS_CORE && AppConstants.platform === "android";
++    let navisDecision = "dismiss";
+     let allowOrDeny;
+     try {
+-      allowOrDeny = await actor.getContentPermission({
++      const response = await actor.getContentPermission({
+         uri: principal.URI.displaySpec,
+         thirdPartyOrigin: aRequest.principal.origin,
+         principal: lazy.E10SUtils.serializePrincipal(principal),
+@@ -177,6 +180,16 @@ export class GeckoViewPermission {
+         requestId,
+       });
+ 
++      if (navisRuntime) {
++        navisDecision = ["allow-session", "allow-always", "block", "dismiss"].includes(response?.navisDecision)
++          ? response.navisDecision : "dismiss";
++        // Do not let an unrecognised/legacy payload manufacture a permanent grant.
++        allowOrDeny = navisDecision === "allow-session" || navisDecision === "allow-always"
++          ? Services.perms.ALLOW_ACTION : Services.perms.DENY_ACTION;
++      } else {
++        allowOrDeny = response;
++      }
++
+       if (allowOrDeny === Services.perms.ALLOW_ACTION) {
+         // Ask for app permission after asking for content permission.
+         if (perm.type === "geolocation") {
+@@ -186,11 +199,13 @@ export class GeckoViewPermission {
+           allowOrDeny = granted
+             ? Services.perms.ALLOW_ACTION
+             : Services.perms.DENY_ACTION;
++          if (!granted) navisDecision = "dismiss";
+         }
+       }
+     } catch (error) {
+       console.error("Permission error:", error);
+       allowOrDeny = Services.perms.DENY_ACTION;
++      navisDecision = "dismiss";
+     } finally {
+       this.#pendingShownRequests.delete(requestId);
+     }
+@@ -208,12 +223,15 @@ export class GeckoViewPermission {
+       return { allow };
+     }
+ 
+-    Services.perms.addFromPrincipal(
+-      principal,
+-      perm.type,
+-      allowOrDeny,
+-      Services.perms.EXPIRE_NEVER
+-    );
++    if (!navisRuntime || navisDecision !== "dismiss") {
++      Services.perms.addFromPrincipal(
++        principal,
++        perm.type,
++        allowOrDeny,
++        navisRuntime && (principal.privateBrowsingId !== 0 || navisDecision === "allow-session")
++          ? Services.perms.EXPIRE_SESSION : Services.perms.EXPIRE_NEVER
++      );
++    }
+ 
+     return { allow };
+   }
+diff --git a/mobile/shared/modules/navis/NavisAndroidBrowsingData.sys.mjs b/mobile/shared/modules/navis/NavisAndroidBrowsingData.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b21d301b98baaaabcb356ad47576dca3ac8f515
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidBrowsingData.sys.mjs
+@@ -0,0 +1,54 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++const MAX_EXTENSION_ID = 256;
++const PRODUCT_TYPES = new Set(["history", "passwords", "downloads"]);
++
++const { ExtensionError } = ChromeUtils.importESModule(
++  "resource://gre/modules/ExtensionUtils.sys.mjs"
++);
++const { EventDispatcher } = ChromeUtils.importESModule(
++  "resource://gre/modules/Messaging.sys.mjs"
++);
++const dispatcher = EventDispatcher.byName("navis-android-browsing-data");
++
++/** JS side of the direct product-store clearing seam. */
++const NavisAndroidBrowsingData = Object.freeze({
++  clearProduct(dataType, options, extensionId) {
++    if (!PRODUCT_TYPES.has(dataType)) {
++      return Promise.reject(new ExtensionError("Unsupported product data type"));
++    }
++    if (typeof extensionId !== "string" || !extensionId ||
++        extensionId.length > MAX_EXTENSION_ID) {
++      return Promise.reject(new ExtensionError("Invalid extension identity"));
++    }
++    const since = options?.since == null ? 0 : Number(options.since);
++    if (!Number.isFinite(since) || since < 0 || since > Number.MAX_SAFE_INTEGER) {
++      return Promise.reject(new ExtensionError("Invalid browsingData since"));
++    }
++    return dispatcher.sendRequestForResult(
++      "NavisAndroid:BrowsingData:ClearProduct",
++      Object.freeze({
++        extensionId,
++        dataType,
++        since: Math.floor(since),
++        // Product stores never persist private records. The Java peer treats
++        // private requests as an isolated no-op, never as normal-store access.
++        privateMode: options?.cookieStoreId === "firefox-private",
++      })
++    ).then(result => {
++      if (result !== true) {
++        throw new ExtensionError("Navis product data clear was not accepted");
++      }
++      return result;
++    }).catch(error => {
++      if (error instanceof ExtensionError) throw error;
++      throw new ExtensionError(error?.message || "Navis product data clear failed");
++    });
++  },
++});
++
++export { NavisAndroidBrowsingData };
+diff --git a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9e2d8217e77488404451689fb4922ae420845a9
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+@@ -0,0 +1,274 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import {
++  prepareDesktopCleanLinks,
++  projectDesktopCopiedLink,
++  setDesktopCleanLinksEnabled,
++} from "resource://gre/modules/navis/DesktopCleanLinks.sys.mjs";
++import { NavisProcessManager, getAdditionalSupportDiagnostics, getNavisLicenseText }
++  from "resource://gre/modules/navis/DesktopProductPages.sys.mjs";
++import { setAppearanceSetting }
++  from "resource://gre/modules/navis/NavisSettingsPolicy.sys.mjs";
++import { initializeAndroidSearch, queryAndroidSearch }
++  from "resource://gre/modules/NavisAndroidSearch.sys.mjs";
++
++const processManagers = new WeakMap();
++function processManager(window) {
++  if (!processManagers.has(window)) processManagers.set(window, new NavisProcessManager());
++  return processManagers.get(window);
++}
++
++// Match the desktop storage boundary. The upstream convenience flag also
++// invokes cleaners for product capabilities Navis deliberately excludes.
++const SITE_DATA_FLAGS = [
++  "CLEAR_COOKIES", "CLEAR_DOM_QUOTA", "CLEAR_REPORTS", "CLEAR_HSTS",
++  "CLEAR_AUTH_TOKENS", "CLEAR_AUTH_CACHE", "CLEAR_FINGERPRINTING_PROTECTION_STATE",
++  "CLEAR_BOUNCE_TRACKING_PROTECTION_STATE", "CLEAR_STORAGE_PERMISSIONS",
++  "CLEAR_MESSAGING_LAYER_SECURITY_STATE", "CLEAR_TLS_TOKEN_CACHE",
++].reduce((flags, key) => (flags | Ci.nsIClearDataService[key]) >>> 0, 0);
++
++const siteRequests = new WeakMap();
++
++function clearWebPermissions(principal = null, types = null) {
++  for (const permission of Services.perms.all) {
++    const owner = permission.principal;
++    if (owner.isContentPrincipal && !owner.addonId &&
++        (owner.schemeIs("http") || owner.schemeIs("https")) &&
++        (!principal || owner.equals(principal)) && (!types || types.includes(permission.type))) {
++      Services.perms.removePermission(permission);
++    }
++  }
++}
++
++function read(object, key, fallback = "") {
++  try { return object?.[key] ?? fallback; } catch { return fallback; }
++}
++
++function text(value) {
++  return typeof value === "string" ? value.slice(0, 4096) : "";
++}
++
++function webIdentity(browser) {
++  const uri = browser?.documentURI;
++  const principal = browser?.contentPrincipal;
++  try {
++    if (!uri || !principal || principal.isSystemPrincipal || principal.addonId ||
++        !principal.isContentPrincipal ||
++        (!uri.schemeIs("http") && !uri.schemeIs("https")) ||
++        principal.URI.prePath !== uri.prePath) {
++      return null;
++    }
++    return { principal, origin: principal.URI.prePath, host: principal.URI.asciiHost };
++  } catch { return null; }
++}
++
++function loopback(host) {
++  const value = host.toLowerCase().replace(/^\[|\]$/gu, "");
++  if (value === "localhost" || value.endsWith(".localhost") ||
++      value === "::1" || value === "0:0:0:0:0:0:0:1") return true;
++  const octets = value.split(".");
++  return octets.length === 4 && Number(octets[0]) === 127 &&
++    octets.every(part => /^\d{1,3}$/u.test(part) && Number(part) <= 255);
++}
++
++function certificate(cert) {
++  if (!cert) return null;
++  const fields = ["displayName", "commonName", "subjectName", "organization", "organizationalUnit",
++    "issuerCommonName", "issuerOrganization", "issuerName", "serialNumber", "sha256Fingerprint",
++    "sha256SubjectPublicKeyInfoDigest"];
++  const result = Object.fromEntries(fields.map(key => [key, text(read(cert, key))]));
++  const validity = read(cert, "validity", null);
++  for (const [key, source] of [["validFrom", "notBefore"], ["validTo", "notAfter"]]) {
++    const time = Number(read(validity, source, 0)) / 1000;
++    result[key] = Number.isFinite(time) && time > 0 ? time : null;
++  }
++  return result;
++}
++
++function siteInformation(browser, issueClearToken = true) {
++  const web = webIdentity(browser);
++  const uri = browser?.documentURI;
++  const info = read(browser?.securityUI, "secInfo", null);
++  const security = Number(read(browser?.securityUI, "state", 0));
++  const certificateProblem = Boolean(security & (
++    Ci.nsIWebProgressListener.STATE_IS_BROKEN |
++    Ci.nsIWebProgressListener.STATE_CERT_USER_OVERRIDDEN
++  )) || Number(read(info, "errorCode", 0)) !== 0;
++  let kind = "unknown";
++  let builtInExtension = false;
++  if (web) {
++    kind = certificateProblem ? "broken" : loopback(web.host) ? "local" :
++      (security & Ci.nsIWebProgressListener.STATE_IS_SECURE) ? "secure" : "insecure";
++  } else if (uri?.schemeIs("about") && /^(neterror|certerror|httpsonlyerror)(?:[?#]|$)/u.test(uri.pathQueryRef)) {
++    kind = "error";
++  } else if (uri?.schemeIs("moz-extension")) {
++    const principal = browser.contentPrincipal;
++    const policy = principal?.addonPolicy;
++    if (policy?.active && principal.addonId === policy.id &&
++        policy.mozExtensionHostname === uri.asciiHost) {
++      kind = "extension";
++      const pref = "extensions.applicationBuiltins.allowedIds";
++      builtInExtension = Services.prefs.prefIsLocked(pref) &&
++        Services.prefs.getStringPref(pref, "").split(",").map(id => id.trim()).includes(policy.id);
++    }
++  }
++  const navigationToken = issueClearToken ? Services.uuid.generateUUID().toString() : "";
++  if (issueClearToken) {
++    siteRequests.set(browser, {
++      token: navigationToken, principal: web?.principal,
++      windowGlobal: browser.browsingContext?.currentWindowGlobal,
++      document: uri?.spec,
++    });
++  }
++  const succeededChain = read(info, "succeededCertChain", []);
++  const chain = succeededChain?.length ? succeededChain : read(info, "handshakeCertificates", []);
++  return {
++    kind, builtInExtension, navigationToken, origin: web?.origin ?? "", host: web?.host ?? "",
++    canClearData: issueClearToken && Boolean(web),
++    certificate: certificate(read(info, "serverCert", null)),
++    certificateChain: [...chain].slice(0, 16).map(certificate).filter(Boolean),
++    protocol: ["SSL 3", "TLS 1.0", "TLS 1.1", "TLS 1.2", "TLS 1.3"][read(info, "protocolVersion", -1)] ?? "",
++    cipher: text(read(info, "cipherName")),
++    keyExchange: text(read(info, "keaGroupName")),
++    signature: text(read(info, "signatureSchemeName")),
++    error: text(read(info, "errorCodeString")),
++  };
++}
++
++async function clearData(browser, token) {
++  const request = siteRequests.get(browser);
++  const web = webIdentity(browser);
++  if (!web || !request || request.token !== token ||
++      request.windowGlobal !== browser.browsingContext?.currentWindowGlobal ||
++      request.document !== browser.documentURI?.spec ||
++      !web.principal.equals(request.principal)) {
++    throw new Error("The site-information request is no longer current");
++  }
++  siteRequests.delete(browser);
++  const failures = await new Promise(resolve => Services.clearData.deleteDataFromPrincipal(
++    web.principal, true, SITE_DATA_FLAGS, resolve,
++  ));
++  if (failures) throw new Error("Some site data could not be cleared");
++  clearWebPermissions(web.principal);
++  return { cleared: true, origin: web.principal.originNoSuffix,
++    privateMode: web.principal.privateBrowsingId !== 0 };
++}
++
++/** Only the native host can call this fixed operation table. No script evaluation or pref RPC. */
++export async function query(window, operation, data = {}) {
++  const browser = window.tab?.linkedBrowser;
++  if (!browser || window.closed || !data || typeof data !== "object" || Array.isArray(data)) {
++    throw new Error("Product request has no live host");
++  }
++  switch (operation) {
++    case "search:get": case "search:default": case "search:upsert": case "search:remove":
++    case "search:move": case "search:remote": case "search:resolve": case "search:local-rank":
++    case "search:suggest": case "search:cancel": return queryAndroidSearch(window, operation, data);
++    case "appearance:set": {
++      if (Object.keys(data).length !== 2 ||
++          !Object.hasOwn(data, "key") || !Object.hasOwn(data, "value") ||
++          !["theme", "accent"].includes(data.key) || typeof data.value !== "string") {
++        throw new TypeError("Expected a theme or accent appearance setting");
++      }
++      const appearance = setAppearanceSetting(Services.prefs, data.key, data.value);
++      return { theme: appearance.theme, accent: appearance.accent };
++    }
++    case "product:initialize": {
++      if (Services.prefs.getIntPref("navis.sitePermissions.policyVersion", 0) < 2) {
++        // The previous boolean projection persisted even prompt dismissal. Its
++        // old entries cannot be interpreted as explicit user intent; re-prompt.
++        clearWebPermissions(null, ["geolocation", "desktop-notification", "persistent-storage", "xr"]);
++        Services.prefs.setIntPref("navis.sitePermissions.policyVersion", 2);
++      }
++      const search = await initializeAndroidSearch(data.searchLegacy);
++      const locale = Services.prefs.getStringPref("intl.locale.requested", "en-US");
++      Services.locale.requestedLocales = [locale === "zh-CN" ? "zh-CN" : "en-US"];
++      await prepareDesktopCleanLinks();
++      return { search, locale: Services.locale.appLocaleAsBCP47,
++        isolation: Services.prefs.getIntPref("fission.webContentIsolationStrategy", 1) };
++    }
++    case "site:get": {
++      if (data.issueClearToken !== undefined && typeof data.issueClearToken !== "boolean") {
++        throw new TypeError("Expected a boolean clear-token option");
++      }
++      return siteInformation(browser, data.issueClearToken);
++    }
++    case "site:clear": return clearData(browser, data.navigationToken);
++    case "data:clear": {
++      const failures = await new Promise(resolve => Services.clearData.deleteData(SITE_DATA_FLAGS, resolve));
++      if (failures) throw new Error("Some site data could not be cleared");
++      clearWebPermissions();
++      return { cleared: true };
++    }
++    case "links:set": {
++      if (typeof data.enabled !== "boolean") throw new TypeError("Expected a boolean setting");
++      const previous = Services.prefs.getBoolPref("navis.cleanLinks.enabled", false);
++      try {
++        setDesktopCleanLinksEnabled(data.enabled);
++        await prepareDesktopCleanLinks();
++        return { enabled: data.enabled };
++      } catch (error) {
++        setDesktopCleanLinksEnabled(previous);
++        throw error;
++      }
++    }
++    case "links:copy": {
++      if (typeof data.url !== "string" || data.url.length > 16384) throw new TypeError("Invalid link");
++      await prepareDesktopCleanLinks();
++      return { url: projectDesktopCopiedLink(data.url) };
++    }
++    case "prefs:flush": {
++      // In this ESR, null schedules an asynchronous save. An explicit PrefF
++      // uses Gecko's blocking write queue, so the reply cannot race that write
++      // when Android subsequently terminates its old browser process.
++      Services.prefs.savePrefFile(Services.dirsvc.get("PrefF", Ci.nsIFile));
++      return { flushed: true };
++    }
++    case "session:can-close": {
++      const context = browser.browsingContext;
++      const global = context?.currentWindowGlobal;
++      const uri = context?.currentURI?.spec;
++      const permitted = await browser.asyncPermitUnload();
++      if (!permitted.permitUnload || window.closed || window.tab?.linkedBrowser !== browser ||
++          browser.browsingContext !== context || context?.currentWindowGlobal !== global ||
++          context?.currentURI?.spec !== uri) {
++        return { allowed: false };
++      }
++      const history = context?.sessionHistory;
++      if (!uri || !history) throw new Error("The current page has no restorable session history");
++      const { SessionHistory } = ChromeUtils.importESModule(
++        "resource://gre/modules/sessionstore/SessionHistory.sys.mjs"
++      );
++      const state = JSON.stringify({
++        version: 1,
++        history: SessionHistory.collectFromParent(uri, true, history),
++      });
++      if (state.length > 1024 * 1024) throw new Error("Session history exceeds its storage limit");
++      return { allowed: true, state };
++    }
++    case "processes:get":
++      return { processes: await processManager(window).snapshot([
++        browser.browsingContext?.currentWindowGlobal?.osPid,
++      ]) };
++    case "processes:end":
++      return { ended: await processManager(window).end(data.token, [
++        browser.browsingContext?.currentWindowGlobal?.osPid,
++      ]) };
++    case "credits:get":
++      return { licenses: await getNavisLicenseText() };
++    case "support:get":
++      return { engineVersion: Services.appinfo.platformVersion,
++        engineBuildId: Services.appinfo.platformBuildID,
++        applicationBuildId: Services.appinfo.appBuildID,
++        locale: Services.locale.appLocaleAsBCP47,
++        availableLocales: Services.locale.availableLocales,
++        remoteType: browser.remoteType ?? "",
++        multiprocess: Services.appinfo.browserTabsRemoteAutostart,
++        fission: Services.appinfo.fissionAutostart,
++        ...Object.fromEntries((await getAdditionalSupportDiagnostics()).filter(([, value]) => value)),
++      };
++    default: throw new TypeError("Unknown product operation");
++  }
++}

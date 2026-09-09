@@ -1,0 +1,558 @@
+diff --git a/docshell/base/nsAboutRedirector.cpp b/docshell/base/nsAboutRedirector.cpp
+index 99d55d6f4d36bfafca0ef578b0ec786ffc6bb52d..891578cb4625b689372a184a3ea0ecc2619bae6e 100644
+--- a/docshell/base/nsAboutRedirector.cpp
++++ b/docshell/base/nsAboutRedirector.cpp
+@@ -231,8 +231,10 @@ static const RedirEntry kRedirMap[] = {
+          nsIAboutModule::URI_MUST_LOAD_IN_CHILD |
+          nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS},
+ #endif
++#ifdef MOZ_SAFE_BROWSING
+     {"url-classifier", "chrome://global/content/aboutUrlClassifier.xhtml",
+      nsIAboutModule::ALLOW_SCRIPT},
++#endif
+     {"webrtc", "chrome://global/content/aboutwebrtc/aboutWebrtc.html",
+      nsIAboutModule::ALLOW_SCRIPT},
+     {"crashparent", "about:blank", nsIAboutModule::HIDE_FROM_ABOUTABOUT},
+diff --git a/docshell/build/components.conf b/docshell/build/components.conf
+index 8173a460fd10e7def8f1e774ec0732ce8508ee69..15b704d22467e8b6db6236c324cbf5bbd7e71514 100644
+--- a/docshell/build/components.conf
++++ b/docshell/build/components.conf
+@@ -29,10 +29,12 @@ about_pages = [
+     'srcdoc',
+     'support',
+     'telemetry',
+-    'url-classifier',
+     'webrtc',
+ ]
+ 
++if defined('MOZ_SAFE_BROWSING'):
++    about_pages.append('url-classifier')
++
+ if buildconfig.substs['MOZ_WIDGET_TOOLKIT'] != 'android':
+     about_pages.append('addons')
+ if defined('MOZ_CRASHREPORTER'):
+diff --git a/mobile/shared/chrome/geckoview/geckoview.js b/mobile/shared/chrome/geckoview/geckoview.js
+index 2e197dcf30e6fa7aa95dd195fb800acbc7b503b9..9accfb02c9806e39bfb0bfcd35eedfb67387baee 100644
+--- a/mobile/shared/chrome/geckoview/geckoview.js
++++ b/mobile/shared/chrome/geckoview/geckoview.js
+@@ -25,6 +25,12 @@ ChromeUtils.defineESModuleGetters(this, {
+     "resource://gre/modules/psm/RemoteSecuritySettings.sys.mjs",
+ });
+ 
++if (AppConstants.MOZ_SAFE_BROWSING) {
++  ChromeUtils.defineESModuleGetters(this, {
++    SafeBrowsing: "resource://gre/modules/SafeBrowsing.sys.mjs",
++  });
++}
++
+ if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
+   ChromeUtils.defineESModuleGetters(this, {
+     CaptchaDetectionPingUtils:
+@@ -804,11 +810,13 @@ function startup() {
+       RemoteSecuritySettings.init();
+     });
+ 
+-    InitLater(() => {
+-      // Initialize safe browsing module. This is required for content
+-      // blocking features and manages blocklist downloads and updates.
+-      SafeBrowsing.init();
+-    });
++    if (AppConstants.MOZ_SAFE_BROWSING) {
++      InitLater(() => {
++        // Initialize safe browsing module. This is required for content
++        // blocking features and manages blocklist downloads and updates.
++        SafeBrowsing.init();
++      });
++    }
+ 
+     InitLater(() => {
+       // It's enough to run this once to set up FOG.
+diff --git a/modules/libpref/init/all.js b/modules/libpref/init/all.js
+index f0f3449b574cfce6f8f76359ecca72a5b5782b57..4da247c8e9c2995505f3633c8a2981ba161439ef 100644
+--- a/modules/libpref/init/all.js
++++ b/modules/libpref/init/all.js
+@@ -3282,6 +3282,7 @@ pref("captivedetect.maxWaitingTime", 5000);
+ pref("captivedetect.pollingTime", 3000);
+ pref("captivedetect.maxRetryCount", 5);
+ 
++#ifdef MOZ_SAFE_BROWSING
+ // The tables used for Safebrowsing phishing and malware checks
+ pref("urlclassifier.malwareTable", "goog-malware-proto,goog-unwanted-proto,moztest-harmful-simple,moztest-malware-simple,moztest-unwanted-simple");
+ #ifdef MOZILLA_OFFICIAL
+@@ -3333,6 +3334,7 @@ pref("urlclassifier.disallow_completions", "goog-downloadwhite-digest256,base-tr
+ 
+ // Workaround for Google Recaptcha
+ pref("urlclassifier.trackingAnnotationSkipURLs", "");
++#endif
+ pref("privacy.rejectForeign.allowList", "");
+ 
+ // The list of email webapp sites
+@@ -3347,6 +3349,7 @@ pref("privacy.trackingprotection.allow_list.hasMigratedCategoryPrefs", false);
+ // if we should show the ETP Strict exceptions onboarding message again.
+ pref("privacy.trackingprotection.allow_list.hasUserInteractedWithETPSettings", false);
+ 
++#ifdef MOZ_SAFE_BROWSING
+ // Number of random entries to send with a gethash request
+ pref("urlclassifier.gethashnoise", 4);
+ 
+@@ -3440,6 +3443,7 @@ pref("browser.safebrowsing.provider.mozilla.lists.content", "moz-full");
+ #else
+   pref("urlclassifier.blockedTable", "moztest-block-simple");
+ #endif
++#endif
+ 
+ #ifdef XP_MACOSX
+   #if !defined(RELEASE_OR_BETA) || defined(DEBUG)
+diff --git a/toolkit/components/build/components.conf b/toolkit/components/build/components.conf
+index 29f7601bbcd4175c980a6337c3b3e67b948d20f1..41f490635c4d7a01ee028a594733c7b71c50bec5 100644
+--- a/toolkit/components/build/components.conf
++++ b/toolkit/components/build/components.conf
+@@ -30,15 +30,6 @@ Classes = [
+         'type': 'mozilla::AlertNotification',
+         'headers': ['mozilla/AlertNotification.h'],
+     },
+-    {
+-        'name': 'ApplicationReputation',
+-        'cid': '{d21b4c33-716f-4117-8041-2770b59ff8a6}',
+-        'contract_ids': ['@mozilla.org/reputationservice/application-reputation-service;1'],
+-        'singleton': True,
+-        'type': 'ApplicationReputationService',
+-        'headers': ['/toolkit/components/reputationservice/ApplicationReputation.h'],
+-        'constructor': 'ApplicationReputationService::GetSingleton',
+-    },
+     {
+         'name': 'DownloadPlatform',
+         'cid': '{649a14c9-fe5c-48ec-9c85-00cad9ccf32e}',
+@@ -120,13 +111,6 @@ Classes = [
+         'type': 'nsUrlClassifierPrefixSet',
+         'headers': ['nsUrlClassifierPrefixSet.h'],
+     },
+-    {
+-        'name': 'UrlClassifierStreamUpdater',
+-        'cid': '{e1797597-f4d6-4dd3-a1e1-745ad352cd80}',
+-        'contract_ids': ['@mozilla.org/url-classifier/streamupdater;1'],
+-        'type': 'nsUrlClassifierStreamUpdater',
+-        'headers': ['/toolkit/components/url-classifier/nsUrlClassifierStreamUpdater.h'],
+-    },
+     {
+         'name': 'UrlClassifierUtils',
+         'cid': '{b7b2ccec-7912-4ea6-a548-b038447004bd}',
+@@ -145,6 +129,26 @@ Classes = [
+     },
+ ]
+ 
++if defined('MOZ_SAFE_BROWSING'):
++    Classes += [
++        {
++            'name': 'ApplicationReputation',
++            'cid': '{d21b4c33-716f-4117-8041-2770b59ff8a6}',
++            'contract_ids': ['@mozilla.org/reputationservice/application-reputation-service;1'],
++            'singleton': True,
++            'type': 'ApplicationReputationService',
++            'headers': ['/toolkit/components/reputationservice/ApplicationReputation.h'],
++            'constructor': 'ApplicationReputationService::GetSingleton',
++        },
++        {
++            'name': 'UrlClassifierStreamUpdater',
++            'cid': '{e1797597-f4d6-4dd3-a1e1-745ad352cd80}',
++            'contract_ids': ['@mozilla.org/url-classifier/streamupdater;1'],
++            'type': 'nsUrlClassifierStreamUpdater',
++            'headers': ['/toolkit/components/url-classifier/nsUrlClassifierStreamUpdater.h'],
++        },
++    ]
++
+ if defined('MOZ_UPDATER') and not IS_ANDROID:
+     Classes += [
+         {
+diff --git a/toolkit/components/downloads/DownloadCore.sys.mjs b/toolkit/components/downloads/DownloadCore.sys.mjs
+index 0223747bb0b3bbcd84d08477a27d8582052ef0e1..7ee56409915380ea45b3181509dc0a7d4f4438e1 100644
+--- a/toolkit/components/downloads/DownloadCore.sys.mjs
++++ b/toolkit/components/downloads/DownloadCore.sys.mjs
+@@ -45,6 +45,16 @@ const BackgroundFileSaverStreamListener = Components.Constructor(
+   "nsIBackgroundFileSaver"
+ );
+ 
++const ApplicationReputationVerdict = AppConstants.MOZ_SAFE_BROWSING
++  ? Ci.nsIApplicationReputationService
++  : Object.freeze({
++      VERDICT_SAFE: 0,
++      VERDICT_DANGEROUS: 1,
++      VERDICT_UNCOMMON: 2,
++      VERDICT_POTENTIALLY_UNWANTED: 3,
++      VERDICT_DANGEROUS_HOST: 4,
++    });
++
+ XPCOMUtils.defineLazyPreferenceGetter(
+   lazy,
+   "enableDeletePrivateFeature",
+@@ -2742,13 +2752,13 @@ DownloadCopySaver.prototype = {
+      * Maps nsIApplicationReputationService verdicts with the DownloadError ones.
+      */
+     const kVerdictMap = {
+-      [Ci.nsIApplicationReputationService.VERDICT_DANGEROUS]:
++      [ApplicationReputationVerdict.VERDICT_DANGEROUS]:
+         DownloadError.BLOCK_VERDICT_MALWARE,
+-      [Ci.nsIApplicationReputationService.VERDICT_UNCOMMON]:
++      [ApplicationReputationVerdict.VERDICT_UNCOMMON]:
+         DownloadError.BLOCK_VERDICT_UNCOMMON,
+-      [Ci.nsIApplicationReputationService.VERDICT_POTENTIALLY_UNWANTED]:
++      [ApplicationReputationVerdict.VERDICT_POTENTIALLY_UNWANTED]:
+         DownloadError.BLOCK_VERDICT_POTENTIALLY_UNWANTED,
+-      [Ci.nsIApplicationReputationService.VERDICT_DANGEROUS_HOST]:
++      [ApplicationReputationVerdict.VERDICT_DANGEROUS_HOST]:
+         DownloadError.BLOCK_VERDICT_MALWARE,
+     };
+ 
+@@ -2789,11 +2799,11 @@ DownloadCopySaver.prototype = {
+       // Verdicts are in a pre-defined order (see nsIApplicationReputationService),
+       // so find the most restrictive one.
+       const verdictToRestrictiveness = {
+-        [Ci.nsIApplicationReputationService.VERDICT_SAFE]: 0,
+-        [Ci.nsIApplicationReputationService.VERDICT_POTENTIALLY_UNWANTED]: 1,
+-        [Ci.nsIApplicationReputationService.VERDICT_UNCOMMON]: 2,
+-        [Ci.nsIApplicationReputationService.VERDICT_DANGEROUS_HOST]: 3,
+-        [Ci.nsIApplicationReputationService.VERDICT_DANGEROUS]: 4,
++        [ApplicationReputationVerdict.VERDICT_SAFE]: 0,
++        [ApplicationReputationVerdict.VERDICT_POTENTIALLY_UNWANTED]: 1,
++        [ApplicationReputationVerdict.VERDICT_UNCOMMON]: 2,
++        [ApplicationReputationVerdict.VERDICT_DANGEROUS_HOST]: 3,
++        [ApplicationReputationVerdict.VERDICT_DANGEROUS]: 4,
+       };
+       return verdictToRestrictiveness[reputationResult.verdict] >
+         verdictToRestrictiveness[contentAnalysisResult.verdict]
+diff --git a/toolkit/components/downloads/DownloadIntegration.sys.mjs b/toolkit/components/downloads/DownloadIntegration.sys.mjs
+index 49eae5aea02c6178b79eed5e82528786e4484ee8..cce9791558c7cd64d74516dca80129716e486991 100644
+--- a/toolkit/components/downloads/DownloadIntegration.sys.mjs
++++ b/toolkit/components/downloads/DownloadIntegration.sys.mjs
+@@ -56,12 +56,14 @@ ChromeUtils.defineLazyGetter(lazy, "gParentalControlsService", function () {
+   return null;
+ });
+ 
+-XPCOMUtils.defineLazyServiceGetter(
+-  lazy,
+-  "gApplicationReputationService",
+-  "@mozilla.org/reputationservice/application-reputation-service;1",
+-  Ci.nsIApplicationReputationService
+-);
++if (AppConstants.MOZ_SAFE_BROWSING) {
++  XPCOMUtils.defineLazyServiceGetter(
++    lazy,
++    "gApplicationReputationService",
++    "@mozilla.org/reputationservice/application-reputation-service;1",
++    Ci.nsIApplicationReputationService
++  );
++}
+ 
+ Integration.downloads.defineESModuleGetter(
+   lazy,
+@@ -98,6 +100,16 @@ const Timer = Components.Constructor(
+   "initWithCallback"
+ );
+ 
++const ApplicationReputationVerdict = AppConstants.MOZ_SAFE_BROWSING
++  ? Ci.nsIApplicationReputationService
++  : Object.freeze({
++      VERDICT_SAFE: 0,
++      VERDICT_DANGEROUS: 1,
++      VERDICT_UNCOMMON: 2,
++      VERDICT_POTENTIALLY_UNWANTED: 3,
++      VERDICT_DANGEROUS_HOST: 4,
++    });
++
+ /**
+  * Indicates the delay between a change to the downloads data and the related
+  * save operation.
+@@ -455,6 +467,12 @@ export var DownloadIntegration = {
+    *   }
+    */
+   shouldBlockForReputationCheck(aDownload) {
++    if (!AppConstants.MOZ_SAFE_BROWSING) {
++      return Promise.resolve({
++        shouldBlock: false,
++        verdict: ApplicationReputationVerdict.VERDICT_SAFE,
++      });
++    }
+     let hash;
+     let sigInfo;
+     let channelRedirects;
+@@ -466,13 +484,13 @@ export var DownloadIntegration = {
+       // Bail if DownloadSaver doesn't have a hash or signature info.
+       return Promise.resolve({
+         shouldBlock: false,
+-        verdict: Ci.nsIApplicationReputationService.VERDICT_SAFE,
++        verdict: ApplicationReputationVerdict.VERDICT_SAFE,
+       });
+     }
+     if (!hash || !sigInfo) {
+       return Promise.resolve({
+         shouldBlock: false,
+-        verdict: Ci.nsIApplicationReputationService.VERDICT_SAFE,
++        verdict: ApplicationReputationVerdict.VERDICT_SAFE,
+       });
+     }
+     return new Promise(resolve => {
+@@ -491,7 +509,7 @@ export var DownloadIntegration = {
+             shouldBlock: aShouldBlock,
+             verdict: aShouldBlock
+               ? aVerdict
+-              : Ci.nsIApplicationReputationService.VERDICT_SAFE,
++              : ApplicationReputationVerdict.VERDICT_SAFE,
+           });
+         }
+       );
+@@ -511,7 +529,7 @@ export var DownloadIntegration = {
+ 
+     if (!contentAnalysis.isActive) {
+       return {
+-        verdict: Ci.nsIApplicationReputationService.VERDICT_SAFE,
++        verdict: ApplicationReputationVerdict.VERDICT_SAFE,
+         shouldBlock: false,
+       };
+     }
+@@ -581,7 +599,7 @@ export var DownloadIntegration = {
+             resolve({
+               isContentAnalysisWarn: true,
+               verdict:
+-                Ci.nsIApplicationReputationService.VERDICT_POTENTIALLY_UNWANTED,
++                ApplicationReputationVerdict.VERDICT_POTENTIALLY_UNWANTED,
+               contentAnalysisWarnRequestToken: requestToken,
+               shouldBlock: true,
+             });
+@@ -633,8 +651,8 @@ export var DownloadIntegration = {
+         }
+         return {
+           verdict: response.shouldAllowContent
+-            ? Ci.nsIApplicationReputationService.VERDICT_SAFE
+-            : Ci.nsIApplicationReputationService.VERDICT_DANGEROUS,
++            ? ApplicationReputationVerdict.VERDICT_SAFE
++            : ApplicationReputationVerdict.VERDICT_DANGEROUS,
+           shouldBlock: !response.shouldAllowContent,
+           contentAnalysisCancelError: cancelError,
+           contentAnalysisWarnRequestToken: undefined,
+@@ -650,7 +668,7 @@ export var DownloadIntegration = {
+         contentAnalysis.cancelRequestsByUserAction(userActionId);
+         // The cancel will override this, so just return something
+         return {
+-          verdict: Ci.nsIApplicationReputationService.VERDICT_SAFE,
++          verdict: ApplicationReputationVerdict.VERDICT_SAFE,
+           shouldBlock: false,
+         };
+       }
+@@ -658,7 +676,7 @@ export var DownloadIntegration = {
+     } catch (e) {
+       console.error(e);
+       return {
+-        verdict: Ci.nsIApplicationReputationService.VERDICT_DANGEROUS,
++        verdict: ApplicationReputationVerdict.VERDICT_DANGEROUS,
+         shouldBlock: true,
+       };
+     } finally {
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+index 0bea4a1bb8c25ee7247d322bf138dfbbebe6be9c..f7ec20ee9b956652585f99d676492cdf2e7db000 100644
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -134,6 +134,11 @@ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+         if directory not in excluded_component_dirs
+     ]
+ 
++if not CONFIG["MOZ_SAFE_BROWSING"]:
++    component_dirs = [
++        directory for directory in component_dirs if directory != "reputationservice"
++    ]
++
+ DIRS += component_dirs
+ 
+ if CONFIG["MOZ_LOCAL_ML"]:
+diff --git a/toolkit/components/url-classifier/moz.build b/toolkit/components/url-classifier/moz.build
+index c1df5f5b481727179edcde984d298caf9abe0dab..2785658f884d3a5a72a6a0d007b12c9d5508349d 100644
+--- a/toolkit/components/url-classifier/moz.build
++++ b/toolkit/components/url-classifier/moz.build
+@@ -13,13 +13,17 @@ XPIDL_SOURCES += [
+     "nsIUrlClassifierHashCompleter.idl",
+     "nsIUrlClassifierInfo.idl",
+     "nsIUrlClassifierPrefixSet.idl",
+-    "nsIUrlClassifierRemoteSettingsService.idl",
+-    "nsIUrlClassifierStreamUpdater.idl",
+     "nsIUrlClassifierTestUtils.idl",
+     "nsIUrlClassifierUtils.idl",
+     "nsIUrlListManager.idl",
+ ]
+ 
++if CONFIG["MOZ_SAFE_BROWSING"]:
++    XPIDL_SOURCES += [
++        "nsIUrlClassifierRemoteSettingsService.idl",
++        "nsIUrlClassifierStreamUpdater.idl",
++    ]
++
+ XPIDL_MODULE = "url-classifier"
+ 
+ DEFINES["GOOGLE_PROTOBUF_NO_RTTI"] = True
+@@ -47,26 +51,29 @@ UNIFIED_SOURCES += [
+ # define conflicting LOG() macros
+ SOURCES += [
+     "nsUrlClassifierPrefixSet.cpp",
+-    "nsUrlClassifierStreamUpdater.cpp",
+     "VariableLengthPrefixSet.cpp",
+ ]
+ 
++if CONFIG["MOZ_SAFE_BROWSING"]:
++    SOURCES += ["nsUrlClassifierStreamUpdater.cpp"]
++
+ # contains variables that conflict with LookupCache.cpp
+ SOURCES += [
+     "HashStore.cpp",
+ ]
+ 
+-EXTRA_JS_MODULES += [
+-    "SafeBrowsing.sys.mjs",
+-    "UrlClassifierHashCompleter.sys.mjs",
+-    "UrlClassifierLib.sys.mjs",
+-    "UrlClassifierListManager.sys.mjs",
+-    "UrlClassifierRemoteSettingsService.sys.mjs",
+-]
++if CONFIG["MOZ_SAFE_BROWSING"]:
++    EXTRA_JS_MODULES += [
++        "SafeBrowsing.sys.mjs",
++        "UrlClassifierHashCompleter.sys.mjs",
++        "UrlClassifierLib.sys.mjs",
++        "UrlClassifierListManager.sys.mjs",
++        "UrlClassifierRemoteSettingsService.sys.mjs",
++    ]
+ 
+-XPCOM_MANIFESTS += [
+-    "components.conf",
+-]
++    XPCOM_MANIFESTS += [
++        "components.conf",
++    ]
+ 
+ EXPORTS += [
+     "chromium/safebrowsing.pb.h",
+diff --git a/toolkit/content/jar.mn b/toolkit/content/jar.mn
+index 8a8888542166bdee6bde1ed9d8bfd11cd544006b..c5c32853eed8b9feacdec96de137d496ebfd5c74 100644
+--- a/toolkit/content/jar.mn
++++ b/toolkit/content/jar.mn
+@@ -47,9 +47,11 @@ toolkit.jar:
+    content/global/aboutTelemetry.xhtml
+    content/global/aboutTelemetry.css
+ #endif
++#ifdef MOZ_SAFE_BROWSING
+    content/global/aboutUrlClassifier.js
+    content/global/aboutUrlClassifier.xhtml
+    content/global/aboutUrlClassifier.css
++#endif
+ *   content/global/buildconfig.html
+    content/global/buildconfig.css
+    content/global/colorpicker.html
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index edc7ef615334b00ce66fd9f5c88221176fca7e0d..d03797358cce2339a33c2e292f599840653c90ca 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -160,6 +160,13 @@ export var AppConstants = Object.freeze({
+ #else
+   false,
+ #endif
++
++  MOZ_SAFE_BROWSING:
++#ifdef MOZ_SAFE_BROWSING
++  true,
++#else
++  false,
++#endif
+   DEBUG: @MOZ_DEBUG_BOOL@,
+ 
+   ASAN: @MOZ_ASAN_BOOL@,
+diff --git a/toolkit/mozapps/downloads/HelperAppDlg.sys.mjs b/toolkit/mozapps/downloads/HelperAppDlg.sys.mjs
+index 2a7ba8701c33113aadff5ce0f809c2ffdd283636..149e8461a539970535deb66cd067b6f5bc6cdd0c 100644
+--- a/toolkit/mozapps/downloads/HelperAppDlg.sys.mjs
++++ b/toolkit/mozapps/downloads/HelperAppDlg.sys.mjs
+@@ -12,12 +12,14 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   EnableDelayHelper: "resource://gre/modules/PromptUtils.sys.mjs",
+ });
+ 
+-XPCOMUtils.defineLazyServiceGetter(
+-  lazy,
+-  "gReputationService",
+-  "@mozilla.org/reputationservice/application-reputation-service;1",
+-  Ci.nsIApplicationReputationService
+-);
++if (AppConstants.MOZ_SAFE_BROWSING) {
++  XPCOMUtils.defineLazyServiceGetter(
++    lazy,
++    "gReputationService",
++    "@mozilla.org/reputationservice/application-reputation-service;1",
++    Ci.nsIApplicationReputationService
++  );
++}
+ XPCOMUtils.defineLazyServiceGetter(
+   lazy,
+   "gMIMEService",
+@@ -580,7 +582,9 @@ export class nsUnknownContentTypeDialog {
+         !this.isExemptExecutableExtension) ||
+       // Do not offer to remember text/plain mimetype choices if the file
+       // isn't actually a 'plain' text file.
+-      (isPlain && lazy.gReputationService.isBinary(suggestedFileName));
++      (isPlain &&
++        AppConstants.MOZ_SAFE_BROWSING &&
++        lazy.gReputationService.isBinary(suggestedFileName));
+     if (
+       (shouldntRememberChoice && !this.canUseDefaultHandler()) ||
+       Services.prefs.getBoolPref("browser.download.forbid_open_with")
+diff --git a/toolkit/toolkit.mozbuild b/toolkit/toolkit.mozbuild
+index 4a4788c50a262379e5eac50681bbf8803bc088b1..3e96f1d5d079ccb7d27fd0199441a65493d6e550 100644
+--- a/toolkit/toolkit.mozbuild
++++ b/toolkit/toolkit.mozbuild
+@@ -171,11 +171,16 @@ if (
+ ):
+     DIRS += ["/testing/geckodriver"]
+ 
+-DIRS += [
+-    "/media/gmp-clearkey/0.1",
+-]
++if CONFIG["MOZ_EME_API"]:
++    DIRS += [
++        "/media/gmp-clearkey/0.1",
++    ]
+ 
+-if CONFIG["MOZ_WMF_CDM"] and CONFIG["ENABLE_TESTS"]:
++if (
++    CONFIG["MOZ_EME_API"]
++    and CONFIG["MOZ_WMF_CDM"]
++    and CONFIG["ENABLE_TESTS"]
++):
+     DIRS += [
+         "/media/wmf-clearkey",
+     ]
+diff --git a/uriloader/exthandler/nsExternalHelperAppService.cpp b/uriloader/exthandler/nsExternalHelperAppService.cpp
+index 1eab401455890aafc73f1da9080415fc035f1c30..a6f68a8254818fad5acd81d971f483a43785ba60 100644
+--- a/uriloader/exthandler/nsExternalHelperAppService.cpp
++++ b/uriloader/exthandler/nsExternalHelperAppService.cpp
+@@ -64,7 +64,9 @@
+ #include "nsIIOService.h"
+ #include "nsNetCID.h"
+ 
+-#include "nsIApplicationReputation.h"
++#ifdef MOZ_SAFE_BROWSING
++#  include "nsIApplicationReputation.h"
++#endif
+ 
+ #include "nsDSURIContentListener.h"
+ #include "nsMimeTypes.h"
+@@ -1792,6 +1794,7 @@ NS_IMETHODIMP nsExternalAppHandler::OnStartRequest(nsIRequest* request) {
+     // If people are sending us ApplicationReputation-eligible files with
+     // text/plain mimetypes, enforce asking the user what to do.
+     if (!ext.IsEmpty()) {
++#ifdef MOZ_SAFE_BROWSING
+       nsAutoCString dummyFileName("f");
+       if (ext.First() != '.') {
+         dummyFileName.Append(".");
+@@ -1800,6 +1803,9 @@ NS_IMETHODIMP nsExternalAppHandler::OnStartRequest(nsIRequest* request) {
+       nsCOMPtr<nsIApplicationReputationService> appRep =
+           components::ApplicationReputation::Service();
+       appRep->IsBinary(dummyFileName + ext, &alwaysAsk);
++#else
++      alwaysAsk = true;
++#endif
+     }
+   }
+ 

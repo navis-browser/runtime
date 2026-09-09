@@ -1,0 +1,827 @@
+diff --git a/browser/base/content/aboutFrameCrashed.html b/browser/base/content/aboutFrameCrashed.html
+index 45f3955760b60164d7804fd26b0228f2ef59c7fa..5cad381ebc298aa297804b5ec1d14459d3c8acd0 100644
+--- a/browser/base/content/aboutFrameCrashed.html
++++ b/browser/base/content/aboutFrameCrashed.html
+@@ -4,7 +4,10 @@
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+ 
+-<html data-l10n-id="crashed-subframe-title">
++<html
++  class="desktop-embedder-error-document"
++  data-l10n-id="crashed-subframe-title"
++>
+   <head>
+     <meta
+       http-equiv="Content-Security-Policy"
+diff --git a/browser/themes/shared/aboutFrameCrashed.css b/browser/themes/shared/aboutFrameCrashed.css
+index f15a4cf10e29e4f70b3ec0089a03a8e0e8d8e21c..211fb63e95a9e47fa6913f7a012ff300228eeb04 100644
+--- a/browser/themes/shared/aboutFrameCrashed.css
++++ b/browser/themes/shared/aboutFrameCrashed.css
+@@ -10,3 +10,14 @@ body {
+   width: 100%;
+   background-size: 1.6em;
+ }
++
++@media -moz-pref("browser.desktop-embedder.material-error-pages") {
++  body {
++    padding: 0;
++    background-color: var(--embedder-error-background);
++    background-image: url("chrome://global/skin/icons/desktop-embedder-error.svg");
++    background-size: 40px;
++    stroke: var(--embedder-error-secondary-text);
++    -moz-context-properties: stroke;
++  }
++}
+diff --git a/toolkit/components/httpsonlyerror/content/errorpage.html b/toolkit/components/httpsonlyerror/content/errorpage.html
+index 1cfd46594a020d4a15a47925cb237ab814dee948..46560e4c95a812a38f8a794c24f9bf2bd284c1d5 100644
+--- a/toolkit/components/httpsonlyerror/content/errorpage.html
++++ b/toolkit/components/httpsonlyerror/content/errorpage.html
+@@ -4,7 +4,7 @@
+ 
+ <!doctype html>
+ 
+-<html>
++<html class="desktop-embedder-error-document">
+   <head>
+     <meta
+       http-equiv="Content-Security-Policy"
+diff --git a/toolkit/components/httpsonlyerror/content/errorpage.js b/toolkit/components/httpsonlyerror/content/errorpage.js
+index a602b10f253753bdc36eeed4d7be2e15e47e44e0..007205389e3400a696749cde2ee80191d08c76ce 100644
+--- a/toolkit/components/httpsonlyerror/content/errorpage.js
++++ b/toolkit/components/httpsonlyerror/content/errorpage.js
+@@ -26,12 +26,17 @@ function initPage() {
+   );
+ 
+   const baseSupportURL = RPMGetFormatURLPref("app.support.baseURL");
+-  document
+-    .getElementById("learnMoreLink")
+-    .setAttribute("href", baseSupportURL + "https-only-prefs");
+-  document
+-    .getElementById("mixedContentLearnMoreLink")
+-    .setAttribute("href", baseSupportURL + "mixed-content");
++  if (baseSupportURL) {
++    document
++      .getElementById("learnMoreLink")
++      .setAttribute("href", baseSupportURL + "https-only-prefs");
++    document
++      .getElementById("mixedContentLearnMoreLink")
++      .setAttribute("href", baseSupportURL + "mixed-content");
++  } else {
++    document.getElementById("learn-more-container").hidden = true;
++    document.getElementById("mixedContentLearnMoreLink").hidden = true;
++  }
+ 
+   const isTopLevel = window.top == window;
+   if (!isTopLevel) {
+diff --git a/toolkit/content/aboutNetError.html b/toolkit/content/aboutNetError.html
+index b14ca3bbe54727a015a028704b015874d561c273..6cc25e90f25660faea3de6908473deeee345cd9d 100644
+--- a/toolkit/content/aboutNetError.html
++++ b/toolkit/content/aboutNetError.html
+@@ -2,7 +2,7 @@
+ <!-- This Source Code Form is subject to the terms of the Mozilla Public
+    - License, v. 2.0. If a copy of the MPL was not distributed with this
+    - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+-<html data-l10n-sync="true">
++<html class="desktop-embedder-error-document" data-l10n-sync="true">
+   <head>
+     <meta
+       http-equiv="Content-Security-Policy"
+diff --git a/toolkit/content/aboutNetError.mjs b/toolkit/content/aboutNetError.mjs
+index 728a08f20d54f68aa2572ed3eb3388a2bfb788bb..4e171dcd0cbedff3d3cab6dc8f5f42470fe54adc 100644
+--- a/toolkit/content/aboutNetError.mjs
++++ b/toolkit/content/aboutNetError.mjs
+@@ -31,6 +31,19 @@ import {
+ const formatter = new Intl.DateTimeFormat();
+ 
+ const HOST_NAME = getHostName();
++const SUPPORT_BASE_URL = RPMGetFormatURLPref("app.support.baseURL");
++
++function getSupportBaseURL() {
++  return SUPPORT_BASE_URL;
++}
++
++function setSupportHref(link, baseURL, slug) {
++  if (!baseURL) {
++    return false;
++  }
++  link.href = baseURL + slug;
++  return true;
++}
+ 
+ // Used to check if we have a specific localized message for an error.
+ const KNOWN_ERROR_TITLE_IDS = new Set([
+@@ -301,7 +314,7 @@ function initTitleAndBodyIds(baseURL, isTRROnlyFailure) {
+   tryAgain.hidden = false;
+   const learnMore = document.getElementById("learnMoreContainer");
+   const learnMoreLink = document.getElementById("learnMoreLink");
+-  learnMoreLink.setAttribute("href", baseURL + "connection-not-secure");
++  setSupportHref(learnMoreLink, baseURL, "connection-not-secure");
+ 
+   let pageTitleId = "neterror-page-title";
+   let bodyTitleId = gErrorCode + "-title";
+@@ -349,8 +362,11 @@ function initTitleAndBodyIds(baseURL, isTRROnlyFailure) {
+       longDesc = null;
+ 
+       // Add a learn more link
+-      learnMore.hidden = false;
+-      learnMoreLink.setAttribute("href", baseURL + "xframe-neterror-page");
++      learnMore.hidden = !setSupportHref(
++        learnMoreLink,
++        baseURL,
++        "xframe-neterror-page"
++      );
+       break;
+     }
+ 
+@@ -376,7 +392,7 @@ function initTitleAndBodyIds(baseURL, isTRROnlyFailure) {
+     // TLS errors and non-overridable certificate errors (e.g. pinning
+     // failures) are of type nssFailure2.
+     case "nssFailure2": {
+-      learnMore.hidden = false;
++      learnMore.hidden = !baseURL;
+       const result = handleNSSFailure(showPrefChangeContainer);
+       if (result.versionError) {
+         const tlsNotice = document.getElementById("tlsVersionNotice");
+@@ -387,7 +403,7 @@ function initTitleAndBodyIds(baseURL, isTRROnlyFailure) {
+     }
+ 
+     case "sslv3Used":
+-      learnMore.hidden = false;
++      learnMore.hidden = !baseURL;
+       document.body.className = "certerror";
+       break;
+   }
+@@ -404,8 +420,8 @@ function initPage() {
+   // The URL that prompts us to show an offline support page should have the following
+   // format: "https://support.mozilla.org/1/firefox/%VERSION%/%OS%/%LOCALE%/supportPageSlug",
+   // so we can extract the support page slug.
+-  let baseURL = RPMGetFormatURLPref("app.support.baseURL");
+-  if (document.location.href.startsWith(baseURL)) {
++  const baseURL = getSupportBaseURL();
++  if (baseURL && document.location.href.startsWith(baseURL)) {
+     let supportPageSlug = document.location.pathname.split("/").pop();
+     RPMSendAsyncMessage("DisplayOfflineSupportPage", {
+       supportPageSlug,
+@@ -476,7 +492,7 @@ function initPage() {
+   const tryAgain = document.getElementById("netErrorButtonContainer");
+   tryAgain.hidden = false;
+   const learnMoreLink = document.getElementById("learnMoreLink");
+-  learnMoreLink.setAttribute("href", baseURL + "connection-not-secure");
++  setSupportHref(learnMoreLink, baseURL, "connection-not-secure");
+   let { pageTitleId, bodyTitle, bodyTitleId, longDesc } = initTitleAndBodyIds(
+     baseURL,
+     isTRROnlyFailure
+@@ -870,10 +886,13 @@ function setCertErrorDetails() {
+   document.body.setAttribute("code", failedCertInfo.errorCodeString);
+ 
+   const learnMore = document.getElementById("learnMoreContainer");
+-  learnMore.hidden = false;
+   const learnMoreLink = document.getElementById("learnMoreLink");
+-  const baseURL = RPMGetFormatURLPref("app.support.baseURL");
+-  learnMoreLink.href = baseURL + "connection-not-secure";
++  const baseURL = getSupportBaseURL();
++  learnMore.hidden = !setSupportHref(
++    learnMoreLink,
++    baseURL,
++    "connection-not-secure"
++  );
+ 
+   const bodyTitle = document.querySelector(".title-text");
+   const shortDesc = document.getElementById("errorShortDesc");
+@@ -907,7 +926,7 @@ function setCertErrorDetails() {
+         RPMSendAsyncMessage("Browser:ResetEnterpriseRootsPref");
+       }
+ 
+-      learnMoreLink.href = baseURL + "security-error";
++      setSupportHref(learnMoreLink, baseURL, "security-error");
+ 
+       document.l10n.setAttributes(bodyTitle, "certerror-mitm-title");
+ 
+@@ -928,7 +947,7 @@ function setCertErrorDetails() {
+     }
+ 
+     case "MOZILLA_PKIX_ERROR_SELF_SIGNED_CERT":
+-      learnMoreLink.href = baseURL + "security-error";
++      setSupportHref(learnMoreLink, baseURL, "security-error");
+       break;
+ 
+     // In case the certificate expired we make sure the system clock
+@@ -938,7 +957,7 @@ function setCertErrorDetails() {
+     case "SEC_ERROR_EXPIRED_ISSUER_CERTIFICATE":
+     case "MOZILLA_PKIX_ERROR_NOT_YET_VALID_CERTIFICATE":
+     case "MOZILLA_PKIX_ERROR_NOT_YET_VALID_ISSUER_CERTIFICATE": {
+-      learnMoreLink.href = baseURL + "time-errors";
++      setSupportHref(learnMoreLink, baseURL, "time-errors");
+ 
+       const difference = RPMGetIntPref(
+         "services.settings.clock_skew_seconds",
+diff --git a/toolkit/content/net-error-card.mjs b/toolkit/content/net-error-card.mjs
+index e86d1aa2791f6796bba3e909cc3871958d88cb54..1f521a692a43fd7d117b6c555c70116d0d47cde0 100644
+--- a/toolkit/content/net-error-card.mjs
++++ b/toolkit/content/net-error-card.mjs
+@@ -40,6 +40,8 @@ const FELT_PRIVACY_REFRESH = RPMGetBoolPref(
+   false
+ );
+ const EXPERT_BAD_CERT = getCSSClass() === "expertBadCert";
++const SUPPORT_BASE_URL = RPMGetFormatURLPref("app.support.baseURL");
++const ERROR_HELP_ENABLED = Boolean(SUPPORT_BASE_URL);
+ 
+ export class NetErrorCard extends MozLitElement {
+   static properties = {
+@@ -244,8 +246,8 @@ export class NetErrorCard extends MozLitElement {
+     // The URL that prompts us to show an offline support page should have the following
+     // format: "https://support.mozilla.org/1/firefox/%VERSION%/%OS%/%LOCALE%/supportPageSlug",
+     // so we can extract the support page slug.
+-    let baseURL = RPMGetFormatURLPref("app.support.baseURL");
+-    if (document.location.href.startsWith(baseURL)) {
++    const baseURL = SUPPORT_BASE_URL;
++    if (baseURL && document.location.href.startsWith(baseURL)) {
+       let supportPageSlug = document.location.pathname.split("/").pop();
+       RPMSendAsyncMessage("DisplayOfflineSupportPage", {
+         supportPageSlug,
+@@ -486,8 +488,12 @@ export class NetErrorCard extends MozLitElement {
+       whatCanYouDoL10nId: advancedConfig.whatCanYouDo?.dataL10nId,
+       whatCanYouDoL10nArgs: advancedConfig.whatCanYouDo?.dataL10nArgs,
+       importantNote: advancedConfig.importantNote,
+-      learnMoreL10nId: advancedConfig.learnMore?.dataL10nId,
+-      learnMoreSupportPage: advancedConfig.learnMore?.supportPage,
++      learnMoreL10nId: ERROR_HELP_ENABLED
++        ? advancedConfig.learnMore?.dataL10nId
++        : undefined,
++      learnMoreSupportPage: ERROR_HELP_ENABLED
++        ? advancedConfig.learnMore?.supportPage
++        : undefined,
+       viewCert: advancedConfig.showViewCertificate,
+       viewDateTime: advancedConfig.showDateTime,
+     };
+@@ -675,8 +681,12 @@ export class NetErrorCard extends MozLitElement {
+       whatCanYouDoL10nId: customNetError.whatCanYouDoL10nId,
+       whatCanYouDoL10nArgs: customNetError.whatCanYouDoL10nArgs,
+       whatCanYouDoItems: customNetError.whatCanYouDoItems,
+-      learnMoreL10nId: customNetError.learnMoreL10nId,
+-      learnMoreSupportPage: customNetError.learnMoreSupportPage,
++      learnMoreL10nId: ERROR_HELP_ENABLED
++        ? customNetError.learnMoreL10nId
++        : undefined,
++      learnMoreSupportPage: ERROR_HELP_ENABLED
++        ? customNetError.learnMoreSupportPage
++        : undefined,
+       errorCode:
+         this.errorInfo?.errorCodeString ||
+         (customNetError.showErrorCode ? config.errorCode : null),
+@@ -753,8 +763,7 @@ export class NetErrorCard extends MozLitElement {
+       !learnMoreSupportPage.startsWith("http://") &&
+       !learnMoreSupportPage.startsWith("https://")
+     ) {
+-      const baseURL = RPMGetFormatURLPref("app.support.baseURL");
+-      learnMoreHref = baseURL + learnMoreSupportPage;
++      learnMoreHref = SUPPORT_BASE_URL + learnMoreSupportPage;
+     }
+ 
+     let whatCanYouDoSection = null;
+diff --git a/toolkit/themes/shared/aboutHttpsOnlyError.css b/toolkit/themes/shared/aboutHttpsOnlyError.css
+index d405ef2759beadfb18ea84ab34465a36313c946a..113c974419abfba6e61f096e0e524ae5370624d9 100644
+--- a/toolkit/themes/shared/aboutHttpsOnlyError.css
++++ b/toolkit/themes/shared/aboutHttpsOnlyError.css
+@@ -93,3 +93,62 @@ button.disabled {
+   opacity: var(--button-opacity-disabled);
+   color: var(--button-text-color-disabled);
+ }
++
++@media -moz-pref("browser.desktop-embedder.material-error-pages") {
++  body {
++    width: 100%;
++  }
++
++  .title {
++    margin: 0;
++    padding: 56px 0 0;
++    background-image: url("chrome://global/skin/icons/desktop-embedder-error.svg");
++    background-position: left top;
++    background-size: 40px;
++    stroke: var(--embedder-error-secondary-text);
++    -moz-context-properties: stroke;
++  }
++
++  .title:dir(rtl) {
++    background-position: right top;
++  }
++
++  .title > h2 {
++    margin-bottom: 6px;
++    color: var(--embedder-error-secondary-text);
++    font-size: 12px;
++    font-weight: 500;
++    line-height: 1.5;
++  }
++
++  #learn-more-container,
++  #explanation-continue {
++    margin-block: 16px;
++  }
++
++  .button-container {
++    justify-content: flex-start;
++  }
++
++  .suggestion-box {
++    position: static;
++    margin: 24px 0 0;
++    padding: 16px;
++    border-radius: 16px;
++    background: var(--embedder-error-surface);
++    box-shadow: var(--embedder-error-shadow);
++    animation: fade-in 160ms ease-out;
++  }
++
++  .suggestion-box > h2 {
++    color: var(--embedder-error-text);
++    font-size: 16px;
++    font-weight: 500;
++  }
++
++  @media (prefers-reduced-motion: reduce) {
++    .suggestion-box {
++      animation: none;
++    }
++  }
++}
+diff --git a/toolkit/themes/shared/aboutNetError.css b/toolkit/themes/shared/aboutNetError.css
+index daa7e772d65143bd58ab07d92f77e70eae623ea9..cb60afea1e19a6eae9591cd1b5c30a26fd9a6304 100644
+--- a/toolkit/themes/shared/aboutNetError.css
++++ b/toolkit/themes/shared/aboutNetError.css
+@@ -267,3 +267,191 @@ button:disabled {
+     background-position-x: right;
+   }
+ }
++
++@media -moz-pref("browser.desktop-embedder.material-error-pages") {
++  body {
++    width: 100%;
++    background-image: none;
++  }
++
++  body.neterror .title,
++  body.certerror .title,
++  body.captiveportal .title,
++  body.blocked .title {
++    margin: 0;
++    padding: 56px 0 0;
++    background-image: url("chrome://global/skin/icons/desktop-embedder-error.svg");
++    background-position: left top;
++    background-size: 40px;
++    stroke: var(--embedder-error-secondary-text);
++    -moz-context-properties: stroke;
++  }
++
++  body.certerror .title:dir(rtl),
++  body.captiveportal .title:dir(rtl),
++  body.blocked .title:dir(rtl) {
++    background-position: right top;
++  }
++
++  #errorShortDesc {
++    margin: 0 0 10px;
++    color: var(--embedder-error-secondary-text);
++    font-size: 14px;
++    font-weight: 400;
++    line-height: 1.5;
++  }
++
++  #errorShortDesc2 {
++    margin: 0 0 12px;
++    color: var(--embedder-error-secondary-text);
++    font-size: 12px;
++    line-height: 1.5;
++  }
++
++  #errorLongDesc {
++    font-size: 14px;
++    line-height: 1.5;
++  }
++
++  #errorLongDesc > :first-child {
++    margin-top: 0;
++  }
++
++  #errorLongDesc > :last-child {
++    margin-bottom: 0;
++  }
++
++  #errorLongDesc ul {
++    margin-block: 8px 12px;
++    margin-inline-start: 20px;
++  }
++
++  #errorLongDesc li {
++    margin-bottom: 4px;
++  }
++
++  #learnMoreContainer {
++    margin-block: 12px 0;
++  }
++
++  #errorWhatToDoTitle {
++    margin-top: 24px;
++    color: var(--embedder-error-text);
++    font-weight: 500;
++  }
++
++  #certErrorAndCaptivePortalButtonContainer,
++  #netErrorButtonContainer {
++    align-items: center;
++    justify-content: flex-start;
++  }
++
++  #netErrorButtonContainer > button {
++    margin-top: 0;
++  }
++
++  button:disabled {
++    cursor: default;
++  }
++
++  .advanced-panel-container {
++    position: static;
++  }
++
++  .advanced-panel {
++    box-sizing: border-box;
++    width: 100%;
++    min-width: 0;
++    max-width: none;
++    margin: 24px 0 0;
++    padding: 20px;
++    border: 0;
++    border-radius: 16px;
++    background: var(--embedder-error-surface);
++    box-shadow: var(--embedder-error-shadow);
++  }
++
++  #advancedPanelButtonContainer {
++    gap: 8px;
++    justify-content: flex-start;
++    margin-top: 20px;
++    padding: 0;
++    background: transparent;
++  }
++
++  #badCertTechnicalInfo,
++  #viewCertificate {
++    margin-inline: 0;
++  }
++
++  #badCertTechnicalInfo {
++    margin-block: 0 16px;
++  }
++
++  #certificateErrorDebugInformation {
++    border: 0;
++  }
++
++  .trr-message-container,
++  #prefChangeContainer {
++    border: 0;
++    border-radius: 12px;
++    background: var(--embedder-error-surface);
++    padding: 16px;
++  }
++
++  .felt-privacy-body {
++    justify-content: center;
++  }
++
++  net-error-card {
++    box-sizing: border-box;
++    width: min(100%, 600px);
++    min-width: 0;
++    margin: 0;
++    padding: 0;
++  }
++
++  .felt-privacy-container {
++    display: block;
++  }
++
++  .felt-privacy-container::before {
++    display: block;
++    width: 40px;
++    height: 40px;
++    margin-bottom: 16px;
++    background: url("chrome://global/skin/icons/desktop-embedder-error.svg") center / 40px no-repeat;
++    content: "";
++    stroke: var(--embedder-error-secondary-text);
++    -moz-context-properties: stroke;
++  }
++
++  .img-container {
++    display: none;
++  }
++
++  .custom-net-error-card,
++  .advanced-container {
++    border-radius: 16px;
++  }
++
++  .advanced-container {
++    margin-top: 24px;
++    padding: 20px;
++    background: var(--embedder-error-surface);
++    box-shadow: var(--embedder-error-shadow);
++  }
++
++  @media (max-width: 970px) {
++    body.certerror .title {
++      margin: 0;
++      padding-top: 56px;
++      background-position: left top;
++    }
++
++    body.certerror .title:dir(rtl) {
++      background-position: right top;
++    }
++  }
++}
+diff --git a/toolkit/themes/shared/desktop-jar.inc.mn b/toolkit/themes/shared/desktop-jar.inc.mn
+index 9861375026d30e223279c0133b63319012d47771..e8379634b587b649e94278d14a2a2136a16f7262 100644
+--- a/toolkit/themes/shared/desktop-jar.inc.mn
++++ b/toolkit/themes/shared/desktop-jar.inc.mn
+@@ -81,6 +81,7 @@
+   skin/classic/global/icons/columnpicker.svg               (../../shared/icons/columnpicker.svg)
+   skin/classic/global/icons/content-analysis.svg           (../../shared/icons/content-analysis.svg)
+   skin/classic/global/icons/defaultFavicon.svg             (../../shared/icons/defaultFavicon.svg)
++  skin/classic/global/icons/desktop-embedder-error.svg     (../../shared/icons/desktop-embedder-error.svg)
+   skin/classic/global/icons/delete.svg                     (../../shared/icons/delete.svg)
+   skin/classic/global/icons/developer.svg                  (../../shared/icons/developer.svg)
+   skin/classic/global/icons/edit.svg                       (../../shared/icons/edit.svg)
+diff --git a/toolkit/themes/shared/icons/desktop-embedder-error.svg b/toolkit/themes/shared/icons/desktop-embedder-error.svg
+new file mode 100644
+index 0000000000000000000000000000000000000000..58e83c692ef32a8305e55f4aa64436db53fcbb0d
+--- /dev/null
++++ b/toolkit/themes/shared/icons/desktop-embedder-error.svg
+@@ -0,0 +1,7 @@
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" stroke="context-stroke" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
++  <path d="M10.5 3.5h18l9 9v32h-27z"/>
++  <path d="M28.5 3.5v10h9M18 25l12 12M30 25 18 37"/>
++</svg>
+diff --git a/toolkit/themes/shared/in-content/info-pages.css b/toolkit/themes/shared/in-content/info-pages.css
+index 0a59673d6eab84473d5cbe1f048dd5d3c74c9c23..099cb3a1605159a66a6e0dc5744ac494eb5ca839 100644
+--- a/toolkit/themes/shared/in-content/info-pages.css
++++ b/toolkit/themes/shared/in-content/info-pages.css
+@@ -188,3 +188,252 @@ td {
+ .content-flex {
+   flex: 1 1 65%;
+ }
++
++/* A desktop embedder can opt into a compact Material presentation for the
++ * engine-owned recovery documents without changing their privileged loading,
++ * retry, certificate or process-recovery semantics. */
++@media -moz-pref("browser.desktop-embedder.material-error-pages") {
++  :root.desktop-embedder-error-document,
++  :host {
++    --embedder-error-background: #ffffff;
++    --embedder-error-surface: #f1f3f4;
++    --embedder-error-surface-hover: #e8eaed;
++    --embedder-error-text: #202124;
++    --embedder-error-secondary-text: #5f6368;
++    --embedder-error-outline: #dadce0;
++    --embedder-error-primary: #0b57d0;
++    --embedder-error-primary-hover: #0a4fbe;
++    --embedder-error-primary-active: #0847aa;
++    --embedder-error-on-primary: #ffffff;
++    --embedder-error-focus: #0b57d0;
++    --embedder-error-shadow: 0 1px 2px rgb(60 64 67 / 30%), 0 2px 6px 2px rgb(60 64 67 / 15%);
++    --background-color-canvas: var(--embedder-error-background);
++    --background-color-box: var(--embedder-error-surface);
++    --background-color-box-info: var(--embedder-error-surface);
++    --text-color: var(--embedder-error-text);
++    --link-color: var(--embedder-error-primary);
++    --border-color: var(--embedder-error-outline);
++    --focus-outline: 2px solid var(--embedder-error-focus);
++    --focus-outline-color: var(--embedder-error-focus);
++    --focus-outline-width: 2px;
++    --focus-outline-offset: 2px;
++    --button-min-height: 36px;
++    --button-border-radius: 18px;
++    --button-padding: 0 16px;
++    --button-border: 1px solid var(--embedder-error-outline);
++    --button-background-color: transparent;
++    --button-background-color-hover: var(--embedder-error-surface);
++    --button-background-color-active: var(--embedder-error-surface-hover);
++    --button-background-color-selected: var(--embedder-error-surface-hover);
++    --button-background-color-disabled: transparent;
++    --button-border-color-hover: var(--embedder-error-secondary-text);
++    --button-border-color-active: var(--embedder-error-text);
++    --button-border-color-selected: var(--embedder-error-text);
++    --button-border-color-disabled: var(--embedder-error-outline);
++    --button-text-color: var(--embedder-error-primary);
++    --button-text-color-hover: var(--embedder-error-primary);
++    --button-text-color-active: var(--embedder-error-primary);
++    --button-text-color-selected: var(--embedder-error-primary);
++    --button-text-color-disabled: var(--embedder-error-secondary-text);
++    --button-background-color-primary: var(--embedder-error-primary);
++    --button-background-color-primary-hover: var(--embedder-error-primary-hover);
++    --button-background-color-primary-active: var(--embedder-error-primary-active);
++    --button-background-color-primary-selected: var(--embedder-error-primary-active);
++    --button-background-color-primary-disabled: var(--embedder-error-primary);
++    --button-border-color-primary: transparent;
++    --button-border-color-primary-hover: transparent;
++    --button-border-color-primary-active: transparent;
++    --button-border-color-primary-selected: transparent;
++    --button-border-color-primary-disabled: transparent;
++    --button-text-color-primary: var(--embedder-error-on-primary);
++    --button-text-color-primary-hover: var(--embedder-error-on-primary);
++    --button-text-color-primary-active: var(--embedder-error-on-primary);
++    --button-text-color-primary-selected: var(--embedder-error-on-primary);
++    --button-text-color-primary-disabled: var(--embedder-error-on-primary);
++  }
++
++  @media (prefers-color-scheme: dark) {
++    :root.desktop-embedder-error-document,
++    :host {
++      --embedder-error-background: #202124;
++      --embedder-error-surface: #292a2d;
++      --embedder-error-surface-hover: #35363a;
++      --embedder-error-text: #e8eaed;
++      --embedder-error-secondary-text: #bdc1c6;
++      --embedder-error-outline: #5f6368;
++      --embedder-error-primary: #8ab4f8;
++      --embedder-error-primary-hover: #aecbfa;
++      --embedder-error-primary-active: #c2d7fa;
++      --embedder-error-on-primary: #202124;
++      --embedder-error-focus: #8ab4f8;
++      --embedder-error-shadow: 0 1px 2px rgb(0 0 0 / 45%), 0 2px 8px 2px rgb(0 0 0 / 32%);
++    }
++  }
++
++  @media (forced-colors) {
++    :root.desktop-embedder-error-document,
++    :host {
++      --embedder-error-background: Canvas;
++      --embedder-error-surface: Canvas;
++      --embedder-error-surface-hover: SelectedItem;
++      --embedder-error-text: CanvasText;
++      --embedder-error-secondary-text: CanvasText;
++      --embedder-error-outline: ButtonBorder;
++      --embedder-error-primary: LinkText;
++      --embedder-error-primary-hover: LinkText;
++      --embedder-error-primary-active: LinkText;
++      --embedder-error-on-primary: Canvas;
++      --embedder-error-focus: Highlight;
++      --embedder-error-shadow: none;
++    }
++  }
++
++  :root.desktop-embedder-error-document body {
++    align-items: center;
++    justify-content: flex-start;
++    min-width: 0;
++    padding: clamp(56px, 15vh, 112px) clamp(24px, 8vw, 112px);
++    background: var(--embedder-error-background);
++    color: var(--embedder-error-text);
++    font-family: system-ui, sans-serif;
++    font-size: 14px;
++    line-height: 1.5;
++  }
++
++  :host {
++    box-sizing: border-box;
++    color: var(--embedder-error-text);
++    font-family: system-ui, sans-serif;
++    font-size: 14px;
++    line-height: 1.5;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) .container {
++    box-sizing: border-box;
++    width: min(100%, 600px);
++    min-width: 0;
++    max-width: 600px;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) .title {
++    min-height: 0;
++    margin: 0;
++    padding: 56px 0 0;
++    background-position: left top;
++    background-size: 40px;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) .title:dir(rtl) {
++    background-position: right top;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) :is(.title-text, h1) {
++    margin: 0 0 12px;
++    padding: 0;
++    color: var(--embedder-error-text);
++    font-size: 24px;
++    font-weight: 500;
++    line-height: 1.3;
++    letter-spacing: -0.01em;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) :is(h2, h3) {
++    color: var(--embedder-error-text);
++    font-weight: 500;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) :is(p, li) {
++    color: var(--embedder-error-secondary-text);
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) a {
++    color: var(--embedder-error-primary);
++    text-underline-offset: 2px;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) :is(.button-container, moz-button-group) {
++    gap: 8px;
++    margin-top: 20px;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button {
++    min-height: 36px;
++    margin: 0;
++    padding: 0 16px;
++    border: 1px solid var(--embedder-error-outline);
++    border-radius: 18px;
++    background: transparent;
++    color: var(--embedder-error-primary);
++    font:
++      500 14px/20px system-ui,
++      sans-serif;
++    transition:
++      background-color 120ms ease,
++      border-color 120ms ease,
++      box-shadow 120ms ease;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button:enabled:hover {
++    border-color: var(--embedder-error-secondary-text);
++    background: var(--embedder-error-surface);
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button:enabled:hover:active {
++    border-color: var(--embedder-error-text);
++    background: var(--embedder-error-surface-hover);
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button.primary {
++    border-color: transparent;
++    background: var(--embedder-error-primary);
++    color: var(--embedder-error-on-primary);
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button.primary:enabled:hover {
++    border-color: transparent;
++    background: var(--embedder-error-primary-hover);
++    box-shadow: 0 1px 2px rgb(60 64 67 / 30%);
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button.primary:enabled:hover:active {
++    border-color: transparent;
++    background: var(--embedder-error-primary-active);
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) button:focus-visible {
++    outline: 2px solid var(--embedder-error-focus);
++    outline-offset: 2px;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) :is(button:disabled, button.disabled) {
++    cursor: default;
++    opacity: 0.38;
++  }
++
++  :is(:root.desktop-embedder-error-document, :host) moz-button {
++    --button-font-size: 14px;
++    --button-font-weight: 500;
++    --button-opacity-disabled: 0.38;
++  }
++
++  @media (prefers-reduced-motion: reduce) {
++    :is(:root.desktop-embedder-error-document, :host) button {
++      transition: none;
++    }
++  }
++
++  @media (max-width: 480px) {
++    :root.desktop-embedder-error-document body {
++      padding: 32px 24px;
++    }
++
++    :is(:root.desktop-embedder-error-document, :host) :is(.button-container, moz-button-group) {
++      align-items: stretch;
++      flex-direction: column;
++    }
++
++    :is(:root.desktop-embedder-error-document, :host) :is(.button-container > button, moz-button) {
++      width: 100%;
++    }
++  }
++}

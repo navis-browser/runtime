@@ -1,0 +1,33 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/process/ServiceUtils.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/process/ServiceUtils.java
+index 2027f90489ed7597ac2f728c70da934279492533..9f6a917790699a9df4403a4b7272195d76104edc 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/process/ServiceUtils.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/process/ServiceUtils.java
+@@ -13,15 +13,26 @@ import androidx.annotation.NonNull;
+ 
+ /* package */ final class ServiceUtils {
+   private static final String DEFAULT_ISOLATED_CONTENT_SERVICE_NAME_SUFFIX = "0";
++  private static String sServiceClassPrefix;
+ 
+   private ServiceUtils() {}
+ 
++  static synchronized void setServiceClassPrefix(final String prefix) {
++    if (sServiceClassPrefix != null && !sServiceClassPrefix.equals(prefix)) {
++      throw new IllegalStateException("Child service namespace is already selected");
++    }
++    sServiceClassPrefix = prefix;
++  }
++
+   /**
+    * @return StringBuilder containing the name of a service class but not qualifed with any unique
+    *     identifiers.
+    */
+-  private static StringBuilder startSvcName(@NonNull final GeckoProcessType type) {
+-    final StringBuilder builder = new StringBuilder(GeckoChildProcessServices.class.getName());
++  private static synchronized StringBuilder startSvcName(@NonNull final GeckoProcessType type) {
++    if (sServiceClassPrefix == null) {
++      sServiceClassPrefix = GeckoChildProcessServices.class.getName();
++    }
++    final StringBuilder builder = new StringBuilder(sServiceClassPrefix);
+     builder.append("$").append(type);
+     return builder;
+   }

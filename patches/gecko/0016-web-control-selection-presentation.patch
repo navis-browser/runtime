@@ -1,0 +1,393 @@
+diff --git a/layout/generic/nsTextPaintStyle.cpp b/layout/generic/nsTextPaintStyle.cpp
+index 9dba72de611cd84ed07805f5ce40f882071240f0..54374a672999c3573fa7989320aab4c09bb910cb 100644
+--- a/layout/generic/nsTextPaintStyle.cpp
++++ b/layout/generic/nsTextPaintStyle.cpp
+@@ -14,9 +14,46 @@
+ #include "nsStyleConsts.h"
+ #include "nsTextFrame.h"
+ 
++#ifdef MOZ_NAVIS_CORE
++#  include "mozilla/PreferenceSheet.h"
++#  include "mozilla/Preferences.h"
++#  include "mozilla/StaticPrefs_widget.h"
++#endif
++
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ 
++#ifdef MOZ_NAVIS_CORE
++static void GetNavisSelectionColors(nsTextFrame* aFrame, nscolor& aForeground,
++                                   nscolor& aBackground) {
++  const auto* doc = aFrame->PresContext()->Document();
++  const auto& prefs = PreferenceSheet::PrefsFor(*doc);
++  if (!prefs.mUseDocumentColors || prefs.mUseAccessibilityTheme ||
++      StaticPrefs::widget_non_native_theme_always_high_contrast() ||
++      LookAndFeel::ShouldUseStandins(*doc, LookAndFeel::ColorID::Highlight) ==
++          LookAndFeel::UseStandins::Yes) {
++    return;
++  }
++
++  nscolor accent = NS_RGB(0x0b, 0x57, 0xd0);
++  nsAutoCString value;
++  if (NS_SUCCEEDED(Preferences::GetCString("navis.appearance.accent", value)) &&
++      value.Length() == 7 && value[0] == '#') {
++    nscolor parsed;
++    if (NS_HexToRGBA(NS_ConvertUTF8toUTF16(Substring(value, 1)),
++                     nsHexColorType::NoAlpha, &parsed)) {
++      accent = parsed;
++    }
++  }
++  const bool dark =
++      LookAndFeel::ColorSchemeForFrame(aFrame) == ColorScheme::Dark;
++  aForeground = dark ? NS_RGB(0xe3, 0xe3, 0xe3) : NS_RGB(0x1f, 0x1f, 0x1f);
++  aBackground = NS_ComposeColors(
++      dark ? NS_RGB(0x29, 0x2c, 0x30) : NS_RGB(0xff, 0xff, 0xff),
++      NS_RGBA(NS_GET_R(accent), NS_GET_G(accent), NS_GET_B(accent), 51));
++}
++#endif
++
+ static nscolor EnsureDifferentColors(nscolor colorA, nscolor colorB) {
+   if (colorA == colorB) {
+     nscolor res;
+@@ -488,6 +525,9 @@ bool nsTextPaintStyle::InitSelectionColorsAndShadow() {
+     }
+     case nsISelectionController::SELECTION_ON: {
+       mSelectionBGColor = selectionBGColor;
++#ifdef MOZ_NAVIS_CORE
++      GetNavisSelectionColors(mFrame, mSelectionTextColor, mSelectionBGColor);
++#endif
+       break;
+     }
+     default: {
+diff --git a/modules/libpref/init/all.js b/modules/libpref/init/all.js
+index 4da247c8e9c2995505f3633c8a2981ba161439ef..30842b00e9143c80ae164de4db7c2b300c50d2c7 100644
+--- a/modules/libpref/init/all.js
++++ b/modules/libpref/init/all.js
+@@ -18,6 +18,10 @@
+ // improves readability, particular for conditional blocks that exceed a single
+ // screen.
+ 
++#ifdef MOZ_NAVIS_CORE
++  pref("navis.appearance.accent", "#0b57d0");
++#endif
++
+ pref("security.tls.insecure_fallback_hosts", "");
+ 
+ pref("security.default_personal_cert",   "Ask Every Time");
+diff --git a/toolkit/modules/DateTimePickerPanel.sys.mjs b/toolkit/modules/DateTimePickerPanel.sys.mjs
+index 7f81baa64f265253ee64e53befaedd9677262039..2d800ad8fa889f9014734e371ec5334c71f31897 100644
+--- a/toolkit/modules/DateTimePickerPanel.sys.mjs
++++ b/toolkit/modules/DateTimePickerPanel.sys.mjs
+@@ -6,12 +6,12 @@ import { InputPickerPanelCommon } from "./InputPickerPanelCommon.sys.mjs";
+ 
+ /** @import {OpenPickerInfo} from "./InputPickerPanelCommon.sys.mjs" */
+ 
+-const TIME_PICKER_WIDTH = "12.8em";
+-const TIME_PICKER_HEIGHT = "22.8em";
+-const DATE_PICKER_WIDTH = "24em";
+-const DATE_PICKER_HEIGHT = "26.9em";
+-const DATETIME_PICKER_WIDTH = "39.8em";
+-const DATETIME_PICKER_HEIGHT = "26.9em";
++const TIME_PICKER_WIDTH = "11em";
++const TIME_PICKER_HEIGHT = "25.7em";
++const DATE_PICKER_WIDTH = "19.2em";
++const DATE_PICKER_HEIGHT = "24.5em";
++const DATETIME_PICKER_WIDTH = "31.2em";
++const DATETIME_PICKER_HEIGHT = "25.7em";
+ 
+ export class DateTimePickerPanel extends InputPickerPanelCommon {
+   constructor(element) {
+diff --git a/toolkit/themes/shared/datetimeinputpickers.css b/toolkit/themes/shared/datetimeinputpickers.css
+index 55c15c9f4d5af7093191bc4ff3e59cd122766bac..73c14054915950e1d3e2cbbf364ffe3f0b31f111 100644
+--- a/toolkit/themes/shared/datetimeinputpickers.css
++++ b/toolkit/themes/shared/datetimeinputpickers.css
+@@ -4,7 +4,7 @@
+ 
+ :root {
+   --border-style: 0.1rem solid;
+-  --border-radius: 0.3rem;
++  --border-radius: 0.2rem;
+   --border-color: ButtonBorder;
+   --button-text-color: ButtonText;
+   --button-text-color-hover: SelectedItemText;
+@@ -14,8 +14,9 @@
+   --button-background-active: SelectedItemText;
+   --button-border-hover: SelectedItem;
+   --button-border-active: SelectedItem;
+-  --today-background: Mark;
+-  --today-color: MarkText;
++  --today-background: transparent;
++  --today-color: inherit;
++  --today-border-color: color-mix(in srgb, FieldText 55%, transparent);
+   --navigation-arrow-color-hover: SelectedItemText;
+   --navigation-arrow-color-active: SelectedItem;
+   --navigation-arrow-background-hover: SelectedItem;
+@@ -25,18 +26,16 @@
+   --navigation-arrow-fill-opacity: 1;
+   --navigation-arrow-fill-opacity-hover: 1;
+   --navigation-arrow-fill-opacity-active: 1;
+-  --calendar-item-background-hover: color-mix(in srgb, FieldText 20%, transparent);
++  --calendar-item-background-hover: color-mix(in srgb, SelectedItem 18%, transparent);
+ 
+-  /* Use -moz-activehyperlinktext to get a system color that
+-     by default will be closest to Red */
+-  --weekend-font-color: -moz-activehyperlinktext;
++  --weekend-font-color: inherit;
+ 
+-  --disabled-background-color: ButtonShadow;
+-  --disabled-opacity: 0.5;
++  --disabled-background-color: transparent;
++  --disabled-opacity: 0.38;
+ 
+   /* TODO: these need to be in sync (ish) with DateTimePickerPanel.sys.mjs */
+   font-size: 10px;
+-  --font-size-default: 1.1rem;
++  --font-size-default: 1.2rem;
+   --spinner-width: 3rem;
+   --spinner-margin-block: 0.4rem;
+   --spinner-item-height: 2.4rem;
+@@ -45,7 +44,7 @@
+   --colon-width: 2rem;
+   --day-period-spacing-width: 1rem;
+   --date-picker-item-height: 2.4rem;
+-  --date-picker-item-width: 3.3rem;
++  --date-picker-item-width: 2.4rem;
+   --outline-width: 0.2rem;
+ 
+   /* We need to hide the scroll bar but maintain its scrolling
+@@ -64,8 +63,7 @@
+     --button-background-active: color-mix(in srgb, FieldText 30%, transparent);
+     --button-border-hover: var(--border-color);
+     --button-border-active: var(--border-color);
+-    --today-background: color-mix(in srgb, FieldText 30%, transparent);
+-    --today-color: inherit;
++    --today-background: transparent;
+     --navigation-arrow-color-hover: inherit;
+     --navigation-arrow-color-active: inherit;
+     --navigation-arrow-background-hover: transparent;
+@@ -127,10 +125,17 @@ button:focus-visible {
+ 
+ .month-year-nav {
+   display: flex;
+-  justify-content: space-between;
++  align-items: center;
++  justify-content: flex-end;
++  gap: 0.4rem;
+   margin-bottom: 0.8rem;
+ }
+ 
++.month-year-container {
++  order: -1;
++  flex: 1;
++}
++
+ .month-year-nav[monthPickerVisible] {
+   flex-direction: column;
+   justify-content: center;
+@@ -165,23 +170,26 @@ button:focus-visible {
+   fill-opacity: var(--navigation-arrow-fill-opacity-active);
+ }
+ 
+-.month-year-nav > button.prev:dir(ltr),
+-.month-year-nav > button.next:dir(rtl) {
+-  background-image: url("chrome://global/skin/icons/arrow-left.svg");
++.month-year-nav > button.prev {
++  background-image: url("chrome://global/skin/icons/arrow-up.svg");
+ }
+ 
+-.month-year-nav > button.prev:dir(rtl),
+-.month-year-nav > button.next:dir(ltr) {
+-  background-image: url("chrome://global/skin/icons/arrow-right.svg");
++.month-year-nav > button.next {
++  background-image: url("chrome://global/skin/icons/arrow-down.svg");
+ }
+ 
+ button.month-year {
+-  font-size: 1.3rem;
++  width: 100%;
++  font-size: 1.2rem;
++  font-weight: var(--font-weight-bold);
++  text-align: start;
+   height: var(--date-picker-item-height);
+-  padding-block: 0.2rem 0.3rem;
+-  padding-inline: 1.2rem 2.6rem;
++  padding-block: 0;
++  padding-inline: 0 1.8rem;
++  background-color: transparent;
+   background-image: url("chrome://global/skin/icons/arrow-down.svg");
+-  background-position-x: right 0.5rem;
++  background-position-x: right 0.2rem;
++  border-color: transparent;
+ }
+ 
+ @media not (prefers-contrast) {
+@@ -191,7 +199,8 @@ button.month-year {
+ }
+ 
+ button.month-year:dir(rtl) {
+-  background-position-x: left 0.5rem;
++  padding-inline: 1.8rem 0;
++  background-position-x: left 0.2rem;
+ }
+ 
+ button.month-year:hover {
+@@ -270,8 +279,8 @@ button.month-year.active {
+ .days-view > tr > td.today {
+   background-color: var(--today-background);
+   color: var(--today-color);
+-  border-color: transparent;
+-  font-weight: var(--font-weight-bold);
++  border-color: var(--today-border-color);
++  font-weight: inherit;
+ }
+ 
+ .days-view > tr > td.today:hover {
+@@ -293,6 +302,7 @@ button.month-year.active {
+ .days-view > tr > td.off-step {
+   background-color: var(--disabled-background-color);
+   border-color: transparent;
++  opacity: var(--disabled-opacity);
+ }
+ 
+ .weekend {
+@@ -301,9 +311,12 @@ button.month-year.active {
+ 
+ #clear-button {
+   height: var(--date-picker-item-height);
+-  font-size: 1.3rem;
++  font-size: 1.2rem;
+   margin-top: 0.8rem;
+-  padding-inline: 1.2rem;
++  padding-inline: 0.8rem;
++  color: LinkText;
++  background-color: transparent;
++  border-color: transparent;
+ }
+ 
+ #time-picker,
+diff --git a/toolkit/themes/shared/media/videocontrols.css b/toolkit/themes/shared/media/videocontrols.css
+index beec584dc01ba2cfd42432d00bb62ad5eb6c28f1..965365a856b67e73a57ee99eadae19fe7fc0e65a 100644
+--- a/toolkit/themes/shared/media/videocontrols.css
++++ b/toolkit/themes/shared/media/videocontrols.css
+@@ -29,15 +29,15 @@
+ }
+ 
+ .controlsContainer {
+-  --clickToPlay-size: 48px;
+-  --button-size: 30px;
++  --clickToPlay-size: 72px;
++  --button-size: 32px;
+   --timer-size: 40px;
+   --timer-long-size: 60px;
+-  --track-size: 5px;
+-  --thumb-size: 13px;
+-  --label-font-size: 13px;
++  --track-size: 4px;
++  --thumb-size: 12px;
++  --label-font-size: 12px;
+   --pip-toggle-padding: 5px;
+-  --control-focus-outline: 2px solid #00ddff;
++  --control-focus-outline: 2px solid #8ab4f8;
+   --control-focus-outline-offset: -2px;
+   --pip-toggle-icon-width-height: 16px;
+   --pip-toggle-translate-x: calc(100% - var(--pip-toggle-icon-width-height) - 2 * var(--pip-toggle-padding));
+@@ -146,9 +146,20 @@
+   justify-content: center;
+   align-items: center;
+   overflow: hidden;
+-  height: 40px;
+-  padding: 0 9px;
+-  background-color: rgba(26, 26, 26, 0.8);
++  height: 48px;
++  padding: 8px 8px 0;
++  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.92));
++}
++
++:host(audio) .controlsContainer {
++  color: CanvasText;
++}
++
++:host(audio) .controlBar {
++  height: 54px;
++  padding: 0 10px;
++  border-radius: 27px;
++  background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+ }
+ 
+ .touch .controlBar {
+@@ -191,11 +202,15 @@
+ }
+ 
+ .controlBar > .button:enabled:hover {
+-  fill: #48a0f7;
++  border-radius: 50%;
++  background-color: rgba(32, 33, 36, 0.71);
++  color: #fff;
++  fill: currentColor;
+ }
+ 
+ .controlBar > .button:enabled:hover:active {
+-  fill: #2d89e6;
++  background-color: rgba(32, 33, 36, 0.88);
++  fill: currentColor;
+ }
+ 
+ .playButton {
+@@ -321,17 +336,17 @@
+ }
+ 
+ .progressBar::-moz-progress-bar {
+-  background-color: #00b6f0;
++  background-color: #8ab4f8;
+ }
+ 
+ .scrubber:hover::-moz-range-thumb,
+ .volumeControl:hover::-moz-range-thumb {
+-  background-color: #48a0f7;
++  background-color: #8ab4f8;
+ }
+ 
+ .scrubber:active::-moz-range-thumb,
+ .volumeControl:active::-moz-range-thumb {
+-  background-color: #2d89e6;
++  background-color: #aecbfa;
+ }
+ 
+ .scrubber::-moz-range-track,
+@@ -502,18 +517,18 @@
+   background-repeat: no-repeat;
+   background-position: 54% 50%;
+   background-size: 40% 40%;
+-  background-color: #1a1a1a;
++  background-color: rgba(255, 255, 255, 0.9);
+   -moz-context-properties: fill;
+   fill: currentColor;
+-  color: inherit;
+-  opacity: 0.8;
++  color: #202124;
++  opacity: 1;
+   position: relative;
+   top: 20px;
+ }
+ 
+ .controlsSpacerStack:hover > .clickToPlay,
+ .clickToPlay:hover {
+-  opacity: 0.55;
++  opacity: 0.9;
+ }
+ 
+ .controlsSpacerStack:hover > .clickToPlay[fadeout] {
+diff --git a/widget/nsXPLookAndFeel.cpp b/widget/nsXPLookAndFeel.cpp
+index 34b327e08b2d66b63a63a67697864f9f7a5b4331..35e47a68c8eabefa9cb45f07a9c8a20d7d4165d9 100644
+--- a/widget/nsXPLookAndFeel.cpp
++++ b/widget/nsXPLookAndFeel.cpp
+@@ -502,6 +502,9 @@ static constexpr struct {
+   widget::ThemeChangeKind mChangeKind =
+       widget::ThemeChangeKind::MediaQueriesOnly;
+ } kMediaQueryPrefs[] = {
++#ifdef MOZ_NAVIS_CORE
++    {"navis.appearance.accent"_ns, widget::ThemeChangeKind::Style},
++#endif
+     // Affects whether standins are used for the accent color.
+     {"widget.non-native-theme.use-theme-accent"_ns,
+      widget::ThemeChangeKind::Style},

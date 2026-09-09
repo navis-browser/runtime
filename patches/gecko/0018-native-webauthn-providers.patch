@@ -1,0 +1,1275 @@
+diff --git a/dom/webauthn/AndroidWebAuthnService.cpp b/dom/webauthn/AndroidWebAuthnService.cpp
+index 906bb022071d0815b2bb54bd6fff1e33e61eb9a1..b3d1a94cdc31bd65ae5e3e1ee3a464d770150106 100644
+--- a/dom/webauthn/AndroidWebAuthnService.cpp
++++ b/dom/webauthn/AndroidWebAuthnService.cpp
+@@ -12,7 +12,12 @@
+ #include "mozilla/StaticPrefs_security.h"
+ #include "mozilla/StaticPtr.h"
+ #include "mozilla/ipc/BackgroundParent.h"
+-#include "mozilla/java/WebAuthnTokenManagerWrappers.h"
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++#  include "mozilla/dom/BrowsingContext.h"
++#  include "mozilla/java/NavisAndroidWebAuthnWrappers.h"
++#else
++#  include "mozilla/java/WebAuthnTokenManagerWrappers.h"
++#endif
+ #include "mozilla/jni/Conversions.h"
+ #include "mozilla/jni/GeckoBundleUtils.h"
+ 
+@@ -33,7 +38,12 @@ NS_IMPL_ISUPPORTS(AndroidWebAuthnService, nsIWebAuthnService)
+ 
+ NS_IMETHODIMP
+ AndroidWebAuthnService::GetIsUVPAA(bool* aAvailable) {
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  *aAvailable = java::NavisAndroidWebAuthn::IsAvailable();
++  return NS_OK;
++#else
+   return NS_ERROR_NOT_IMPLEMENTED;
++#endif
+ }
+ 
+ NS_IMETHODIMP
+@@ -43,6 +53,26 @@ AndroidWebAuthnService::MakeCredential(uint64_t aTransactionId,
+                                        nsIWebAuthnRegisterPromise* aPromise) {
+   MOZ_ASSERT(NS_IsMainThread());
+ 
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  RefPtr<BrowsingContext> context = BrowsingContext::Get(aBrowsingContextId);
++  if (!context || context->IsDiscarded() || !context->IsTop()) {
++    aPromise->Reject(NS_ERROR_DOM_ABORT_ERR);
++    return NS_OK;
++  }
++  nsString origin;
++  nsString json;
++  nsTArray<uint8_t> clientDataHash;
++  uint32_t timeout = 0;
++  if (NS_FAILED(aArgs->GetOrigin(origin)) || NS_FAILED(aArgs->GetJson(json)) ||
++      NS_FAILED(aArgs->GetClientDataHash(clientDataHash)) ||
++      NS_FAILED(aArgs->GetTimeoutMS(&timeout))) {
++    aPromise->Reject(NS_ERROR_DOM_DATA_ERR);
++    return NS_OK;
++  }
++  auto hash = jni::ByteArray::From(clientDataHash);
++  auto result = java::NavisAndroidWebAuthn::MakeCredential(
++      aTransactionId, aBrowsingContextId, origin, hash, json, timeout);
++#else
+   GECKOBUNDLE_START(credentialBundle);
+   GECKOBUNDLE_PUT(credentialBundle, "isWebAuthn",
+                   java::sdk::Integer::ValueOf(1));
+@@ -196,6 +226,7 @@ AndroidWebAuthnService::MakeCredential(uint64_t aTransactionId,
+   auto result = java::WebAuthnTokenManager::WebAuthnMakeCredential(
+       credentialBundle, uid, challenge, idList, transportList, authSelBundle,
+       extensionsBundle, algs, hash, json);
++#endif
+ 
+   auto geckoResult = java::GeckoResult::LocalRef(std::move(result));
+ 
+@@ -221,6 +252,26 @@ AndroidWebAuthnService::GetAssertion(uint64_t aTransactionId,
+                                      nsIWebAuthnSignPromise* aPromise) {
+   MOZ_ASSERT(NS_IsMainThread());
+ 
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  RefPtr<BrowsingContext> context = BrowsingContext::Get(aBrowsingContextId);
++  if (!context || context->IsDiscarded() || !context->IsTop()) {
++    aPromise->Reject(NS_ERROR_DOM_ABORT_ERR);
++    return NS_OK;
++  }
++  nsString origin;
++  nsString json;
++  nsTArray<uint8_t> clientDataHash;
++  uint32_t timeout = 0;
++  if (NS_FAILED(aArgs->GetOrigin(origin)) || NS_FAILED(aArgs->GetJson(json)) ||
++      NS_FAILED(aArgs->GetClientDataHash(clientDataHash)) ||
++      NS_FAILED(aArgs->GetTimeoutMS(&timeout))) {
++    aPromise->Reject(NS_ERROR_DOM_DATA_ERR);
++    return NS_OK;
++  }
++  auto hash = jni::ByteArray::From(clientDataHash);
++  auto result = java::NavisAndroidWebAuthn::GetAssertion(
++      aTransactionId, aBrowsingContextId, origin, hash, json, timeout);
++#else
+   nsTArray<uint8_t> challBuf;
+   (void)aArgs->GetChallenge(challBuf);
+   jni::ByteBuffer::LocalRef challenge = jni::ByteBuffer::New(
+@@ -297,6 +348,7 @@ AndroidWebAuthnService::GetAssertion(uint64_t aTransactionId,
+   auto result = java::WebAuthnTokenManager::WebAuthnGetAssertion(
+       challenge, idList, transportList, assertionBundle, extensionsBundle, hash,
+       json);
++#endif
+   auto geckoResult = java::GeckoResult::LocalRef(std::move(result));
+   MozPromise<RefPtr<WebAuthnSignResult>, AndroidWebAuthnError,
+              true>::FromGeckoResult(geckoResult)
+@@ -315,13 +367,21 @@ AndroidWebAuthnService::GetAssertion(uint64_t aTransactionId,
+ NS_IMETHODIMP
+ AndroidWebAuthnService::Reset() {
+   MOZ_ASSERT(NS_IsMainThread());
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  java::NavisAndroidWebAuthn::CancelAll();
++#endif
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ AndroidWebAuthnService::Cancel(uint64_t aTransactionId) {
+   MOZ_ASSERT(NS_IsMainThread());
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  java::NavisAndroidWebAuthn::CancelTransaction(aTransactionId);
++  return NS_OK;
++#else
+   return NS_ERROR_NOT_IMPLEMENTED;
++#endif
+ }
+ 
+ NS_IMETHODIMP
+diff --git a/dom/webauthn/AndroidWebAuthnService.h b/dom/webauthn/AndroidWebAuthnService.h
+index 872de75c67b0d9a6fca75134369786327dcb43f2..a0574dafcea5fe20136ef83eaf5214ea666e4257 100644
+--- a/dom/webauthn/AndroidWebAuthnService.h
++++ b/dom/webauthn/AndroidWebAuthnService.h
+@@ -5,7 +5,13 @@
+ #ifndef mozilla_dom_AndroidWebAuthnService_h_
+ #define mozilla_dom_AndroidWebAuthnService_h_
+ 
+-#include "mozilla/java/WebAuthnTokenManagerNatives.h"
++#include <android/log.h>
++
++#include "nsString.h"
++
++#ifndef MOZ_NAVIS_ANDROID_RUNTIME
++#  include "mozilla/java/WebAuthnTokenManagerNatives.h"
++#endif
+ #include "nsIWebAuthnService.h"
+ 
+ namespace mozilla {
+diff --git a/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs b/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs
+index 1bafa6e8eb4053d0278f7f12ef172fbbaad3eab6..734b840238e3345b9bd8e1d26a902784b4c7dd23 100644
+--- a/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs
++++ b/dom/webauthn/WebAuthnRelatedOriginFetcher.sys.mjs
+@@ -217,6 +217,49 @@ export class WebAuthnRelatedOriginFetcher {
+   }
+ 
+   _showDesktopPrompt(aManager, aRpId, aIsCreate) {
++    const browser = aManager.browsingContext.top.embedderElement;
++    if (
++      typeof browser?.desktopEmbedderWebAuthnRelatedOriginPrompt === "function"
++    ) {
++      const request = Object.freeze({
++        browsingContextId: aManager.browsingContext.id,
++        origin: aManager.documentPrincipal.originNoSuffix,
++        rpId: aRpId,
++        isCreate: aIsCreate,
++      });
++      let active = true;
++      const prompt = {
++        remove: () => {
++          if (!active) {
++            return;
++          }
++          active = false;
++          browser.desktopEmbedderWebAuthnRelatedOriginPromptCanceled?.(request);
++        },
++      };
++      this._currentPrompt = prompt;
++      let decision;
++      try {
++        decision = browser.desktopEmbedderWebAuthnRelatedOriginPrompt(request);
++      } catch {
++        decision = false;
++      }
++      const settle = allow => {
++        if (!active || this._currentPrompt !== prompt || !this._callback) {
++          return;
++        }
++        active = false;
++        this._currentPrompt = null;
++        if (allow === true) {
++          this._resolve();
++        } else {
++          this._userCancel();
++        }
++      };
++      Promise.resolve(decision).then(settle, () => settle(false));
++      return;
++    }
++
+     if (!l10n) {
+       l10n = new Localization(
+         ["branding/brand.ftl", "toolkit/webauthnDialog.ftl"],
+diff --git a/dom/webauthn/WebAuthnService.h b/dom/webauthn/WebAuthnService.h
+index 4d794796c7dc50e344e49d0d0a41913875d008e9..ab210653fa2c1fad403f1a97551df85459ffceeb 100644
+--- a/dom/webauthn/WebAuthnService.h
++++ b/dom/webauthn/WebAuthnService.h
+@@ -12,7 +12,7 @@
+ #include "nsIWebAuthnService.h"
+ #include "nsTHashSet.h"
+ 
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID)
+ #  include "AndroidWebAuthnService.h"
+ #endif
+ 
+diff --git a/dom/webauthn/WinWebAuthnService.cpp b/dom/webauthn/WinWebAuthnService.cpp
+index cc8ffe73085ad523e39347d4c5c9702c68d9b9c6..87e1fc0d65395bbae061be28b0878e5ca6f29707 100644
+--- a/dom/webauthn/WinWebAuthnService.cpp
++++ b/dom/webauthn/WinWebAuthnService.cpp
+@@ -15,6 +15,7 @@
+ #include "mozilla/StaticMutex.h"
+ #include "mozilla/dom/PWebAuthnTransactionParent.h"
+ #include "mozilla/ipc/BackgroundParent.h"
++#include "nsITimer.h"
+ #include "nsTextFormatter.h"
+ #include "nsWindowsHelpers.h"
+ #include "winwebauthn/webauthn.h"
+@@ -214,6 +215,27 @@ WinWebAuthnService::GetIsUVPAA(bool* aAvailable) {
+   return NS_OK;
+ }
+ 
++nsresult WinWebAuthnService::ArmTransactionTimeout(
++    uint64_t aTransactionId, uint32_t aTimeoutMilliseconds) {
++  MOZ_ASSERT(NS_IsMainThread());
++  MOZ_ASSERT(mActiveTransaction.isSome());
++  MOZ_ASSERT(!mTransactionTimer);
++  nsresult rv = NS_NewTimerWithCallback(
++      getter_AddRefs(mTransactionTimer),
++      [self = RefPtr{this}, aTransactionId](nsITimer*) {
++        if (self->mActiveTransaction.isSome() &&
++            self->mActiveTransaction.ref().transactionId == aTransactionId) {
++          self->Reset();
++        }
++      },
++      aTimeoutMilliseconds, nsITimer::TYPE_ONE_SHOT,
++      "WinWebAuthnService::TransactionTimeout"_ns);
++  if (NS_FAILED(rv)) {
++    mActiveTransaction.reset();
++  }
++  return rv;
++}
++
+ NS_IMETHODIMP
+ WinWebAuthnService::Cancel(uint64_t aTransactionId) {
+   MOZ_ASSERT(NS_IsMainThread());
+@@ -229,6 +251,10 @@ WinWebAuthnService::Reset() {
+   // Reset will never be the first function to use gWinWebAuthnModule, so
+   // we shouldn't try to initialize it here.
+   MOZ_ASSERT(NS_IsMainThread());
++  if (mTransactionTimer) {
++    mTransactionTimer->Cancel();
++    mTransactionTimer = nullptr;
++  }
+   if (mActiveTransaction.isSome()) {
+     StaticAutoReadLock moduleLock(gWinWebAuthnModuleLock);
+     if (gWinWebAuthnModule) {
+@@ -259,6 +285,10 @@ WinWebAuthnService::MakeCredential(uint64_t aTransactionId,
+     return NS_ERROR_DOM_UNKNOWN_ERR;
+   }
+   mActiveTransaction = Some(TransactionState{aTransactionId, cancellationId});
++  uint32_t timeout;
++  (void)aArgs->GetTimeoutMS(&timeout);
++  rv = ArmTransactionTimeout(aTransactionId, timeout);
++  NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
+       "WinWebAuthnService::MakeCredential",
+@@ -735,6 +765,10 @@ WinWebAuthnService::GetAssertion(uint64_t aTransactionId,
+   }
+ 
+   mActiveTransaction = Some(TransactionState{aTransactionId, cancellationId});
++  uint32_t timeout;
++  (void)aArgs->GetTimeoutMS(&timeout);
++  rv = ArmTransactionTimeout(aTransactionId, timeout);
++  NS_ENSURE_SUCCESS(rv, rv);
+ 
+   nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
+       "WinWebAuthnService::GetAssertion",
+diff --git a/dom/webauthn/WinWebAuthnService.h b/dom/webauthn/WinWebAuthnService.h
+index a73cd82b8177153a888962d6e8aef10e23d4c87a..38597d184a0dcbe40b68da8c3141891683f5e976 100644
+--- a/dom/webauthn/WinWebAuthnService.h
++++ b/dom/webauthn/WinWebAuthnService.h
+@@ -6,8 +6,11 @@
+ #define mozilla_dom_WinWebAuthnService_h
+ 
+ #include "mozilla/dom/PWebAuthnTransaction.h"
++#include "nsCOMPtr.h"
+ #include "nsIWebAuthnService.h"
+ 
++class nsITimer;
++
+ namespace mozilla::dom {
+ 
+ class WinWebAuthnService final : public nsIWebAuthnService {
+@@ -25,6 +28,8 @@ class WinWebAuthnService final : public nsIWebAuthnService {
+   ~WinWebAuthnService();
+ 
+   uint32_t GetWebAuthNApiVersion();
++  nsresult ArmTransactionTimeout(uint64_t aTransactionId,
++                                 uint32_t aTimeoutMilliseconds);
+ 
+   struct TransactionState {
+     uint64_t transactionId;
+@@ -33,6 +38,7 @@ class WinWebAuthnService final : public nsIWebAuthnService {
+ 
+   // Main thread only:
+   Maybe<TransactionState> mActiveTransaction;
++  nsCOMPtr<nsITimer> mTransactionTimer;
+ };
+ 
+ }  // namespace mozilla::dom
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/WebAuthnCredentialManager.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/WebAuthnCredentialManager.java
+index 762e5866f04c3d059a2801546b07a98a072427bc..da6cca2bf095d9cdfc237b6e2cf32c584a92e3d2 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/WebAuthnCredentialManager.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/WebAuthnCredentialManager.java
+@@ -21,6 +21,7 @@ import android.os.Bundle;
+ import android.os.OutcomeReceiver;
+ import android.util.Log;
+ import androidx.annotation.UiThread;
++import java.nio.charset.StandardCharsets;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ import org.json.JSONArray;
+ import org.json.JSONException;
+@@ -33,6 +34,7 @@ import org.mozilla.geckoview.GeckoResult;
+ public class WebAuthnCredentialManager {
+   private static final String LOGTAG = "WebAuthnCredMan";
+   private static final boolean DEBUG = false;
++  private static final int MAX_RESPONSE_JSON_BYTES = 1024 * 1024;
+ 
+   // This defines are from androidx.credentials.
+   // https://cs.android.com/androidx/platform/frameworks/support/+/androidx-main:credentials/credentials/src/main/java/androidx/credentials/
+@@ -117,6 +119,81 @@ public class WebAuthnCredentialManager {
+     return bundle;
+   }
+ 
++  /**
++   * Shared platform request shape; Navis supplies its live Activity and cancellation separately.
++   */
++  public static CreateCredentialRequest buildCreateCredentialRequest(
++      final String origin, final byte[] clientDataHash, final String requestJSON) {
++    final Bundle requestBundle = getRequestBundleForMakeCredential(clientDataHash, requestJSON);
++    if (requestBundle == null) {
++      throw new IllegalArgumentException("Invalid public-key creation request");
++    }
++    requestBundle.putBoolean(BUNDLE_KEY_PREFER_IMMEDIATELY_AVAILABLE_CREDENTIALS, false);
++    requestBundle.putBoolean(BUNDLE_KEY_IS_AUTO_SELECT_ALLOWED, false);
++    return new CreateCredentialRequest
++        .Builder(TYPE_PUBLIC_KEY_CREDENTIAL, requestBundle, requestBundle)
++        .setAlwaysSendAppInfoToProvider(true)
++        .setOrigin(origin)
++        .build();
++  }
++
++  /** Direct getCredential uses this same schema without the privileged prepare/query APIs. */
++  public static GetCredentialRequest buildGetCredentialRequest(
++      final String origin, final byte[] clientDataHash, final String requestJSON) {
++    final Bundle requestBundle = getRequestBundleForGetAssertion(clientDataHash, requestJSON);
++    if (requestBundle == null) {
++      throw new IllegalArgumentException("Invalid public-key assertion request");
++    }
++    final CredentialOption option =
++        new CredentialOption.Builder(TYPE_PUBLIC_KEY_CREDENTIAL, requestBundle, requestBundle)
++            .build();
++    return new GetCredentialRequest.Builder(requestBundle)
++        .addCredentialOption(option)
++        .setAlwaysSendAppInfoToProvider(true)
++        .setOrigin(origin)
++        .build();
++  }
++
++  private static String checkedResponseJSON(final Bundle data, final String key) {
++    final String json = data == null ? null : data.getString(key);
++    if (json == null || json.isEmpty() || json.length() > MAX_RESPONSE_JSON_BYTES
++        || json.getBytes(StandardCharsets.UTF_8).length > MAX_RESPONSE_JSON_BYTES) {
++      throw new IllegalArgumentException("Missing or oversized credential response");
++    }
++    return json;
++  }
++
++  /** Retain Gecko's original-client-data-hash semantics; never adopt provider clientDataJSON. */
++  public static WebAuthnUtils.MakeCredentialResponse parseCreateCredentialResponse(
++      final CreateCredentialResponse response) throws JSONException {
++    if (response == null)
++      throw new IllegalArgumentException("Missing credential response");
++    final WebAuthnUtils.MakeCredentialResponse parsed = WebAuthnUtils.getMakeCredentialResponse(
++        checkedResponseJSON(response.getData(), BUNDLE_KEY_REGISTRATION_RESPONSE_JSON));
++    if (parsed.keyHandle == null || parsed.keyHandle.length == 0 || parsed.attestationObject == null
++        || parsed.attestationObject.length == 0) {
++      throw new IllegalArgumentException("Incomplete attestation response");
++    }
++    return parsed;
++  }
++
++  public static WebAuthnUtils.GetAssertionResponse parseGetCredentialResponse(
++      final GetCredentialResponse response) throws JSONException {
++    if (response == null || response.getCredential() == null
++        || !TYPE_PUBLIC_KEY_CREDENTIAL.equals(response.getCredential().getType())) {
++      throw new IllegalArgumentException("Unexpected credential type");
++    }
++    final WebAuthnUtils.GetAssertionResponse parsed =
++        WebAuthnUtils.getGetAssertionResponse(checkedResponseJSON(
++            response.getCredential().getData(), BUNDLE_KEY_AUTHENTICATION_RESPONSE_JSON));
++    if (parsed.keyHandle == null || parsed.keyHandle.length == 0 || parsed.authData == null
++        || parsed.authData.length == 0 || parsed.signature == null
++        || parsed.signature.length == 0) {
++      throw new IllegalArgumentException("Incomplete assertion response");
++    }
++    return parsed;
++  }
++
+   @UiThread
+   @SuppressLint("MissingPermission")
+   public static GeckoResult<WebAuthnUtils.MakeCredentialResponse> makeCredential(
+@@ -138,21 +215,13 @@ public class WebAuthnCredentialManager {
+       return GeckoResult.fromException(new WebAuthnUtils.Exception("NOT_SUPPORTED_ERR"));
+     }
+ 
+-    final Bundle requestBundle = getRequestBundleForMakeCredential(clientDataHash, requestJSON);
+-    if (requestBundle == null) {
++    final CreateCredentialRequest request;
++    try {
++      request = buildCreateCredentialRequest(origin, clientDataHash, requestJSON);
++    } catch (final IllegalArgumentException exception) {
+       return GeckoResult.fromException(new WebAuthnUtils.Exception("UNKNOWN_ERR"));
+     }
+ 
+-    requestBundle.putBoolean(BUNDLE_KEY_PREFER_IMMEDIATELY_AVAILABLE_CREDENTIALS, false);
+-    requestBundle.putBoolean(BUNDLE_KEY_IS_AUTO_SELECT_ALLOWED, false);
+-
+-    final CreateCredentialRequest request =
+-        new CreateCredentialRequest.Builder(
+-                TYPE_PUBLIC_KEY_CREDENTIAL, requestBundle, requestBundle)
+-            .setAlwaysSendAppInfoToProvider(true)
+-            .setOrigin(origin)
+-            .build();
+-
+     final CredentialManager manager =
+         (CredentialManager) context.getSystemService(Context.CREDENTIAL_SERVICE);
+     if (manager == null) {
+@@ -172,17 +241,8 @@ public class WebAuthnCredentialManager {
+               if (!completed.compareAndSet(false, true)) {
+                 return;
+               }
+-              final Bundle data = createCredentialResponse.getData();
+-              final String responseJson = data.getString(BUNDLE_KEY_REGISTRATION_RESPONSE_JSON);
+-              if (responseJson == null) {
+-                result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
+-                return;
+-              }
+-              if (DEBUG) {
+-                Log.d(LOGTAG, "Response JSON: " + responseJson);
+-              }
+               try {
+-                result.complete(WebAuthnUtils.getMakeCredentialResponse(responseJson));
++                result.complete(parseCreateCredentialResponse(createCredentialResponse));
+               } catch (final IllegalArgumentException e) {
+                 Log.e(LOGTAG, "Invalid response", e);
+                 result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
+@@ -233,21 +293,13 @@ public class WebAuthnCredentialManager {
+       // No credential manager. Relay to GMS FIDO2
+       return GeckoResult.fromValue(null);
+     }
+-    final Bundle requestBundle = getRequestBundleForGetAssertion(clientDataHash, requestJSON);
+-    if (requestBundle == null) {
++    final GetCredentialRequest request;
++    try {
++      request = buildGetCredentialRequest(origin, clientDataHash, requestJSON);
++    } catch (final IllegalArgumentException exception) {
+       return GeckoResult.fromValue(null);
+     }
+ 
+-    final CredentialOption credentialOption =
+-        new CredentialOption.Builder(TYPE_PUBLIC_KEY_CREDENTIAL, requestBundle, requestBundle)
+-            .build();
+-    final GetCredentialRequest request =
+-        new GetCredentialRequest.Builder(requestBundle)
+-            .addCredentialOption(credentialOption)
+-            .setAlwaysSendAppInfoToProvider(true)
+-            .setOrigin(origin)
+-            .build();
+-
+     final Context context = GeckoAppShell.getApplicationContext();
+     final CredentialManager manager =
+         (CredentialManager) context.getSystemService(Context.CREDENTIAL_SERVICE);
+@@ -346,17 +398,8 @@ public class WebAuthnCredentialManager {
+               if (!completed.compareAndSet(false, true)) {
+                 return;
+               }
+-              final Bundle data = getCredentialResponse.getCredential().getData();
+-              final String responseJson = data.getString(BUNDLE_KEY_AUTHENTICATION_RESPONSE_JSON);
+-              if (responseJson == null) {
+-                result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
+-                return;
+-              }
+-              if (DEBUG) {
+-                Log.d(LOGTAG, "Response JSON: " + responseJson);
+-              }
+               try {
+-                result.complete(WebAuthnUtils.getGetAssertionResponse(responseJson));
++                result.complete(parseGetCredentialResponse(getCredentialResponse));
+               } catch (final IllegalArgumentException e) {
+                 Log.e(LOGTAG, "Invalid response", e);
+                 result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidCredentialProvider.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidCredentialProvider.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b074083084ade3e8e07f060dda0ed298b13664b
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidCredentialProvider.java
+@@ -0,0 +1,308 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import android.Manifest;
++import android.annotation.SuppressLint;
++import android.app.Activity;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.PackageManager;
++import android.content.pm.ResolveInfo;
++import android.content.pm.ServiceInfo;
++import android.credentials.CreateCredentialException;
++import android.credentials.CreateCredentialResponse;
++import android.credentials.CredentialManager;
++import android.credentials.GetCredentialException;
++import android.credentials.GetCredentialResponse;
++import android.os.Build;
++import android.os.CancellationSignal;
++import android.os.OperationCanceledException;
++import android.os.OutcomeReceiver;
++import android.service.credentials.CredentialProviderService;
++import androidx.annotation.UiThread;
++import java.net.URI;
++import java.net.URISyntaxException;
++import java.nio.charset.StandardCharsets;
++import java.util.concurrent.atomic.AtomicBoolean;
++import org.mozilla.gecko.WebAuthnCredentialManager;
++import org.mozilla.gecko.util.ThreadUtils;
++import org.mozilla.gecko.util.WebAuthnUtils;
++import org.mozilla.geckoview.GeckoResult;
++
++/** The OS owns credential selection, signing and storage. No GMS or private key-store fallback. */
++public final class NavisAndroidCredentialProvider {
++  private static final int MAX_REQUEST_JSON_BYTES = 1024 * 1024;
++
++  private NavisAndroidCredentialProvider() {}
++
++  /**
++   * AVAILABLE means the browser can ask a discovered system provider. It does not assert that a
++   * provider is selected, has credentials, or trusts this browser's signing certificate. Android's
++   * provider-enablement query is restricted to the caller's own package, so only the actual request
++   * can determine those conditions; no hidden Settings or invented permission check is used.
++   */
++  public static String availability(final Context context) {
++    if (Build.VERSION.SDK_INT < 34) {
++      return "UNSUPPORTED_OS";
++    }
++    if (context == null) {
++      return "SYSTEM_UNAVAILABLE";
++    }
++    try {
++      return Api34.availability(context);
++    } catch (final RuntimeException exception) {
++      return "SYSTEM_UNAVAILABLE";
++    }
++  }
++
++  @UiThread
++  public static GeckoResult<WebAuthnUtils.MakeCredentialResponse> create(final Activity activity,
++      final CancellationSignal cancellation, final String origin, final byte[] clientDataHash,
++      final String requestJSON) {
++    ThreadUtils.assertOnUiThread();
++    final String error = preflight(activity, cancellation, origin, clientDataHash, requestJSON);
++    if (error != null) {
++      return failure(error);
++    }
++    return Api34.create(activity, cancellation, origin, clientDataHash.clone(), requestJSON);
++  }
++
++  @UiThread
++  public static GeckoResult<WebAuthnUtils.GetAssertionResponse> get(final Activity activity,
++      final CancellationSignal cancellation, final String origin, final byte[] clientDataHash,
++      final String requestJSON) {
++    ThreadUtils.assertOnUiThread();
++    final String error = preflight(activity, cancellation, origin, clientDataHash, requestJSON);
++    if (error != null) {
++      return failure(error);
++    }
++    return Api34.get(activity, cancellation, origin, clientDataHash.clone(), requestJSON);
++  }
++
++  private static String preflight(final Activity activity, final CancellationSignal cancellation,
++      final String origin, final byte[] hash, final String json) {
++    if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
++      return "NOT_ALLOWED_ERR";
++    }
++    if (cancellation == null) {
++      return "DATA_ERR";
++    }
++    if (cancellation.isCanceled()) {
++      return "ABORT_ERR";
++    }
++    if (hash == null || hash.length != 32 || json == null || json.isEmpty()
++        || json.length() > MAX_REQUEST_JSON_BYTES
++        || json.getBytes(StandardCharsets.UTF_8).length > MAX_REQUEST_JSON_BYTES) {
++      return "DATA_ERR";
++    }
++    if (!isSerializedWebOrigin(origin)) {
++      return "SECURITY_ERR";
++    }
++    final String available = availability(activity);
++    if ("ORIGIN_PERMISSION_MISSING".equals(available)) {
++      return "SECURITY_ERR";
++    }
++    if (!"AVAILABLE".equals(available)) {
++      return "NOT_SUPPORTED_ERR";
++    }
++    return null;
++  }
++
++  private static boolean isSerializedWebOrigin(final String origin) {
++    if (origin == null || origin.isEmpty() || origin.length() > 16 * 1024) {
++      return false;
++    }
++    try {
++      final URI uri = new URI(origin);
++      return ("https".equals(uri.getScheme()) || "http".equals(uri.getScheme()))
++          && uri.getHost() != null && !uri.getHost().isEmpty() && uri.getRawUserInfo() == null
++          && uri.getRawQuery() == null && uri.getRawFragment() == null
++          && (uri.getRawPath() == null || uri.getRawPath().isEmpty()) && uri.getPort() >= -1
++          && uri.getPort() <= 65535;
++    } catch (final URISyntaxException exception) {
++      return false;
++    }
++  }
++
++  private static <T> GeckoResult<T> failure(final String code) {
++    return GeckoResult.fromException(new WebAuthnUtils.Exception(code));
++  }
++
++  /** Keep references to API-34-only Android classes out of the pre-34 availability path. */
++  private static final class Api34 {
++    static String availability(final Context context) {
++      final PackageManager packages = context.getPackageManager();
++      if (!packages.hasSystemFeature(PackageManager.FEATURE_CREDENTIALS)
++          || context.getSystemService(CredentialManager.class) == null) {
++        return "SYSTEM_UNAVAILABLE";
++      }
++      if (context.checkSelfPermission(Manifest.permission.CREDENTIAL_MANAGER_SET_ORIGIN)
++          != PackageManager.PERMISSION_GRANTED) {
++        return "ORIGIN_PERMISSION_MISSING";
++      }
++      for (final ResolveInfo resolved :
++          packages.queryIntentServices(new Intent(CredentialProviderService.SERVICE_INTERFACE),
++              PackageManager.ResolveInfoFlags.of(0))) {
++        final ServiceInfo service = resolved.serviceInfo;
++        if (service != null && service.enabled && service.exported
++            && service.applicationInfo != null && service.applicationInfo.enabled
++            && Manifest.permission.BIND_CREDENTIAL_PROVIDER_SERVICE.equals(service.permission)) {
++          return "AVAILABLE";
++        }
++      }
++      return "PROVIDER_UNAVAILABLE";
++    }
++
++    @SuppressLint("MissingPermission")
++    static GeckoResult<WebAuthnUtils.MakeCredentialResponse> create(final Activity activity,
++        final CancellationSignal cancellation, final String origin, final byte[] hash,
++        final String json) {
++      final Completion<WebAuthnUtils.MakeCredentialResponse> completion =
++          new Completion<>(cancellation);
++      try {
++        final CredentialManager manager = activity.getSystemService(CredentialManager.class);
++        if (manager == null) {
++          return failure("NOT_SUPPORTED_ERR");
++        }
++        manager.createCredential(activity,
++            WebAuthnCredentialManager.buildCreateCredentialRequest(origin, hash, json),
++            cancellation, activity.getMainExecutor(),
++            new OutcomeReceiver<CreateCredentialResponse, CreateCredentialException>() {
++              @Override
++              public void onResult(final CreateCredentialResponse response) {
++                if (!completion.begin()) {
++                  return;
++                }
++                try {
++                  completion.result.complete(
++                      WebAuthnCredentialManager.parseCreateCredentialResponse(response));
++                } catch (final java.lang.Exception invalid) {
++                  completion.result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
++                }
++              }
++              @Override
++              public void onError(final CreateCredentialException error) {
++                completion.reject(providerError(error.getType(), true));
++              }
++            });
++      } catch (final RuntimeException error) {
++        completion.reject(runtimeError(error));
++      }
++      return completion.result;
++    }
++
++    @SuppressLint("MissingPermission")
++    static GeckoResult<WebAuthnUtils.GetAssertionResponse> get(final Activity activity,
++        final CancellationSignal cancellation, final String origin, final byte[] hash,
++        final String json) {
++      final Completion<WebAuthnUtils.GetAssertionResponse> completion =
++          new Completion<>(cancellation);
++      try {
++        final CredentialManager manager = activity.getSystemService(CredentialManager.class);
++        if (manager == null) {
++          return failure("NOT_SUPPORTED_ERR");
++        }
++        manager.getCredential(activity,
++            WebAuthnCredentialManager.buildGetCredentialRequest(origin, hash, json), cancellation,
++            activity.getMainExecutor(),
++            new OutcomeReceiver<GetCredentialResponse, GetCredentialException>() {
++              @Override
++              public void onResult(final GetCredentialResponse response) {
++                if (!completion.begin()) {
++                  return;
++                }
++                try {
++                  completion.result.complete(
++                      WebAuthnCredentialManager.parseGetCredentialResponse(response));
++                } catch (final java.lang.Exception invalid) {
++                  completion.result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
++                }
++              }
++              @Override
++              public void onError(final GetCredentialException error) {
++                completion.reject(providerError(error.getType(), false));
++              }
++            });
++      } catch (final RuntimeException error) {
++        completion.reject(runtimeError(error));
++      }
++      return completion.result;
++    }
++
++    private static String providerError(final String type, final boolean creating) {
++      if (CreateCredentialException.TYPE_USER_CANCELED.equals(type)
++          || GetCredentialException.TYPE_USER_CANCELED.equals(type)
++          || CreateCredentialException.TYPE_INTERRUPTED.equals(type)
++          || GetCredentialException.TYPE_INTERRUPTED.equals(type)) {
++        return "ABORT_ERR";
++      }
++      if (CreateCredentialException.TYPE_NO_CREATE_OPTIONS.equals(type)) {
++        return "NOT_SUPPORTED_ERR";
++      }
++      if (GetCredentialException.TYPE_NO_CREDENTIAL.equals(type)) {
++        return "NOT_ALLOWED_ERR";
++      }
++      final String prefix = "androidx.credentials.TYPE_" + (creating ? "CREATE" : "GET")
++          + "_PUBLIC_KEY_CREDENTIAL_DOM_EXCEPTION/androidx.credentials.TYPE_";
++      if ((prefix + "SECURITY_ERROR").equals(type)) {
++        return "SECURITY_ERR";
++      }
++      if ((prefix + "NOT_ALLOWED_ERROR").equals(type)) {
++        return "NOT_ALLOWED_ERR";
++      }
++      if ((prefix + "ABORT_ERROR").equals(type)) {
++        return "ABORT_ERR";
++      }
++      if ((prefix + "DATA_ERROR").equals(type)) {
++        return "DATA_ERR";
++      }
++      if ((prefix + "INVALID_STATE_ERROR").equals(type)) {
++        return "INVALID_STATE_ERR";
++      }
++      if ((prefix + "NOT_SUPPORTED_ERROR").equals(type)) {
++        return "NOT_SUPPORTED_ERR";
++      }
++      return "UNKNOWN_ERR";
++    }
++  }
++
++  private static String runtimeError(final RuntimeException error) {
++    if (error instanceof SecurityException) {
++      return "SECURITY_ERR";
++    }
++    if (error instanceof OperationCanceledException) {
++      return "ABORT_ERR";
++    }
++    if (error instanceof IllegalArgumentException) {
++      return "DATA_ERR";
++    }
++    return "UNKNOWN_ERR";
++  }
++
++  private static final class Completion<T> {
++    final GeckoResult<T> result = new GeckoResult<>();
++    private final AtomicBoolean settled = new AtomicBoolean();
++    private final CancellationSignal cancellation;
++    Completion(final CancellationSignal cancellation) {
++      this.cancellation = cancellation;
++    }
++    boolean begin() {
++      if (!settled.compareAndSet(false, true)) {
++        return false;
++      }
++      if (!cancellation.isCanceled()) {
++        return true;
++      }
++      result.completeExceptionally(new WebAuthnUtils.Exception("ABORT_ERR"));
++      return false;
++    }
++    void reject(final String code) {
++      if (begin()) {
++        result.completeExceptionally(new WebAuthnUtils.Exception(code));
++      }
++    }
++  }
++}
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..add920b254a4d08becb27252c57aee41007c4385
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidWebAuthn.java
+@@ -0,0 +1,305 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import android.app.Activity;
++import android.os.CancellationSignal;
++import java.lang.ref.WeakReference;
++import java.util.HashMap;
++import java.util.ArrayList;
++import java.util.Map;
++import org.mozilla.gecko.annotation.WrapForJNI;
++import org.mozilla.gecko.util.ThreadUtils;
++import org.mozilla.gecko.util.WebAuthnUtils;
++import org.mozilla.geckoview.GeckoResult;
++
++/**
++ * Navis-owned JNI transport for the OS credential provider, not an authenticator/store.
++ * Gecko has already validated the requesting origin and RP. Only a registered, active
++ * native content session may present credentials in the current foreground Activity.
++ * All mutable transaction/session state is confined to Android's UI thread.
++ */
++public final class NavisAndroidWebAuthn {
++  private static final Map<Long, Scope> SCOPES = new HashMap<>();
++  private static final Map<Long, Long> SESSION_WINDOWS = new HashMap<>();
++  private static final Map<Long, Binding> ACTIVITIES = new HashMap<>();
++  private static final Map<Long, Pending<?>> PENDING = new HashMap<>();
++
++  private NavisAndroidWebAuthn() {}
++
++  private static final class Scope {
++    final long sessionId;
++    final long browsingContextId;
++    long generation;
++    boolean active;
++
++    Scope(final long sessionId, final long browsingContextId, final boolean active) {
++      this.sessionId = sessionId;
++      this.browsingContextId = browsingContextId;
++      this.active = active;
++    }
++  }
++
++  private static final class Binding {
++    final long windowId;
++    final long generation;
++    final WeakReference<Activity> activity;
++
++    Binding(final Activity activity, final long windowId, final long generation) {
++      this.windowId = windowId;
++      this.generation = generation;
++      this.activity = new WeakReference<>(activity);
++    }
++  }
++
++  public static void bindActivity(final Activity activity, final long windowId, final long generation) {
++    ThreadUtils.assertOnUiThread();
++    if (activity == null || windowId <= 0 || generation <= 0) throw new IllegalArgumentException("Invalid Activity lease");
++    final Binding previous = ACTIVITIES.get(windowId);
++    if (previous != null) {
++      if (previous.generation > generation) return;
++      if (previous.generation == generation && previous.activity.get() == activity) return;
++      if (previous.generation == generation) throw new IllegalStateException("Activity lease already owned");
++      cancelPending(windowId, "ABORT_ERR");
++    }
++    ACTIVITIES.put(windowId, new Binding(activity, windowId, generation));
++  }
++
++  public static void unbindActivity(final long windowId, final long generation) {
++    ThreadUtils.assertOnUiThread();
++    final Binding binding = ACTIVITIES.get(windowId);
++    if (binding == null || binding.generation != generation) return;
++    ACTIVITIES.remove(windowId);
++    cancelPending(windowId, "ABORT_ERR");
++  }
++
++  public static void setSessionWindow(final long sessionId, final long windowId) {
++    ThreadUtils.assertOnUiThread();
++    final Long previous = SESSION_WINDOWS.get(sessionId);
++    if (previous != null && previous == windowId) return;
++    invalidateSession(sessionId);
++    if (windowId > 0) SESSION_WINDOWS.put(sessionId, windowId);
++    else SESSION_WINDOWS.remove(sessionId);
++  }
++
++  public static void shutdown() {
++    ThreadUtils.assertOnUiThread();
++    cancelPendingAll("ABORT_ERR");
++    ACTIVITIES.clear();
++    SESSION_WINDOWS.clear();
++    SCOPES.clear();
++  }
++
++  public static String availability(final long windowId) {
++    ThreadUtils.assertOnUiThread();
++    final Binding binding = ACTIVITIES.get(windowId);
++    final Activity activity = binding == null ? null : binding.activity.get();
++    if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
++      return "NO_FOREGROUND_ACTIVITY";
++    }
++    return NavisAndroidCredentialProvider.availability(activity);
++  }
++
++  static void registerSession(
++      final long sessionId, final long browsingContextId, final boolean active) {
++    ThreadUtils.assertOnUiThread();
++    unregisterSession(sessionId);
++    if (browsingContextId > 0) {
++      SCOPES.put(browsingContextId, new Scope(sessionId, browsingContextId, active));
++    }
++  }
++
++  static void setSessionActive(final long sessionId, final boolean active) {
++    ThreadUtils.assertOnUiThread();
++    for (final Scope scope : SCOPES.values()) {
++      if (scope.sessionId == sessionId) scope.active = active;
++    }
++    if (!active) invalidateSession(sessionId);
++  }
++
++  static void invalidateSession(final long sessionId) {
++    ThreadUtils.assertOnUiThread();
++    for (final Scope scope : SCOPES.values()) {
++      if (scope.sessionId == sessionId) scope.generation++;
++    }
++    for (final Pending<?> pending : new ArrayList<>(PENDING.values())) {
++      if (pending.scope.sessionId == sessionId) pending.cancel("ABORT_ERR");
++    }
++  }
++
++  static void unregisterSession(final long sessionId) {
++    ThreadUtils.assertOnUiThread();
++    invalidateSession(sessionId);
++    SCOPES.values().removeIf(scope -> scope.sessionId == sessionId);
++  }
++
++  @WrapForJNI(calledFrom = "gecko")
++  private static boolean isAvailable() {
++    // Public Android APIs cannot tell a browser whether a third-party provider is
++    // enabled and supports user-verifying public-key credentials. Candidate presence
++    // or a secure lock screen is not UVPAA. Requests still use real create/get APIs;
++    // this optional web capability probe stays conservative until OS proof exists.
++    return false;
++  }
++
++  @WrapForJNI(calledFrom = "gecko")
++  private static GeckoResult<WebAuthnUtils.MakeCredentialResponse> makeCredential(
++      final long transactionId, final long browsingContextId, final String origin,
++      final byte[] clientDataHash, final String requestJson, final long timeoutMs) {
++    return request(transactionId, browsingContextId, origin, clientDataHash, requestJson,
++        timeoutMs, NavisAndroidCredentialProvider::create);
++  }
++
++  @WrapForJNI(calledFrom = "gecko")
++  private static GeckoResult<WebAuthnUtils.GetAssertionResponse> getAssertion(
++      final long transactionId, final long browsingContextId, final String origin,
++      final byte[] clientDataHash, final String requestJson, final long timeoutMs) {
++    return request(transactionId, browsingContextId, origin, clientDataHash, requestJson,
++        timeoutMs, NavisAndroidCredentialProvider::get);
++  }
++
++  @WrapForJNI(calledFrom = "gecko")
++  private static void cancelTransaction(final long transactionId) {
++    ThreadUtils.runOnUiThread(() -> {
++      for (final Pending<?> pending : new ArrayList<>(PENDING.values())) {
++        if (pending.transactionId == transactionId) pending.cancel("ABORT_ERR");
++      }
++    });
++  }
++
++  @WrapForJNI(calledFrom = "gecko")
++  private static void cancelAll() {
++    ThreadUtils.runOnUiThread(() -> cancelPendingAll("ABORT_ERR"));
++  }
++
++  private interface Provider<T> {
++    GeckoResult<T> request(Activity activity, CancellationSignal cancellation,
++        String origin, byte[] hash, String requestJson);
++  }
++
++  private static <T> GeckoResult<T> request(
++      final long transactionId, final long browsingContextId, final String origin,
++      final byte[] clientDataHash, final String requestJson, final long timeoutMs,
++      final Provider<T> provider) {
++    final GeckoResult<T> result = new GeckoResult<>();
++    // Native-owned arguments are copied before the JNI call returns. No page-supplied
++    // request/event can directly select a browsing context or substitute the origin.
++    final byte[] hash = clientDataHash == null ? null : clientDataHash.clone();
++    ThreadUtils.runOnUiThread(() -> {
++      if (transactionId == 0 || origin == null || origin.length() > 8192
++          || hash == null || hash.length != 32 || requestJson == null
++          || requestJson.length() > 1024 * 1024) {
++        result.completeExceptionally(new WebAuthnUtils.Exception("DATA_ERR"));
++        return;
++      }
++      final Scope scope = SCOPES.get(browsingContextId);
++      final Long windowId = scope == null ? null : SESSION_WINDOWS.get(scope.sessionId);
++      final Binding binding = windowId == null ? null : ACTIVITIES.get(windowId);
++      final Activity activity = binding == null ? null : binding.activity.get();
++      if (scope == null || !scope.active || activity == null
++          || activity.isFinishing() || activity.isDestroyed()) {
++        result.completeExceptionally(new WebAuthnUtils.Exception("ABORT_ERR"));
++        return;
++      }
++      final String capability = availability(windowId);
++      if (!"AVAILABLE".equals(capability)) {
++        result.completeExceptionally(new WebAuthnUtils.Exception(
++            "ORIGIN_PERMISSION_MISSING".equals(capability) ? "SECURITY_ERR" : "NOT_SUPPORTED_ERR"));
++        return;
++      }
++      cancelPending(windowId, "ABORT_ERR");
++      final Pending<T> pending = new Pending<>(transactionId, scope, binding, activity, result);
++      PENDING.put(windowId, pending);
++      ThreadUtils.getUiHandler().postDelayed(pending.timeout,
++          Math.max(1000L, Math.min(timeoutMs > 0 ? timeoutMs : 120000L, 120000L)));
++      try {
++        provider.request(activity, pending.cancellation, origin, hash, requestJson)
++            .withHandler(ThreadUtils.getUiHandler()).accept(pending::succeed, pending::fail);
++      } catch (final RuntimeException error) {
++        pending.fail(error);
++      }
++    });
++    return result;
++  }
++
++  private static final class Pending<T> {
++    final long transactionId;
++    final Scope scope;
++    final long generation;
++    final Binding binding;
++    final Activity activity;
++    final GeckoResult<T> result;
++    final CancellationSignal cancellation = new CancellationSignal();
++    final Runnable timeout = () -> cancel("TIMEOUT_ERR");
++    boolean completed;
++
++    Pending(final long transactionId, final Scope scope, final Binding binding, final Activity activity,
++        final GeckoResult<T> result) {
++      this.transactionId = transactionId;
++      this.scope = scope;
++      this.generation = scope.generation;
++      this.binding = binding;
++      this.activity = activity;
++      this.result = result;
++    }
++
++    void succeed(final T value) {
++      ThreadUtils.assertOnUiThread();
++      if (completed) return;
++      if (ACTIVITIES.get(binding.windowId) != binding || binding.activity.get() != activity
++          || !Long.valueOf(binding.windowId).equals(SESSION_WINDOWS.get(scope.sessionId))
++          || activity.isFinishing() || activity.isDestroyed()
++          || SCOPES.get(scope.browsingContextId) != scope || !scope.active
++          || generation != scope.generation) {
++        cancel("ABORT_ERR");
++        return;
++      }
++      if (value == null) {
++        fail(new WebAuthnUtils.Exception("DATA_ERR"));
++        return;
++      }
++      finish();
++      result.complete(value);
++    }
++
++    void fail(final Throwable error) {
++      ThreadUtils.assertOnUiThread();
++      if (completed) return;
++      finish();
++      result.completeExceptionally(error instanceof WebAuthnUtils.Exception ? error
++          : new WebAuthnUtils.Exception(error instanceof SecurityException
++              ? "SECURITY_ERR" : "UNKNOWN_ERR"));
++    }
++
++    void cancel(final String reason) {
++      if (completed) return;
++      finish();
++      try {
++        cancellation.cancel();
++      } catch (final RuntimeException ignored) {
++        // Provider/OEM cancellation failure cannot escape into the Activity lifecycle.
++      } finally {
++        // Some OEM providers never reply to cancellation (or throw here). Gecko's
++        // promise must still settle, and late provider replies must remain ignored.
++        result.completeExceptionally(new WebAuthnUtils.Exception(reason));
++      }
++    }
++
++    void finish() {
++      completed = true;
++      ThreadUtils.getUiHandler().removeCallbacks(timeout);
++      if (PENDING.get(binding.windowId) == this) PENDING.remove(binding.windowId);
++    }
++  }
++
++  private static void cancelPending(final long windowId, final String reason) {
++    final Pending<?> pending = PENDING.get(windowId);
++    if (pending != null) pending.cancel(reason);
++  }
++
++  private static void cancelPendingAll(final String reason) {
++    for (final Pending<?> pending : new ArrayList<>(PENDING.values())) pending.cancel(reason);
++  }
++}
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/util/WebAuthnUtils.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/util/WebAuthnUtils.java
+index d48fe66c43763d5f4bbdae292ac74bd875a98127..4db1fb159ac3ddbe441bc01254f2eda2e9e356b0 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/util/WebAuthnUtils.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/util/WebAuthnUtils.java
+@@ -7,10 +7,8 @@ package org.mozilla.gecko.util;
+ import android.util.Base64;
+ import android.util.Log;
+ import androidx.annotation.NonNull;
+-import com.google.android.gms.fido.common.Transport;
+ import java.nio.ByteBuffer;
+ import java.util.ArrayList;
+-import java.util.List;
+ import org.json.JSONArray;
+ import org.json.JSONException;
+ import org.json.JSONObject;
+@@ -34,26 +32,6 @@ public class WebAuthnUtils {
+     DIRECT,
+   }
+ 
+-  public static List<Transport> getTransportsForByte(final byte transports) {
+-    final ArrayList<Transport> result = new ArrayList<Transport>();
+-    if ((transports & AUTHENTICATOR_TRANSPORT_USB) == AUTHENTICATOR_TRANSPORT_USB) {
+-      result.add(Transport.USB);
+-    }
+-    if ((transports & AUTHENTICATOR_TRANSPORT_NFC) == AUTHENTICATOR_TRANSPORT_NFC) {
+-      result.add(Transport.NFC);
+-    }
+-    if ((transports & AUTHENTICATOR_TRANSPORT_BLE) == AUTHENTICATOR_TRANSPORT_BLE) {
+-      result.add(Transport.BLUETOOTH_LOW_ENERGY);
+-    }
+-    if ((transports & AUTHENTICATOR_TRANSPORT_INTERNAL) == AUTHENTICATOR_TRANSPORT_INTERNAL) {
+-      result.add(Transport.INTERNAL);
+-    }
+-    if ((transports & AUTHENTICATOR_TRANSPORT_HYBRID) == AUTHENTICATOR_TRANSPORT_HYBRID) {
+-      result.add(Transport.HYBRID);
+-    }
+-    return result;
+-  }
+-
+   /* package */ static JSONArray getJSONTransportsForByte(final byte transports) {
+     final JSONArray json = new JSONArray();
+     if ((transports & AUTHENTICATOR_TRANSPORT_USB) == AUTHENTICATOR_TRANSPORT_USB) {
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnGmsUtils.java b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnGmsUtils.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..39bc8f6cedd6d0d16a0489beb6216b6bcf16c463
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnGmsUtils.java
+@@ -0,0 +1,40 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.geckoview;
++
++import com.google.android.gms.fido.common.Transport;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Google Play Services conversions kept outside Gecko's JNI WebAuthn value types. */
++public final class WebAuthnGmsUtils {
++  private static final byte AUTHENTICATOR_TRANSPORT_USB = 1;
++  private static final byte AUTHENTICATOR_TRANSPORT_NFC = 2;
++  private static final byte AUTHENTICATOR_TRANSPORT_BLE = 4;
++  private static final byte AUTHENTICATOR_TRANSPORT_INTERNAL = 8;
++  private static final byte AUTHENTICATOR_TRANSPORT_HYBRID = 16;
++
++  private WebAuthnGmsUtils() {}
++
++  public static List<Transport> getTransportsForByte(final byte transports) {
++    final ArrayList<Transport> result = new ArrayList<Transport>();
++    if ((transports & AUTHENTICATOR_TRANSPORT_USB) == AUTHENTICATOR_TRANSPORT_USB) {
++      result.add(Transport.USB);
++    }
++    if ((transports & AUTHENTICATOR_TRANSPORT_NFC) == AUTHENTICATOR_TRANSPORT_NFC) {
++      result.add(Transport.NFC);
++    }
++    if ((transports & AUTHENTICATOR_TRANSPORT_BLE) == AUTHENTICATOR_TRANSPORT_BLE) {
++      result.add(Transport.BLUETOOTH_LOW_ENERGY);
++    }
++    if ((transports & AUTHENTICATOR_TRANSPORT_INTERNAL) == AUTHENTICATOR_TRANSPORT_INTERNAL) {
++      result.add(Transport.INTERNAL);
++    }
++    if ((transports & AUTHENTICATOR_TRANSPORT_HYBRID) == AUTHENTICATOR_TRANSPORT_HYBRID) {
++      result.add(Transport.HYBRID);
++    }
++    return result;
++  }
++}
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnTokenManager.java b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnTokenManager.java
+index 754ce5b7815c8f8cf499a6bdfda9a2658d5059b6..4bf7b68bb976048ee8c07266bf58ec358d60bbdd 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnTokenManager.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebAuthnTokenManager.java
+@@ -145,7 +145,7 @@ import org.mozilla.gecko.util.WebAuthnUtils;
+           new PublicKeyCredentialDescriptor(
+               PublicKeyCredentialType.PUBLIC_KEY.toString(),
+               cred.id,
+-              WebAuthnUtils.getTransportsForByte(cred.transports)));
++              WebAuthnGmsUtils.getTransportsForByte(cred.transports)));
+     }
+ 
+     final GeckoBundle rpBundle = credentialBundle.getBundle("rp");
+@@ -391,7 +391,7 @@ import org.mozilla.gecko.util.WebAuthnUtils;
+           new PublicKeyCredentialDescriptor(
+               PublicKeyCredentialType.PUBLIC_KEY.toString(),
+               cred.id,
+-              WebAuthnUtils.getTransportsForByte(cred.transports)));
++              WebAuthnGmsUtils.getTransportsForByte(cred.transports)));
+     }
+ 
+     final AuthenticationExtensions.Builder extBuilder = new AuthenticationExtensions.Builder();
+diff --git a/mobile/android/geckoview/src/test/java/org/mozilla/gecko/util/WebAuthnUtilsTest.java b/mobile/android/geckoview/src/test/java/org/mozilla/gecko/util/WebAuthnUtilsTest.java
+index 85a42de77b1230084a2b26c7fd8f6115b9c03203..7bbb5fdd44dc76c5364c7de29fa619aa5096ae97 100644
+--- a/mobile/android/geckoview/src/test/java/org/mozilla/gecko/util/WebAuthnUtilsTest.java
++++ b/mobile/android/geckoview/src/test/java/org/mozilla/gecko/util/WebAuthnUtilsTest.java
+@@ -11,6 +11,7 @@ import java.util.Arrays;
+ import java.util.List;
+ import org.json.JSONArray;
+ import org.json.JSONException;
++import org.mozilla.geckoview.WebAuthnGmsUtils;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.robolectric.RobolectricTestRunner;
+@@ -127,7 +128,7 @@ public class WebAuthnUtilsTest {
+             Transport.HYBRID);
+     assertEquals(
+         "FIDO2's transport should be matched",
+-        WebAuthnUtils.getTransportsForByte(transports),
++        WebAuthnGmsUtils.getTransportsForByte(transports),
+         expectedFidoTransports);
+ 
+     final String[] expectedJsonTransports =
+diff --git a/widget/android/moz.build b/widget/android/moz.build
+index 11c217cf10a2ea4b4021f6af7172c32c752acd83..dc3ced70528270af8e8f60787073242d90ddb1dd 100644
+--- a/widget/android/moz.build
++++ b/widget/android/moz.build
+@@ -93,6 +93,7 @@ classes_with_WrapForJNI += [
+     "WebResponse",
+     "XPCOMEventTarget",
+ ]
++        "NavisAndroidWebAuthn",
+ 
+ natives_from_WrapForJNI = sorted([
+     "GeneratedJNI/{}Natives.h".format(c) for c in classes_with_WrapForJNI

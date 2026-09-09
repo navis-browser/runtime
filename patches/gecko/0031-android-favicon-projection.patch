@@ -1,0 +1,110 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidFavicon.sys.mjs b/mobile/shared/modules/navis/NavisAndroidFavicon.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9254472940a127d8b04d4d76ec230a8a84ec7da
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidFavicon.sys.mjs
+@@ -0,0 +1,104 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++let registered = false;
++const MAX_SOURCE_CHARS = 768 * 1024;
++const MAX_PNG_CHARS = 64 * 1024;
++const ICON_SIZE = 64;
++
++export function registerNavisAndroidFaviconActors() {
++  if (registered) return;
++  // Reuse the desktop producer and its content-principal network policy.
++  ChromeUtils.registerWindowActor("DesktopFavicon", {
++    parent: { esModuleURI: "resource://gre/modules/DesktopFaviconParent.sys.mjs" },
++    child: {
++      esModuleURI: "resource://gre/modules/DesktopFaviconChild.sys.mjs",
++      events: {
++        DOMHeadElementParsed: {}, DOMLinkAdded: {}, DOMLinkChanged: {},
++        pageshow: {}, pagehide: { createActor: false },
++      },
++    },
++    matches: ["http://*/*", "https://*/*"],
++    messageManagerGroups: ["browsers"],
++  });
++  registered = true;
++}
++
++/** Receives already authenticated image bytes, never arbitrary network URLs. */
++export function createNavisAndroidFaviconBridge({ browser, document, publish }) {
++  let generation = 0;
++  let closed = false;
++  let pendingImage = null;
++
++  const current = (actor, pageURL, token) => {
++    try {
++      return !closed && token === generation && actor.manager?.isCurrentGlobal &&
++        browser.browsingContext?.currentWindowGlobal === actor.manager &&
++        browser.currentURI?.spec === pageURL;
++    } catch {
++      return false;
++    }
++  };
++
++  function cancelImage() {
++    pendingImage?.removeAttribute("src");
++    pendingImage = null;
++  }
++
++  async function receive(actor, data) {
++    const pageURL = data?.pageURL;
++    const source = data?.iconURL;
++    if (!current(actor, pageURL, generation) || typeof pageURL !== "string" ||
++        !/^https?:\/\//iu.test(pageURL) || typeof source !== "string" ||
++        source.length > MAX_SOURCE_CHARS ||
++        !/^data:image\/(?:avif|bmp|gif|jpeg|png|svg\+xml|vnd\.microsoft\.icon|webp|x-icon)[;,]/iu.test(source)) {
++      return;
++    }
++    const token = ++generation;
++    cancelImage();
++    const image = document.createElementNS("http://www.w3.org/1999/xhtml", "img");
++    pendingImage = image;
++    image.decoding = "async";
++    // Only inert image data enters this privileged decoder. SVG external
++    // resources/scripts are disabled by Gecko's image-document semantics.
++    image.src = source;
++    try {
++      await image.decode();
++      if (!current(actor, pageURL, token) || image.naturalWidth <= 0 ||
++          image.naturalHeight <= 0 || image.naturalWidth > 4096 ||
++          image.naturalHeight > 4096) return;
++      const canvas = document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
++      canvas.width = canvas.height = ICON_SIZE;
++      const scale = ICON_SIZE / Math.max(image.naturalWidth, image.naturalHeight);
++      const width = image.naturalWidth * scale;
++      const height = image.naturalHeight * scale;
++      canvas.getContext("2d").drawImage(image,
++        (ICON_SIZE - width) / 2, (ICON_SIZE - height) / 2, width, height);
++      const png = canvas.toDataURL("image/png");
++      if (current(actor, pageURL, token) && png.startsWith("data:image/png;base64,") &&
++          png.length <= MAX_PNG_CHARS) publish({ pageURL, png });
++    } catch {
++      // Bad or aborted image decoding leaves the native default placeholder.
++    } finally {
++      if (pendingImage === image) cancelImage();
++    }
++  }
++
++  browser.desktopEmbedderFaviconChanged = receive;
++  return {
++    invalidate() {
++      if (closed) return;
++      generation++;
++      cancelImage();
++      publish({ pageURL: browser.currentURI?.spec ?? "", png: "" });
++    },
++    close() {
++      if (closed) return;
++      closed = true;
++      generation++;
++      cancelImage();
++      browser.desktopEmbedderFaviconChanged = null;
++    },
++  };
++}

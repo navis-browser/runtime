@@ -1,0 +1,1310 @@
+diff --git a/devtools/client/framework/toolbox-hosts.js b/devtools/client/framework/toolbox-hosts.js
+index c6db4ece3f11fffa5915cfd0ac83108e03b04f24..a34dc08f4be081ea4fc42c12147e0f52102c95c0 100644
+--- a/devtools/client/framework/toolbox-hosts.js
++++ b/devtools/client/framework/toolbox-hosts.js
+@@ -474,7 +474,14 @@ class PageHost {
+   raise() {
+     // See @constructor, for the page host, the frame is also the browser
+     // element.
+-    focusTab(this.frame.documentGlobal.gBrowser.getTabForBrowser(this.frame));
++    const browserWindow = this.frame.documentGlobal;
++    if (browserWindow.gBrowser) {
++      focusTab(browserWindow.gBrowser.getTabForBrowser(this.frame));
++    } else {
++      // A product-owned chrome host may embed the toolbox without tabbrowser.
++      browserWindow.focus();
++      this.frame.focus();
++    }
+   }
+ 
+   // Do nothing.
+diff --git a/devtools/client/locales/en-US/responsive.properties b/devtools/client/locales/en-US/responsive.properties
+index 9c9876fe79690d7afb7fd68a0f175c7da8f903d5..1144470c2181ca98a2422b27356f17298aa74241 100644
+--- a/devtools/client/locales/en-US/responsive.properties
++++ b/devtools/client/locales/en-US/responsive.properties
+@@ -25,6 +25,12 @@ responsive.rotate=Rotate viewport
+ # device selector.
+ responsive.responsiveMode=Responsive
+ 
++# LOCALIZATION NOTE (responsive.viewportWidth): Accessible label for the viewport width field.
++responsive.viewportWidth=Viewport width
++
++# LOCALIZATION NOTE (responsive.viewportHeight): Accessible label for the viewport height field.
++responsive.viewportHeight=Viewport height
++
+ # LOCALIZATION NOTE (responsive.enableTouch): Tooltip text for the touch
+ # simulation button when it's disabled.
+ responsive.enableTouch=Enable touch simulation
+diff --git a/devtools/client/preferences/generate-navis-prefs.py b/devtools/client/preferences/generate-navis-prefs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0d04762fb92a7b9ffcac366125b349e16e79380
+--- /dev/null
++++ b/devtools/client/preferences/generate-navis-prefs.py
+@@ -0,0 +1,23 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++"""Reuse the desktop toolbox defaults without packaging Firefox product prefs."""
++
++import io
++
++import buildconfig
++from mozbuild.preprocessor import Preprocessor
++
++
++def generate(output, source):
++    with open(source, encoding="utf-8") as stream:
++        desktop = stream.read()
++    start = desktop.index("// Toolbox preferences\n")
++    end = desktop.index("// FirstStartup service", start)
++    toolbox = io.StringIO(desktop[start:end])
++    toolbox.name = source
++    preprocessor = Preprocessor()
++    preprocessor.context.update(buildconfig.defines["ALLDEFINES"])
++    preprocessor.out = output
++    preprocessor.do_include(toolbox)
+diff --git a/devtools/client/preferences/moz.build b/devtools/client/preferences/moz.build
+index 2ceb7807d42ccd148dc6fd8960f697944826a94b..fd8a7299565a48f4a24059c70509195f2773e04a 100644
+--- a/devtools/client/preferences/moz.build
++++ b/devtools/client/preferences/moz.build
+@@ -5,3 +5,12 @@
+ JS_PREFERENCE_FILES += [
+     "debugger.js",
+ ]
++
++if CONFIG["MOZ_NAVIS_ANDROID_RUNTIME"]:
++    GeneratedFile(
++        "navis-devtools.js",
++        script="generate-navis-prefs.py",
++        entry_point="generate",
++        inputs=["/browser/app/profile/firefox.js"],
++    )
++    JS_PREFERENCE_FILES += ["!navis-devtools.js"]
+diff --git a/devtools/client/responsive/components/ViewportDimension.js b/devtools/client/responsive/components/ViewportDimension.js
+index 48536b22cec86cf33cef07819f45b920ebbcfb25..0d455d9708251c164f7b1989f4ddae58d1db02a1 100644
+--- a/devtools/client/responsive/components/ViewportDimension.js
++++ b/devtools/client/responsive/components/ViewportDimension.js
+@@ -17,6 +17,9 @@ const {
+   MIN_VIEWPORT_DIMENSION,
+ } = require("resource://devtools/client/responsive/constants.js");
+ const Types = require("resource://devtools/client/responsive/types.js");
++const {
++  getStr,
++} = require("resource://devtools/client/responsive/utils/l10n.js");
+ 
+ loader.lazyRequireGetter(
+   this,
+@@ -219,6 +222,7 @@ class ViewportDimension extends PureComponent {
+           (this.state.isWidthValid ? "" : " invalid"),
+         size: 4,
+         type: "number",
++        "aria-label": getStr("responsive.viewportWidth"),
+         value: this.state.width,
+         onBlur: this.onInputBlur,
+         onChange: this.onInputChange,
+@@ -241,6 +245,7 @@ class ViewportDimension extends PureComponent {
+           (this.state.isHeightValid ? "" : " invalid"),
+         size: 4,
+         type: "number",
++        "aria-label": getStr("responsive.viewportHeight"),
+         value: this.state.height,
+         onBlur: this.onInputBlur,
+         onChange: this.onInputChange,
+diff --git a/devtools/client/shared/widgets/tooltip/HTMLTooltip.js b/devtools/client/shared/widgets/tooltip/HTMLTooltip.js
+index 425bc7a4c16b419ac13b253f250dca62d648593d..3c265b6241f2c908abcf17994a1b4fbe696a1916 100644
+--- a/devtools/client/shared/widgets/tooltip/HTMLTooltip.js
++++ b/devtools/client/shared/widgets/tooltip/HTMLTooltip.js
+@@ -510,6 +510,25 @@ class HTMLTooltip extends EventEmitter {
+    *        Optional, vertical offset between the anchor and the tooltip.
+    */
+   async show(anchor, options) {
++    // A Navis Android RDM toolbar lives in a short chrome iframe. Its real
++    // HTML fallback needs the target-side overlay viewport before measuring.
++    // Ordinary web documents and desktop/XUL popups never enter this path.
++    if (!this._navisPopupViewportRelease && !this.useXulWrapper &&
++        this.doc.nodePrincipal?.isSystemPrincipal && Services.appinfo?.OS === "Android") {
++      const owner = this.doc.defaultView?.frameElement?.navisResponsivePopupHost;
++      if (owner) this._navisPopupViewportRelease = owner.acquire(this.doc);
++    }
++    try { await this._showInViewport(anchor, options); }
++    catch (error) { this._releaseNavisPopupViewport(); throw error; }
++  }
++
++  _releaseNavisPopupViewport() {
++    const release = this._navisPopupViewportRelease;
++    this._navisPopupViewportRelease = null;
++    release?.();
++  }
++
++  async _showInViewport(anchor, options) {
+     const { left, top } = this._updateContainerBounds(anchor, options);
+     const isTooltipVisible = this.isVisible();
+ 
+@@ -820,6 +839,7 @@ class HTMLTooltip extends EventEmitter {
+     }
+ 
+     if (!this.isVisible()) {
++      this._releaseNavisPopupViewport();
+       this.emit("hidden");
+       return;
+     }
+@@ -854,6 +874,7 @@ class HTMLTooltip extends EventEmitter {
+       this._anchor.classList.remove("tooltip-anchor");
+       this._anchor = null;
+     }
++    this._releaseNavisPopupViewport();
+   }
+ 
+   removeEventListeners() {
+@@ -875,6 +896,7 @@ class HTMLTooltip extends EventEmitter {
+    * tooltip container from the document.
+    */
+   destroy() {
++    this._releaseNavisPopupViewport();
+     this.hide();
+     this.removeEventListeners();
+     this.container.remove();
+@@ -1022,7 +1044,14 @@ class HTMLTooltip extends EventEmitter {
+   }
+ 
+   _isXULPopupAvailable() {
+-    return this.doc.nodePrincipal.isSystemPrincipal;
++    // A privileged document alone does not provide native popup presentation.
++    // Android only attaches compositor surfaces to its explicit session hosts,
++    // not to the child widgets created by XUL panels. Use the existing in-
++    // document tooltip for all Android menus instead of an invisible wrapper.
++    return (
++      Services.appinfo.OS !== "Android" &&
++      this.doc.nodePrincipal.isSystemPrincipal
++    );
+   }
+ 
+   _createXulPanelWrapper() {
+diff --git a/devtools/client/themes/toolbox.css b/devtools/client/themes/toolbox.css
+index 2d20ee26b2cbab174b18511d790b2d458358e008..9b235879ec5475cc21e250718d3282b6d938c17a 100644
+--- a/devtools/client/themes/toolbox.css
++++ b/devtools/client/themes/toolbox.css
+@@ -27,7 +27,7 @@
+   border: 2px solid transparent;
+   border-radius: 2px;
+   align-items: center;
+-  font-size: 12px;
++  font-size: var(--theme-body-font-size);
+   white-space: nowrap;
+   text-overflow: ellipsis;
+   overflow: hidden;
+@@ -282,7 +282,7 @@
+ }
+ 
+ .devtools-tab-label {
+-  font-size: 12px;
++  font-size: var(--theme-body-font-size);
+   mask-image: linear-gradient(to left, transparent 0, black 6px);
+   /* Set the end padding on the label to make sure the label gets faded out properly */
+   padding-inline-end: 8px;
+diff --git a/devtools/client/themes/variables.css b/devtools/client/themes/variables.css
+index 7279fc515e1da4292855d528253bab83c1566e1c..7c7815ab41d8f203595627f9e91cf7e8411232d5 100644
+--- a/devtools/client/themes/variables.css
++++ b/devtools/client/themes/variables.css
+@@ -27,8 +27,8 @@
+ 
+ :root {
+   /* Text sizes */
+-  --theme-body-font-size: 11px;
+-  --theme-code-font-size: 11px;
++  --theme-body-font-size: 14px;
++  --theme-code-font-size: 14px;
+   --theme-code-line-height: calc(15 / 11);
+ 
+   /* Toolbar size (excluding borders) */
+diff --git a/devtools/shared/performance-new/recording-utils.sys.mjs b/devtools/shared/performance-new/recording-utils.sys.mjs
+index 8969dad70f8c795e4cb613522b369be918bc9cbe..d0848395e2d78c89f0769ce33d4ed80b9781aa85 100644
+--- a/devtools/shared/performance-new/recording-utils.sys.mjs
++++ b/devtools/shared/performance-new/recording-utils.sys.mjs
+@@ -14,11 +14,31 @@
+  * @type {GetActiveBrowserID}
+  */
+ export function getActiveBrowserID() {
+-  const win = Services.wm.getMostRecentBrowserWindow();
++  const browserWindow = Services.wm.getMostRecentBrowserWindow();
++  const candidates = [
++    browserWindow,
++    Services.focus.activeWindow,
++    Services.focus.activeWindow?.opener,
++  ];
++  for (const win of candidates) {
++    const browserId =
++      win?.gBrowser?.selectedBrowser?.browsingContext?.browserId;
++    if (browserId) {
++      return browserId;
++    }
++  }
+ 
+-  const browserId = win?.gBrowser?.selectedBrowser?.browsingContext?.browserId;
+-  if (browserId) {
+-    return browserId;
++  // Product-neutral embedders may use a chrome window type other than
++  // navigator:browser, so getMostRecentBrowserWindow() legitimately returns
++  // null even though their local-tab facade exposes gBrowser. The focused
++  // window path above handles ordinary and separate toolboxes; this final
++  // fallback also covers a temporarily unfocused application window.
++  for (const win of Services.wm.getEnumerator(null)) {
++    const browserId =
++      win?.gBrowser?.selectedBrowser?.browsingContext?.browserId;
++    if (browserId) {
++      return browserId;
++    }
+   }
+ 
+   console.error(
+diff --git a/devtools/startup/DevToolsStartup.sys.mjs b/devtools/startup/DevToolsStartup.sys.mjs
+index ab008a13b4a6a31b18d5587e93e1ff589693cdac..2c0f4803acb8bdd5f77099265a9ef383c778ad21 100644
+--- a/devtools/startup/DevToolsStartup.sys.mjs
++++ b/devtools/startup/DevToolsStartup.sys.mjs
+@@ -357,6 +357,21 @@ export class DevToolsStartup {
+   }
+ 
+   handle(cmdLine) {
++    if (AppConstants.platform === "android") {
++      // Android products host the toolbox themselves. Do not register Firefox
++      // desktop toolbar hooks or remote command-line listener entry points.
++      return;
++    }
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
++      if (cmdLine.state == Ci.nsICommandLine.STATE_INITIAL_LAUNCH) {
++        Services.obs.addObserver(
++          this.onWindowReady,
++          "browser-delayed-startup-finished"
++        );
++      }
++      return;
++    }
++
+     const flags = this.readCommandLineFlags(cmdLine);
+ 
+     // handle() can be called after browser startup (e.g. opening links from other apps).
+@@ -566,6 +581,11 @@ export class DevToolsStartup {
+    * @param {Window} window
+    */
+   onWindowReady(window) {
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS) {
++      JsonView.initialize();
++      return;
++    }
++
+     if (
+       this.isDisabledByPolicy() ||
+       AppConstants.MOZ_APP_NAME == "thunderbird"
+diff --git a/dom/base/ChromeUtils.h b/dom/base/ChromeUtils.h
+index 7196b90d7e63bbad6aaa4df73f63e7d437d0f5a6..bcb5d24660cefa38c7f0f5b2914d766e16ce0452 100644
+--- a/dom/base/ChromeUtils.h
++++ b/dom/base/ChromeUtils.h
+@@ -40,6 +40,7 @@ struct WindowActorOptions;
+ class WindowProxyHolder;
+ 
+ class ChromeUtils {
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+  private:
+   // Implemented in devtools/shared/heapsnapshot/HeapSnapshot.cpp
+   static void SaveHeapSnapshotShared(GlobalObject& global,
+diff --git a/dom/chrome-webidl/ChromeUtils.webidl b/dom/chrome-webidl/ChromeUtils.webidl
+index 51da857cb4731e6e2d6f3a0dc499d65266a14212..3883ca67e5ebc8d67dddf269621eafc58096d404 100644
+--- a/dom/chrome-webidl/ChromeUtils.webidl
++++ b/dom/chrome-webidl/ChromeUtils.webidl
+@@ -119,6 +119,7 @@ dictionary ClearResourceCacheOptions {
+  */
+ [ChromeOnly, Exposed=(Window,Worker)]
+ namespace ChromeUtils {
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   /**
+    * Get the |NodeId| for the given JS Object.
+    * |NodeId| is the identifier of |JS::ubi::Node|.
+@@ -1252,6 +1253,7 @@ dictionary ImportESModuleOptionsDictionary {
+  * set of globals, the root has an edge to each global, and an edge for each
+  * incoming JS reference to the selected Zones.
+  */
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ dictionary HeapSnapshotBoundaries {
+   sequence<object> globals;
+   object           debugger;
+diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
+index 08262066fa56d46d4294f7decefec2430cdd41cc..f488257f087499f70b66171b4e78943eb073e9b9 100644
+--- a/dom/ipc/ContentChild.cpp
++++ b/dom/ipc/ContentChild.cpp
+@@ -1956,6 +1956,7 @@ bool ContentChild::DeallocPHalChild(PHalChild* aHal) {
+   return true;
+ }
+ 
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ devtools::PHeapSnapshotTempFileHelperChild*
+ ContentChild::AllocPHeapSnapshotTempFileHelperChild() {
+   return devtools::HeapSnapshotTempFileHelperChild::Create();
+diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
+index e55b7cb78e4f87cfc41bb4958c683c6dd54e1bd3..6b416c6cdc6032908c5331f3b10ba96bab185422 100644
+--- a/dom/ipc/ContentChild.h
++++ b/dom/ipc/ContentChild.h
+@@ -184,6 +184,7 @@ class ContentChild final : public PContentChild,
+   PHalChild* AllocPHalChild();
+   bool DeallocPHalChild(PHalChild*);
+ 
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   PHeapSnapshotTempFileHelperChild* AllocPHeapSnapshotTempFileHelperChild();
+ 
+   bool DeallocPHeapSnapshotTempFileHelperChild(
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+index 9b88a8ec494ff925591d6ac0d792c5dbc761a9fa..eb19173f3e26a8335fd4e28feef7ccab0fb17df4 100644
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -4576,6 +4576,7 @@ bool ContentParent::DeallocPHalParent(hal_sandbox::PHalParent* aHal) {
+   return true;
+ }
+ 
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ devtools::PHeapSnapshotTempFileHelperParent*
+ ContentParent::AllocPHeapSnapshotTempFileHelperParent() {
+   return devtools::HeapSnapshotTempFileHelperParent::Create();
+diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
+index a83a025e7c1125e07ae7606b1aa147dd5c359304..bcfd0d19d0e06fb8aa523d876735d9aa086b532c 100644
+--- a/dom/ipc/ContentParent.h
++++ b/dom/ipc/ContentParent.h
+@@ -529,6 +529,7 @@ class ContentParent final : public PContentParent,
+       const nsTArray<nsString>& aAds, const nsTArray<nsCString>& aSourceHosts);
+ #endif
+ 
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   PHeapSnapshotTempFileHelperParent* AllocPHeapSnapshotTempFileHelperParent();
+ #endif
+ 
+@@ -921,6 +922,7 @@ class ContentParent final : public PContentParent,
+ 
+   bool DeallocPHalParent(PHalParent*);
+ 
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+   bool DeallocPHeapSnapshotTempFileHelperParent(
+       PHeapSnapshotTempFileHelperParent*);
+ #endif
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+index a6979e42afd8e37010bf846153e0a7b238ca0657..ef1951109602f40225dd2d1b45b3c0d4dc7a6699 100644
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -15,6 +15,7 @@ include protocol PExtensions;
+ include protocol PExternalHelperApp;
+ include protocol PHandlerService;
+ include protocol PHal;
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+ include protocol PHeapSnapshotTempFileHelper;
+ #endif
+ include protocol PProcessHangMonitor;
+@@ -513,6 +514,7 @@ sync protocol PContent
+     manages PExternalHelperApp;
+     manages PHal;
+     manages PHandlerService;
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+     manages PHeapSnapshotTempFileHelper;
+ #endif
+     manages PRemotePrintJob;
+@@ -1157,6 +1159,7 @@ parent:
+ 
+     [Nested=inside_cpow] async PHal();
+ 
++#if !defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_DESKTOP_EMBEDDER_DEVTOOLS)
+     async PHeapSnapshotTempFileHelper();
+ #endif
+ 
+diff --git a/mobile/android/installer/package-manifest.in b/mobile/android/installer/package-manifest.in
+index e244c91a83683bfe25d836f0d971867a82e45ca4..4d905663f48238e093af2047f0b93d97d431e7d2 100644
+--- a/mobile/android/installer/package-manifest.in
++++ b/mobile/android/installer/package-manifest.in
+@@ -123,6 +123,12 @@
+ ; DevTools
+ @BINPATH@/chrome/devtools@JAREXT@
+ @BINPATH@/chrome/devtools.manifest
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++@BINPATH@/chrome/devtools-startup@JAREXT@
++@BINPATH@/chrome/devtools-startup.manifest
++@BINPATH@/@PREF_DIR@/debugger.js
++@BINPATH@/@PREF_DIR@/navis-devtools.js
++#endif
+ 
+ ; [Default Preferences]
+ ; All the pref files must be part of base to prevent migration bugs
+diff --git a/mobile/android/moz.configure b/mobile/android/moz.configure
+index 3145a166ee22759c4baff165fe8ac933eb85dc2f..e6f2cb5fbd2737ac0477e626210eda8eed6b468b 100644
+--- a/mobile/android/moz.configure
++++ b/mobile/android/moz.configure
+@@ -154,6 +154,9 @@ include("../shared/moz.configure")
+ include("../../toolkit/moz.configure")
+ 
+ 
++# Navis exposes the same on-device page toolbox as its desktop Platform.
++imply_option("MOZ_DEVTOOLS", "all", when=navis_android_runtime)
++
+ @depends("--enable-observability-runtime")
+ def android_healthreport(observability):
+     return bool(observability)
+diff --git a/mobile/shared/chrome/navis/host.css b/mobile/shared/chrome/navis/host.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ccf5b9003f266112a5e93ea313d432bc98a81e2
+--- /dev/null
++++ b/mobile/shared/chrome/navis/host.css
+@@ -0,0 +1,72 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++@import url("chrome://global/skin/design-system/tokens-platform.css");
++
++.navis-android-browser-container {
++  display: flex;
++  flex: 1;
++  min-width: 0;
++  min-height: 0;
++  flex-direction: column;
++  position: relative;
++  --browser-stack-z-index-rdm-toolbar: 3;
++}
++
++.navis-android-browser-stack {
++  display: grid;
++  flex: 1;
++  min-width: 0;
++  min-height: 0;
++}
++
++.navis-android-content-browser {
++  grid-area: 1 / 1;
++  width: 100%;
++  min-width: 0;
++  min-height: 0;
++}
++
++/* Same host constraint as Navis Desktop. Gecko's original RDM stylesheet
++ * controls grid/scale and handles; normal browser flex must not override it. */
++.browserContainer.responsive-mode > .browserStack > :is(browser, .rdm-screen-box) {
++  width: var(--rdm-width) !important;
++  height: var(--rdm-height) !important;
++  min-width: 0 !important;
++  min-height: 0 !important;
++  max-width: none !important;
++  max-height: none !important;
++  flex: none !important;
++}
++
++:root .browserContainer.responsive-mode > .rdm-toolbar.navis-android-responsive-ui {
++  top: var(--navis-notice-height, 0px);
++  height: var(--navis-rdm-toolbar-height) !important;
++}
++:root .browserContainer.responsive-mode > .rdm-toolbar.navis-android-responsive-ui:is(.navis-responsive-popup-open, .device-modal-opened) {
++  height: calc(100% - var(--navis-notice-height, 0px)) !important;
++}
++.browserContainer.responsive-mode:has(> .navis-android-responsive-ui) > .browserStack {
++  grid-template-rows: calc(var(--navis-rdm-toolbar-height) + 5px) [margin-top-offset] var(--rdm-height) [below-browser] 1fr;
++}
++.notificationbox-stack {
++  flex: none;
++  width: 100%;
++  min-width: 0;
++  font: 14px/1.5 sans-serif;
++  color: CanvasText;
++  color-scheme: light dark;
++}
++.navis-responsive-reload {
++  min-height: 36px;
++  padding: 4px 12px;
++  font: inherit;
++  border: 1px solid var(--border-color);
++  border-radius: var(--border-radius-small);
++  color: var(--button-text-color);
++  background: var(--button-background-color);
++  cursor: pointer;
++}
++.navis-responsive-reload:hover { background: var(--button-background-color-hover); }
++.navis-responsive-reload:focus-visible { outline: 2px solid var(--focus-outline-color); }
+diff --git a/mobile/shared/chrome/navis/responsive.css b/mobile/shared/chrome/navis/responsive.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..ebabd9408a64acd6cba2f0779a81279938a27e40
+--- /dev/null
++++ b/mobile/shared/chrome/navis/responsive.css
+@@ -0,0 +1,29 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* Owned Navis Android iframe only: same controls, fonts, colors and handlers. */
++@media (max-width: 520px) {
++  #toolbar, #toolbar:not(.left-aligned) {
++    display: flex;
++    flex-wrap: wrap;
++    align-items: center;
++    justify-content: start;
++    gap: 2px;
++    padding: 2px;
++    background-image: none;
++  }
++  #toolbar-center-controls, #toolbar-end-controls { display: contents; }
++  #toolbar .devtools-separator { display: none; }
++  #toolbar::before { content: ""; order: 3; flex-basis: 100%; height: 0; }
++  #toolbar #device-selector { order: 0; flex: 1; min-width: 100px; max-width: none; margin-inline-start: 0; }
++  #toolbar .viewport-dimension { order: 1; flex: none; }
++  #toolbar #rotate-button { order: 2; flex: none; }
++  #toolbar #device-pixel-ratio-menu { order: 4; flex: none; }
++  #toolbar #network-throttling { order: 5; flex: 1; min-width: 70px; }
++  #toolbar #touch-simulation-button { order: 6; flex: none; }
++  #toolbar #screenshot-button { order: 7; flex: none; }
++  #toolbar #settings-button { order: 8; flex: none; }
++  #toolbar #exit-button { order: 9; flex: none; }
++  #toolbar #user-agent-label { order: 10; flex: 1 0 100%; margin: 0; }
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..011052960cd691199d9f9af377ea3bbff27645f8
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidDevTools.sys.mjs
+@@ -0,0 +1,172 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const TOOLS = new Set([
++  "inspector", "webconsole", "jsdebugger", "styleeditor", "netmonitor",
++  "storage", "memory", "performance", "accessibility", "application", "options",
++]);
++
++/** The shared Gecko toolbox, hosted by a Navis native window and local pipe. */
++export function createNavisAndroidDevTools(window) {
++  let frame;
++  let toolbox;
++  let client;
++  let commands;
++  let closed = false;
++  let target;
++  let targetHost;
++  let originalZoom;
++  let viewportOperation = null;
++  let closing;
++
++  async function restoreViewport() {
++    await targetHost?.restore();
++    if (target?.browsingContext && !target.documentGlobal?.closed && originalZoom !== undefined) {
++      target.fullZoom = originalZoom;
++    }
++  }
++
++  return {
++    async open(targetSessionId, tool) {
++      if (!Number.isSafeInteger(targetSessionId) || targetSessionId <= 0 ||
++          (tool !== "default" && !TOOLS.has(tool))) {
++        throw new TypeError("Invalid developer tools target");
++      }
++      const targetWindow = [...Services.wm.getEnumerator("navigator:navis-android")]
++        .find(candidate => candidate.tab?.id === targetSessionId && !candidate.tab.isPopup);
++      target = targetWindow?.browser;
++      if (!target?.browsingContext || targetWindow.closed) {
++        throw new Error("The inspected tab has closed");
++      }
++      const { PrivateBrowsingUtils } = ChromeUtils.importESModule(
++        "resource://gre/modules/PrivateBrowsingUtils.sys.mjs"
++      );
++      if (PrivateBrowsingUtils.isBrowserPrivate(target) !== PrivateBrowsingUtils.isWindowPrivate(window)) {
++        throw new Error("Developer tools privacy context must match the inspected tab");
++      }
++      targetHost = targetWindow.navisResponsiveTarget;
++      if (!targetHost || targetHost.tab !== targetWindow.tab) {
++        throw new Error("The inspected Session has no owned viewport container");
++      }
++      // A previous Activity may still be finishing its tool host. Do not take
++      // an emulated zoom as this replacement host's baseline.
++      await targetHost.restore();
++      originalZoom = target.fullZoom;
++      const { ensureNavisAndroidLocales } = ChromeUtils.importESModule(
++        "resource://gre/modules/NavisAndroidLocales.sys.mjs"
++      );
++      await ensureNavisAndroidLocales();
++      if (closed) throw new Error("Developer tools host closed");
++
++      // This non-remote chrome frame is created only in a dedicated native host.
++      // Ordinary content never navigates to a privileged toolbox URL.
++      frame = window.document.createXULElement("browser");
++      frame.setAttribute("type", "content");
++      frame.setAttribute("flex", "1");
++      frame.setAttribute("disablehistory", "true");
++      frame.setAttribute("manualactiveness", "true");
++      frame.style.minWidth = "0";
++      frame.style.minHeight = "0";
++      window.document.documentElement.appendChild(frame);
++      const loaded = new Promise((resolve, reject) => {
++        const timer = window.setTimeout(() => reject(new Error("Toolbox document timed out")), 20_000);
++        frame.addEventListener("DOMContentLoaded", event => {
++          if (event.target.documentURI !== "about:devtools-toolbox") return;
++          window.clearTimeout(timer);
++          resolve();
++        }, { capture: true });
++      });
++      frame.loadURI(Services.io.newURI("about:devtools-toolbox"), {
++        triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
++      });
++      frame.docShellIsActive = true;
++      await loaded;
++      if (closed) throw new Error("Developer tools host closed");
++
++      const { require } = ChromeUtils.importESModule(
++        "resource://devtools/shared/loader/Loader.sys.mjs"
++      );
++      const { DevToolsServer } = require("devtools/server/devtools-server");
++      const { DevToolsClient } = require("devtools/client/devtools-client");
++      const { CommandsFactory } = require("devtools/shared/commands/commands-factory");
++      const { gDevTools } = require("devtools/client/framework/devtools");
++      const { Toolbox } = require("devtools/client/framework/toolbox");
++      DevToolsServer.init();
++      DevToolsServer.registerAllActors();
++      DevToolsServer.chromeWindowType = "navigator:navis-android";
++      DevToolsServer.setRootActor(require("resource://gre/modules/dbg-browser-actors.js").createRootActor);
++      client = new DevToolsClient(DevToolsServer.connectPipe());
++      await client.connect();
++      commands = await CommandsFactory.forRemoteTab(target.browserId, { client });
++      if (closed) {
++        await commands.destroy();
++        throw new Error("Developer tools host closed");
++      }
++      toolbox = await gDevTools.showToolbox(commands, {
++        // The private window-name token cannot carry null. An ordinary menu
++        // opening leaves selection to Gecko's persisted LAST_TOOL preference;
++        // explicit Inspect still supplies "inspector".
++        toolId: tool === "default" ? undefined : tool,
++        hostType: Toolbox.HostType.PAGE,
++        hostOptions: { customIframe: frame },
++      });
++      if (closed) {
++        await toolbox.destroy();
++        throw new Error("Developer tools host closed");
++      }
++      window.document.title = "Developer tools";
++      console.info("NavisAndroid DevTools ready", { targetSessionId, tool, transport: "pipe" });
++    },
++    async query(operation, data) {
++      if (!data || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length > 1) {
++        throw new TypeError("Invalid developer-tools operation");
++      }
++      if (operation === "devtools:close") {
++        await this.close();
++        return { restored: true };
++      }
++      if (operation !== "devtools:viewport" || closed || !toolbox ||
++          !target?.browsingContext || target.documentGlobal?.closed) {
++        throw new Error("Developer-tools viewport is unavailable");
++      }
++      if (viewportOperation) throw new Error("A viewport operation is already pending");
++      const action = data.command;
++      if (!["responsive-toggle", "zoom-in", "zoom-out", "reset-zoom"].includes(action)) {
++        throw new TypeError("Unknown viewport command");
++      }
++      const pending = Promise.resolve().then(() => action === "responsive-toggle"
++        ? targetHost.toggle() : targetHost.zoom(action));
++      viewportOperation = pending;
++      try { return await pending; }
++      finally { if (viewportOperation === pending) viewportOperation = null; }
++    },
++    close() {
++      if (closing) return closing;
++      closed = true;
++      closing = (async () => {
++        try {
++          // A toolbar close must not race an in-flight RDM initialize. Keep the
++          // actual target view alive until Gecko has removed all emulation.
++          await viewportOperation?.catch(() => {});
++          await restoreViewport();
++        } catch (error) {
++          closed = false;
++          closing = null;
++          throw error;
++        }
++        try {
++          // Toolbox destruction releases its own commands/client, not the
++          // unrelated browser Session or a global active tab.
++          const cleanup = toolbox ? toolbox.destroy() : commands ? commands.destroy() : client?.close();
++          await cleanup;
++        } finally {
++          frame?.remove();
++          frame = null;
++        }
++      })();
++      closing.catch(Cu.reportError);
++      return closing;
++    },
++  };
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidLocales.sys.mjs b/mobile/shared/modules/navis/NavisAndroidLocales.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ba6faa5a75926316a5682b84330b7f032baaee6
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidLocales.sys.mjs
+@@ -0,0 +1,40 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++import { AddonManager } from "resource://gre/modules/AddonManager.sys.mjs";
++
++const ID = "langpack-zh-CN@firefox.mozilla.org";
++const BASE = "resource://android/assets/navis_locales/zh-CN/";
++let readiness;
++
++/** Installs only the immutable, build-verified copy of the shared desktop locale. */
++export function ensureNavisAndroidLocales() {
++  if (!readiness) {
++    readiness = (async () => {
++      await AddonManager.readyPromise;
++      const metadata = await (await fetch(BASE + "metadata.json")).json();
++      if (metadata.id !== ID || metadata.locale !== "zh-CN" || typeof metadata.version !== "string") {
++        throw new Error("The packaged Navis language metadata is invalid");
++      }
++      let addon = await AddonManager.getAddonByID(ID);
++      if (addon && addon.scope !== AddonManager.SCOPE_APPLICATION) {
++        throw new Error("The application locale ID belongs to another install scope");
++      }
++      if (!addon || addon.version !== metadata.version || addon.getResourceURI("").spec !== BASE) {
++        addon = await AddonManager.installBuiltinAddon(BASE);
++      }
++      if (addon.id !== ID || addon.type !== "locale" || addon.version !== metadata.version ||
++          addon.scope !== AddonManager.SCOPE_APPLICATION) {
++        throw new Error("The built-in Navis language pack is invalid");
++      }
++      if (addon.userDisabled) await addon.enable();
++      await addon.startupPromise;
++      if (!addon.isActive) throw new Error("The built-in Navis language pack did not start");
++    })().catch(error => {
++      readiness = undefined;
++      throw error;
++    });
++  }
++  return readiness;
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs b/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bd3c701a94590de26872414fe9e93c75dca0370
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidResponsive.sys.mjs
+@@ -0,0 +1,258 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++let browserLifecycleDetached = false;
++
++function manager() {
++  const { require } = ChromeUtils.importESModule(
++    "resource://devtools/shared/loader/Loader.sys.mjs");
++  const { gDevToolsBrowser } = require("devtools/client/framework/devtools-browser");
++  if (!browserLifecycleDetached) {
++    // As on desktop, use the shared stylesheet service, not Firefox's window
++    // startup/shutdown ownership. Navis closes its own toolbox and RDM clients.
++    for (const topic of ["browser-delayed-startup-finished", "quit-application", "devtools:loader:destroy"]) {
++      try { Services.obs.removeObserver(gDevToolsBrowser, topic); } catch {}
++    }
++    browserLifecycleDetached = true;
++  }
++  return require("devtools/client/responsive/manager");
++}
++
++/** Events identify the actual Navis tab, including its remoteness/close owner. */
++class TabEvents {
++  listeners = new Map();
++  addEventListener(type, listener, options = {}) {
++    if (!listener || options?.signal?.aborted) return;
++    if (!this.listeners.has(type)) this.listeners.set(type, new Map());
++    const entries = this.listeners.get(type);
++    if (entries.has(listener)) return;
++    const entry = { once: Boolean(options?.once), signal: options?.signal };
++    entry.abort = () => this.removeEventListener(type, listener);
++    entries.set(listener, entry);
++    entry.signal?.addEventListener("abort", entry.abort, { once: true });
++  }
++  removeEventListener(type, listener) {
++    const entry = this.listeners.get(type)?.get(listener);
++    entry?.signal?.removeEventListener("abort", entry.abort);
++    this.listeners.get(type)?.delete(listener);
++  }
++  emit(type, tab) {
++    const event = Object.freeze({ type, target: tab, currentTarget: tab });
++    for (const [listener, entry] of [...(this.listeners.get(type) || [])]) {
++      if (entry.once) this.removeEventListener(type, listener);
++      try {
++        if (typeof listener === "function") listener.call(tab, event);
++        else listener.handleEvent(event);
++      } catch (error) { Cu.reportError(error); }
++    }
++  }
++  clear() {
++    for (const [type, entries] of this.listeners) {
++      for (const listener of [...entries.keys()]) this.removeEventListener(type, listener);
++    }
++    this.listeners.clear();
++  }
++}
++
++/**
++ * Real target-side host contract. Construct before the browser's FIRST DOM
++ * insertion: moving a live remote browser would discard its page/session state.
++ * The container owns the existing browser, never a screenshot or second tab.
++ */
++export function createNavisAndroidResponsiveTarget(window, browser, tab) {
++  if (window.document.documentURI !== "chrome://navis-android/content/host.xhtml" ||
++      browser.documentGlobal !== window || tab.browser !== browser || tab.isPopup ||
++      browser.isConnected || window.gBrowser) {
++    throw new Error("Responsive target requires an uninserted owned Navis browser");
++  }
++  const document = window.document;
++  const container = document.createXULElement("vbox");
++  container.className = "navis-android-browser-container browserContainer";
++  const stack = document.createXULElement("stack");
++  stack.className = "navis-android-browser-stack browserStack";
++  browser.classList.add("navis-android-content-browser");
++  stack.append(browser);
++  container.append(stack);
++  const events = new TabEvents();
++  const selections = new TabEvents();
++  let closed = false;
++  let ready = false;
++  let notificationBox;
++  let notificationOwner;
++  let responsiveManager;
++  let responsiveUICleanup;
++  let zoomBeforeResponsive;
++
++  Object.defineProperties(tab, {
++    tagName: { value: "tab" },
++    ownerDocument: { get: () => document },
++    documentGlobal: { get: () => window },
++    selected: { get: () => tab.getActive() },
++    addEventListener: { value: events.addEventListener.bind(events) },
++    removeEventListener: { value: events.removeEventListener.bind(events) },
++  });
++  const checkBrowser = candidate => {
++    if (closed || candidate !== browser || browser.documentGlobal !== window) {
++      throw new Error("The responsive target no longer belongs to this host");
++    }
++    return browser;
++  };
++  window.gBrowser = Object.freeze({
++    get selectedTab() { return closed ? null : tab; },
++    set selectedTab(candidate) {
++      if (candidate !== tab || closed) throw new Error("Cannot select another Session through this render host");
++      browser.focus();
++    },
++    get selectedBrowser() { return closed ? null : browser; },
++    get tabs() { return closed ? [] : [tab]; },
++    get browsers() { return closed ? [] : [browser]; },
++    tabContainer: selections,
++    getBrowserForTab(candidate) {
++      if (candidate !== tab) throw new Error("The tab belongs to another Session");
++      return checkBrowser(browser);
++    },
++    getTabForBrowser(candidate) { checkBrowser(candidate); return tab; },
++    getBrowserContainer(candidate) { checkBrowser(candidate); return container; },
++    getNotificationBox(candidate) {
++      checkBrowser(candidate);
++      // Use Gecko's actual visible notification widget, not a no-op facade.
++      if (!notificationBox) {
++        const { createNavisResponsiveNotifications } = ChromeUtils.importESModule(
++          "resource://gre/modules/NavisAndroidResponsiveUI.sys.mjs");
++        notificationOwner = createNavisResponsiveNotifications(window, browser, container);
++        notificationBox = notificationOwner.box;
++      }
++      return notificationBox;
++    },
++  });
++  window.gFissionBrowser = true;
++  window.gBrowserInit = Object.freeze({
++    get delayedStartupFinished() { return ready && !closed; },
++    isAdoptingTab: () => false,
++  });
++  const media = window.matchMedia("(prefers-color-scheme: dark)");
++  const updateTheme = () => {
++    const pref = Services.prefs.getStringPref("devtools.theme", "auto");
++    document.documentElement.setAttribute("devtoolstheme",
++      pref === "dark" || (pref === "auto" && media.matches) ? "dark" : "light");
++  };
++  media.addEventListener("change", updateTheme);
++  Services.prefs.addObserver("devtools.theme", updateTheme);
++  updateTheme();
++  const remotenessChanged = () => events.emit("TabRemotenessChange", tab);
++  browser.addEventListener("XULFrameLoaderCreated", remotenessChanged);
++  const restoreResponsiveZoom = ({ tab: changedTab }) => {
++    if (changedTab !== tab) return;
++    responsiveUICleanup?.();
++    responsiveUICleanup = null;
++    if (zoomBeforeResponsive === undefined) return;
++    if (!closed && browser.browsingContext) browser.fullZoom = zoomBeforeResponsive;
++    zoomBeforeResponsive = undefined;
++  };
++
++  async function closeResponsive() {
++    if (!responsiveManager?.isActiveForTab(tab)) return;
++    let finished;
++    const completion = new Promise(resolve => { finished = resolve; });
++    const onClosed = ({ tab: changedTab }) => { if (changedTab === tab) finished(); };
++    responsiveManager.on("off", onClosed);
++    try {
++      await responsiveManager.closeIfNeeded(window, tab, { trigger: "toolbox" });
++      // The upstream toolbar may already be destroying this UI. In that case
++      // closeIfNeeded returns early: only its actual "off" confirms cleanup.
++      if (responsiveManager.isActiveForTab(tab)) await completion;
++    } finally { responsiveManager.off("off", onClosed); }
++  }
++
++  async function rollbackFailedOpen() {
++    const ui = responsiveManager?.getResponsiveUIForTab(tab);
++    if (!ui) return;
++    // Upstream initialized is resolved only after success. Calling its normal
++    // destroy after initialize rejects would wait forever. Undo only resources
++    // this failed transaction actually acquired, including the real actor
++    // clients (which own UA/DPR/touch overrides); do not report a tab discard.
++    if (ui.networkFront) await ui.updateNetworkThrottling();
++    await ui.commands?.destroy();
++    events.removeEventListener("TabBrowserDiscarded", ui);
++    events.removeEventListener("TabClose", ui);
++    window.removeEventListener("unload", ui);
++    window.removeEventListener("FullZoomChange", ui);
++    for (const type of ["mousedown", "mousemove", "mouseup"]) browser.removeEventListener(type, ui);
++    ui.resizeToolbarObserver?.disconnect();
++    ui.rdmFrame?.contentWindow?.removeEventListener("message", ui);
++    ui.rdmFrame?.contentWindow?.destroy?.();
++    ui.rdmFrame?.remove();
++    ui.screenBox?.remove();
++    if (browser.browsingContext) {
++      browser.leaveResponsiveMode();
++      window.InspectorUtils.setVerticalClipping(browser.browsingContext, 0);
++      window.InspectorUtils.setDynamicToolbarMaxHeight(browser.browsingContext, 0);
++    }
++    container.classList.remove("responsive-mode");
++    for (const name of ["--rdm-width", "--rdm-height", "--rdm-zoom"]) stack.style.removeProperty(name);
++    for (const name of ["top", "visibility"]) browser.style.removeProperty(name);
++    responsiveManager.activeTabs.delete(tab);
++    responsiveManager.removeMenuCheckListenerFor(window);
++    responsiveManager.emit("off", { tab });
++  }
++
++  return Object.freeze({
++    container,
++    tab,
++    markReady() { ready = true; },
++    selectionChanged() { if (!closed) selections.emit("TabSelect", tab); },
++    async toggle() {
++      checkBrowser(browser);
++      if (!ready || browser.navisNativePresentation !== false || !browser.browsingContext) {
++        throw new Error("Responsive Design needs a live web document");
++      }
++      if (!responsiveManager) {
++        responsiveManager = manager();
++        responsiveManager.on("off", restoreResponsiveZoom);
++      }
++      if (responsiveManager.isActiveForTab(tab)) await closeResponsive();
++      else {
++        zoomBeforeResponsive = browser.fullZoom;
++        try {
++          const ui = await responsiveManager.openIfNeeded(window, tab, { trigger: "toolbox" });
++          const { bindNavisAndroidResponsiveUI } = ChromeUtils.importESModule(
++            "resource://gre/modules/NavisAndroidResponsiveUI.sys.mjs");
++          responsiveUICleanup = await bindNavisAndroidResponsiveUI(window, ui);
++        }
++        catch (error) { await rollbackFailedOpen(); throw error; }
++      }
++      return { responsive: responsiveManager.isActiveForTab(tab), zoom: browser.fullZoom };
++    },
++    zoom(command) {
++      checkBrowser(browser);
++      if (!ready || browser.navisNativePresentation !== false) throw new Error("The target has no web viewport");
++      const current = browser.fullZoom;
++      const next = command === "zoom-in" ? current + 0.1 : command === "zoom-out" ? current - 0.1 :
++        command === "reset-zoom" ? 1 : NaN;
++      if (!Number.isFinite(next)) throw new TypeError("Unknown viewport zoom command");
++      browser.fullZoom = Math.min(2, Math.max(0.25, Math.round(next * 100) / 100));
++      return { zoom: browser.fullZoom };
++    },
++    async restore() {
++      await closeResponsive();
++    },
++    destroy() {
++      if (closed) return;
++      responsiveUICleanup?.();
++      responsiveUICleanup = null;
++      notificationOwner?.destroy();
++      events.emit("TabClose", tab);
++      responsiveManager?.off("off", restoreResponsiveZoom);
++      if (responsiveManager?.isActiveForTab(tab)) {
++        responsiveManager.closeIfNeeded(window, tab, { reason: "unload" }).catch(Cu.reportError);
++      }
++      closed = true;
++      events.clear();
++      selections.clear();
++      browser.removeEventListener("XULFrameLoaderCreated", remotenessChanged);
++      media.removeEventListener("change", updateTheme);
++      Services.prefs.removeObserver("devtools.theme", updateTheme);
++    },
++  });
++}
+diff --git a/mobile/shared/modules/navis/NavisAndroidResponsiveUI.sys.mjs b/mobile/shared/modules/navis/NavisAndroidResponsiveUI.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a708bda8186be103b72dfdf67d5f6c0bbd9bb8cc
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidResponsiveUI.sys.mjs
+@@ -0,0 +1,136 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/** Adapt only layout/overlay ownership; original RDM controls and events remain. */
++export async function bindNavisAndroidResponsiveUI(window, ui) {
++  const frame = ui.rdmFrame;
++  const document = frame.contentDocument;
++  const container = ui.browserContainerEl;
++  const toolbar = document.getElementById("toolbar");
++  if (!toolbar || !document.nodePrincipal.isSystemPrincipal || frame.documentGlobal !== window) {
++    throw new Error("Responsive toolbar does not belong to this chrome host");
++  }
++  const stylesheet = document.createElement("link");
++  stylesheet.rel = "stylesheet";
++  stylesheet.href = "chrome://navis-android/content/responsive.css";
++  let discard;
++  const loaded = new Promise((resolve, reject) => {
++    discard = () => reject(new Error("Responsive toolbar closed while styling"));
++    document.defaultView.addEventListener("unload", discard, { once: true });
++    stylesheet.addEventListener("load", resolve, { once: true });
++    stylesheet.addEventListener("error", () => reject(new Error("Responsive layout stylesheet failed")), { once: true });
++  });
++  document.head.append(stylesheet);
++  try { await loaded; }
++  catch (error) { stylesheet.remove(); throw error; }
++  finally { document.defaultView.removeEventListener("unload", discard); }
++  if (!frame.isConnected || ui.destroying) { stylesheet.remove(); throw new Error("Responsive toolbar closed"); }
++  let closed = false;
++  let height = 0;
++  const leases = new Set();
++  const measure = () => {
++    if (closed || !frame.isConnected) return;
++    const next = Math.ceil(toolbar.getBoundingClientRect().height);
++    if (next > 0 && next !== height) {
++      height = next;
++      container.style.setProperty("--navis-rdm-toolbar-height", `${height}px`);
++    }
++  };
++  const popupHost = Object.freeze({
++    acquire(ownerDocument) {
++      if (closed || ownerDocument !== document || frame.contentDocument !== document || !frame.isConnected) {
++        throw new Error("Responsive popup belongs to an obsolete document");
++      }
++      const lease = {};
++      leases.add(lease);
++      frame.classList.add("navis-responsive-popup-open");
++      // Expand before HTMLTooltip measures; its original dismissal still owns
++      // outside-click, keyboard and focus behavior.
++      return () => {
++        if (!leases.delete(lease) || closed) return;
++        if (!leases.size) frame.classList.remove("navis-responsive-popup-open");
++      };
++    },
++  });
++  frame.navisResponsivePopupHost = popupHost;
++  frame.classList.add("navis-android-responsive-ui");
++  const observer = new window.ResizeObserver(measure);
++  observer.observe(toolbar);
++  measure();
++  return () => {
++    if (closed) return;
++    closed = true;
++    observer.disconnect();
++    leases.clear();
++    if (frame.navisResponsivePopupHost === popupHost) delete frame.navisResponsivePopupHost;
++    frame.classList.remove("navis-responsive-popup-open", "navis-android-responsive-ui");
++    container.style.removeProperty("--navis-rdm-toolbar-height");
++    stylesheet.remove();
++  };
++}
++
++/** Real NotificationBox, with explicit reload and document-scoped lifetime. */
++export function createNavisResponsiveNotifications(window, browser, container) {
++  let closed = false;
++  let documentEpoch = 0;
++  let noticeHeight = 0;
++  const resize = new window.ResizeObserver(entries => {
++    if (closed) return;
++    for (const entry of entries) {
++      const next = Math.ceil(entry.target.getBoundingClientRect().height);
++      if (next !== noticeHeight) {
++        noticeHeight = next;
++        container.style.setProperty("--navis-notice-height", `${next}px`);
++      }
++    }
++  });
++  const box = new window.MozElements.NotificationBox(element => {
++    if (closed) return;
++    container.prepend(element);
++    resize.observe(element);
++  });
++  const append = box.appendNotification.bind(box);
++  box.appendNotification = async (value, options, ...args) => {
++    if (closed) throw new Error("Responsive notification host is closed");
++    const epoch = documentEpoch;
++    const notification = await append(value, options, ...args);
++    if (closed || epoch !== documentEpoch) { box.removeNotification(notification, true); return notification; }
++    if (value !== "devtools-responsive") return notification;
++    // Upstream first-use explanation, not proof this document needs a reload.
++    // Preserve its text and offer a deliberate action without discarding edits.
++    const button = window.document.createElement("button");
++    button.type = "button";
++    button.className = "navis-responsive-reload";
++    button.setAttribute("slot", "actions");
++    button.textContent = Services.strings.createBundle("chrome://devtools/locale/toolbox.properties")
++      .GetStringFromName("toolbox.debugTargetInfo.reload");
++    button.addEventListener("click", () => {
++      if (closed || epoch !== documentEpoch || !browser.browsingContext || browser.navisNativePresentation !== false) return;
++      // Keep Gecko's beforeunload / request / container behavior. Clear only
++      // when a new document commits, not merely because this button was pressed.
++      browser.reload();
++    });
++    notification.append(button);
++    return notification;
++  };
++  const progress = {
++    QueryInterface: ChromeUtils.generateQI(["nsIWebProgressListener", "nsISupportsWeakReference"]),
++    onLocationChange(webProgress, _request, _location, flags) {
++      if (closed || !webProgress.isTopLevel || flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT) return;
++      documentEpoch++;
++      const notice = box.getNotificationWithValue("devtools-responsive");
++      if (notice) box.removeNotification(notice, true);
++    },
++  };
++  browser.addProgressListener(progress, Ci.nsIWebProgress.NOTIFY_LOCATION);
++  return Object.freeze({ box, destroy() {
++    if (closed) return;
++    closed = true;
++    documentEpoch++;
++    resize.disconnect();
++    container.style.removeProperty("--navis-notice-height");
++    try { browser.removeProgressListener(progress); }
++    finally { box.removeAllNotifications(true); }
++  } });
++}
+diff --git a/netwerk/protocol/about/nsAboutProtocolHandler.cpp b/netwerk/protocol/about/nsAboutProtocolHandler.cpp
+index 8337daae876a63ffb695d355c520e5e821832dba..d314d63a7521f0e1f81bd9715d56e0b05024ff53 100644
+--- a/netwerk/protocol/about/nsAboutProtocolHandler.cpp
++++ b/netwerk/protocol/about/nsAboutProtocolHandler.cpp
+@@ -33,6 +33,11 @@ static bool IsDesktopEmbedderEngineAboutURI(nsIURI* aURI) {
+   if (NS_FAILED(NS_GetAboutModuleName(aURI, name))) {
+     return false;
+   }
++#  ifdef MOZ_DESKTOP_EMBEDDER_DEVTOOLS
++  if (name.EqualsLiteral("devtools-toolbox")) {
++    return true;
++  }
++#  endif
+   return name.EqualsLiteral("blank") || name.EqualsLiteral("srcdoc") ||
+          name.EqualsLiteral("neterror") || name.EqualsLiteral("certerror") ||
+          name.EqualsLiteral("httpsonlyerror") ||
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+index f7ec20ee9b956652585f99d676492cdf2e7db000..399beff97fdd6500d4391484e138fb8302198bd7 100644
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -128,6 +128,8 @@ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+         "timermanager",
+         "translations",
+     ]
++    if not CONFIG["MOZ_DESKTOP_EMBEDDER_DEVTOOLS"]:
++        excluded_component_dirs += ["viewsource"]
+     component_dirs = [
+         directory
+         for directory in component_dirs
+diff --git a/toolkit/locales/en-US/toolkit/branding/brandings.ftl b/toolkit/locales/en-US/toolkit/branding/brandings.ftl
+index 97f695334a1f342fd1d37b41aec0ab161bdf0d5d..6fa0d0a5eea2c6dba8e0852fc7ba9ddd1f193caa 100644
+--- a/toolkit/locales/en-US/toolkit/branding/brandings.ftl
++++ b/toolkit/locales/en-US/toolkit/branding/brandings.ftl
+@@ -22,7 +22,7 @@
+ -send-brand-name = Firefox Send
+ -screenshots-brand-name = Firefox Screenshots
+ -mozilla-vpn-brand-name = Mozilla VPN
+--profiler-brand-name = Firefox Profiler
++-profiler-brand-name = { -brand-shorter-name } Profiler
+ -translations-brand-name = Firefox Translations
+ -focus-brand-name = Firefox Focus
+ -relay-brand-name = Firefox Relay
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index 0c73a3a91c3af521ca1cd3cf12b507a236d43bc9..307a8298cd5cbbafb1fb53eceb6ed149d025669f 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -168,6 +168,13 @@ export var AppConstants = Object.freeze({
+   Object.freeze([]),
+ #endif
+ 
++  MOZ_DESKTOP_EMBEDDER_DEVTOOLS:
++#ifdef MOZ_DESKTOP_EMBEDDER_DEVTOOLS
++  true,
++#else
++  false,
++#endif
++
+   ENABLE_TESTS:
+ #ifdef ENABLE_TESTS
+   true,
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+index 61603b91747d72c7419d73a24e6a8a886b0bef17..5783f29491bc6986ee62750934632dd208703f2e 100644
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -51,6 +51,38 @@ option(
+ )
+ set_config("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+ set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
++
++option(
++    "--enable-desktop-embedder-devtools",
++    help="Build Gecko page developer tools for the desktop embedder",
++)
++
++
++@depends("--enable-desktop-embedder-devtools", "--enable-desktop-embedder")
++def desktop_embedder_devtools(value, desktop_embedder):
++    if value and not desktop_embedder:
++        die(
++            "--enable-desktop-embedder-devtools requires "
++            "--enable-desktop-embedder"
++        )
++    return bool(value)
++
++
++set_config("MOZ_DESKTOP_EMBEDDER_DEVTOOLS", desktop_embedder_devtools)
++set_define("MOZ_DESKTOP_EMBEDDER_DEVTOOLS", True, when=desktop_embedder_devtools)
++
++
++@depends(desktop_embedder_devtools)
++def desktop_embedder_devtools_mode(value):
++    return "all" if value else "none"
++
++
++imply_option(
++    "MOZ_DEVTOOLS",
++    desktop_embedder_devtools_mode,
++    reason="--enable-desktop-embedder",
++    when="--enable-desktop-embedder",
++)
+ imply_option(
+     "MOZ_DESKTOP_EMBEDDER_HISTORY", True, when="--enable-desktop-embedder"
+ )
+diff --git a/toolkit/themes/mobile/global/jar.mn b/toolkit/themes/mobile/global/jar.mn
+index 23e0b99085a71e2f7b984db7fb76edec0abbb89e..a6e441a174269ac489095e724e65bbc4c31d4714 100644
+--- a/toolkit/themes/mobile/global/jar.mn
++++ b/toolkit/themes/mobile/global/jar.mn
+@@ -10,3 +10,14 @@
+    skin/classic/global/aboutNetworking.css
+    skin/classic/global/aboutSupport.css
+    skin/classic/global/icons/edit-copy.svg                  (../../shared/icons/edit-copy.svg)
++
++# Navis uses Gecko's actual notification widget, including its close button.
++# Do not import the desktop browser theme; provide only this widget's assets.
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++   skin/classic/global/design-system/tokens-shared.css      (../../shared/design-system/dist/tokens-shared.css)
++   skin/classic/global/design-system/tokens-platform.css    (../../shared/design-system/dist/tokens-platform.css)
++   skin/classic/global/icons/info-filled.svg                (../../shared/icons/info-filled.svg)
++   skin/classic/global/icons/close.svg                      (../../shared/icons/close.svg)
++   skin/classic/global/icons/check-filled.svg               (../../shared/icons/check-filled.svg)
++   skin/classic/global/icons/warning.svg                    (../../shared/icons/warning.svg)
++#endif

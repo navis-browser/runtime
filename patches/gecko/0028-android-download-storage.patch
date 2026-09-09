@@ -1,0 +1,1778 @@
+diff --git a/mobile/android/components/geckoview/GeckoViewStreamListener.cpp b/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
+index 140ab9e11893ad74cbdaa4c4c1d5325b9f843ab6..4b17008be58b8ac2b38225121bec7c9b09a06477 100644
+--- a/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
++++ b/mobile/android/components/geckoview/GeckoViewStreamListener.cpp
+@@ -4,17 +4,22 @@
+ 
+ #include "GeckoViewStreamListener.h"
+ 
++#include "mozilla/OriginAttributes.h"
+ #include "mozilla/fallible.h"
+ #include "nsIAsyncVerifyRedirectCallback.h"
+ #include "nsIChannelEventSink.h"
+ #include "nsIHttpChannel.h"
+ #include "nsIHttpHeaderVisitor.h"
+ #include "nsIInputStream.h"
++#include "nsILoadInfo.h"
++#include "nsIReferrerInfo.h"
++#include "nsIUploadChannel.h"
+ #include "nsINSSErrorsService.h"
+ #include "nsITransportSecurityInfo.h"
+ #include "nsIWebProgressListener.h"
+ #include "nsIX509Cert.h"
+ #include "nsPrintfCString.h"
++#include "nsString.h"
+ #include "nsContentSecurityUtils.h"
+ #include "nsITransfer.h"
+ 
+@@ -204,6 +209,16 @@ nsresult GeckoViewStreamListener::HandleWebResponse(nsIRequest* aRequest) {
+   java::WebResponse::Builder::LocalRef builder =
+       java::WebResponse::Builder::New(uriSpec);
+ 
++  // Preserve Gecko's resolved filename separately from the response headers.
++  // For HTTP this gives Content-Disposition priority over the HTML download
++  // attribute; visiting only the server headers loses the latter entirely.
++  nsAutoString suggestedFileName;
++  if (NS_SUCCEEDED(channel->GetContentDispositionFilename(suggestedFileName)) &&
++      !suggestedFileName.IsEmpty()) {
++    rv = builder->NavisSuggestedFileName(suggestedFileName);
++    NS_ENSURE_SUCCESS(rv, rv);
++  }
++
+   // Body stream
+   if (mStream) {
+     builder->Body(mStream);
+@@ -234,6 +249,42 @@ nsresult GeckoViewStreamListener::HandleWebResponse(nsIRequest* aRequest) {
+     RefPtr<HeaderVisitor> visitor = new HeaderVisitor(builder);
+     rv = httpChannel->VisitResponseHeaders(visitor);
+     NS_ENSURE_SUCCESS(rv, rv);
++
++    // Derive retry eligibility from the channel, never from a URL or response
++    // header. A Navis retry must not replay a POST, upload stream, explicit
++    // authorization, or a cookie context that a plain Session cannot recreate.
++    nsAutoCString method;
++    nsCOMPtr<nsIUploadChannel> uploadChannel = do_QueryInterface(channel);
++    nsCOMPtr<nsIInputStream> uploadStream;
++    nsAutoCString authorization;
++    const nsresult authorizationRv =
++        httpChannel->GetRequestHeader("Authorization"_ns, authorization);
++    const bool noAuthorization =
++        authorizationRv == NS_ERROR_NOT_AVAILABLE ||
++        (NS_SUCCEEDED(authorizationRv) && authorization.IsEmpty());
++    const auto originAttributes = loadInfo->GetOriginAttributes();
++    nsAutoCString originSuffix;
++    originAttributes.CreateSuffix(originSuffix);
++    nsAutoCString referrer;
++    nsCOMPtr<nsIReferrerInfo> referrerInfo;
++    bool referrerKnown = NS_SUCCEEDED(
++        httpChannel->GetReferrerInfo(getter_AddRefs(referrerInfo)));
++    if (referrerKnown && referrerInfo) {
++      referrerKnown =
++          NS_SUCCEEDED(referrerInfo->GetComputedReferrerSpec(referrer));
++    }
++    const bool bodylessGet =
++        NS_SUCCEEDED(httpChannel->GetRequestMethod(method)) &&
++        method.EqualsLiteral("GET") && uploadChannel &&
++        NS_SUCCEEDED(
++            uploadChannel->GetUploadStream(getter_AddRefs(uploadStream))) &&
++        !uploadStream && noAuthorization && referrerKnown &&
++        originAttributes.mUserContextId == 0 &&
++        originAttributes.mFirstPartyDomain.IsEmpty() &&
++        originAttributes.mPartitionKey.IsEmpty();
++    rv = builder->NavisDownloadRetryMetadata(method, bodylessGet, referrer,
++                                             originSuffix);
++    NS_ENSURE_SUCCESS(rv, rv);
+   } else {
+     // Headers for other responses
+     // try to provide some basic metadata about the response
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca9b74018b824f036f024ffb025d9404d7e9864f
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidExtensionDownloads.java
+@@ -0,0 +1,959 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import android.os.Handler;
++import android.os.Looper;
++import java.io.InputStream;
++import java.nio.ByteBuffer;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Set;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.CompletionStage;
++import java.util.function.Function;
++import java.util.function.Supplier;
++import org.mozilla.gecko.EventDispatcher;
++import org.mozilla.gecko.util.BundleEventListener;
++import org.mozilla.gecko.util.EventCallback;
++import org.mozilla.gecko.util.GeckoBundle;
++import org.mozilla.gecko.util.ThreadUtils;
++import org.mozilla.geckoview.GeckoResult;
++import org.mozilla.geckoview.NavisAndroidWebExecutor;
++import org.mozilla.geckoview.WebRequest;
++import org.mozilla.geckoview.WebResponse;
++
++/** Private direct-runtime peer for the Android WebExtensions downloads API. */
++public final class NavisAndroidExtensionDownloads implements AutoCloseable {
++  private static final String DISPATCHER_NAME = "navis-android-extension-downloads";
++
++  private static final String COMMAND_DOWNLOAD = "NavisAndroid:Downloads:Download";
++  private static final String COMMAND_LIST = "NavisAndroid:Downloads:List";
++  private static final String COMMAND_PAUSE = "NavisAndroid:Downloads:Pause";
++  private static final String COMMAND_RESUME = "NavisAndroid:Downloads:Resume";
++  private static final String COMMAND_CANCEL = "NavisAndroid:Downloads:Cancel";
++  private static final String COMMAND_ERASE = "NavisAndroid:Downloads:Erase";
++  private static final String COMMAND_OPEN = "NavisAndroid:Downloads:Open";
++  private static final String COMMAND_SHOW = "NavisAndroid:Downloads:Show";
++  private static final String COMMAND_SHOW_DEFAULT_FOLDER =
++      "NavisAndroid:Downloads:ShowDefaultFolder";
++  private static final String COMMAND_REMOVE_FILE = "NavisAndroid:Downloads:RemoveFile";
++  private static final String COMMAND_GET_FILE_ICON = "NavisAndroid:Downloads:GetFileIcon";
++
++  private static final String EVENT_CREATED = "NavisAndroid:Downloads:Created";
++  private static final String EVENT_CHANGED = "NavisAndroid:Downloads:Changed";
++  private static final String EVENT_ERASED = "NavisAndroid:Downloads:Erased";
++
++  private static final int MAX_URI_CHARS = 64 * 1024;
++  private static final int MAX_PATH_CHARS = 4 * 1024;
++  private static final int MAX_BODY_BYTES = 8 * 1024 * 1024;
++  private static final int MAX_HEADERS = 64;
++  private static final int MAX_HEADER_NAME_CHARS = 256;
++  private static final int MAX_HEADER_VALUE_CHARS = 16 * 1024;
++  private static final int MAX_ERASE_IDS = 10_000;
++  private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
++
++  private static final Set<String> FORBIDDEN_HEADERS =
++      Collections.unmodifiableSet(
++          new HashSet<>(
++              Arrays.asList(
++          "ACCEPT-CHARSET",
++          "ACCEPT-ENCODING",
++          "ACCESS-CONTROL-REQUEST-HEADERS",
++          "ACCESS-CONTROL-REQUEST-METHOD",
++          "CONNECTION",
++          "CONTENT-LENGTH",
++          "COOKIE",
++          "COOKIE2",
++          "DATE",
++          "DNT",
++          "EXPECT",
++          "HOST",
++          "KEEP-ALIVE",
++          "ORIGIN",
++          "TE",
++          "TRAILER",
++          "TRANSFER-ENCODING",
++          "UPGRADE",
++          "VIA")));
++
++  public static final class Header {
++    public final String name;
++    public final String value;
++
++    private Header(final String name, final String value) {
++      this.name = name;
++      this.value = value;
++    }
++  }
++
++  public static final class Request {
++    public final String extensionId;
++    public final String extensionName;
++    public final String sourceUri;
++    public final String suggestedRelativePath;
++    public final boolean privateMode;
++    public final boolean privateBrowsingAllowed;
++    public final boolean saveAs;
++    public final String conflictAction;
++    public final String method;
++    public final Header[] headers;
++    public final String body;
++    public final boolean allowHttpErrors;
++
++    private Request(final GeckoBundle message) {
++      if (message == null) {
++        throw new IllegalArgumentException("Missing extension download request");
++      }
++      extensionId = requiredString(message, "extensionId", 256);
++      extensionName = boundedString(message.getString("extensionName", ""), 256);
++      sourceUri = requiredString(message, "url", MAX_URI_CHARS);
++      requireSupportedUri(sourceUri);
++      if (sourceUri.toLowerCase(Locale.ROOT).startsWith("moz-extension://")) {
++        final String baseUri = requiredString(message, "extensionBaseUri", 1024);
++        if (!baseUri.startsWith("moz-extension://")
++            || !baseUri.endsWith("/")
++            || !sourceUri.startsWith(baseUri)) {
++          throw new IllegalArgumentException("An extension cannot download another extension's resource");
++        }
++      }
++      suggestedRelativePath = optionalString(message, "filename", MAX_PATH_CHARS);
++      validateRelativePath(suggestedRelativePath);
++      privateMode = message.getBoolean("incognito", false);
++      privateBrowsingAllowed = message.getBoolean("privateBrowsingAllowed", false);
++      if (privateMode && !privateBrowsingAllowed) {
++        throw new IllegalArgumentException("Private browsing access not allowed");
++      }
++      validateCookieStore(message.getString("cookieStoreId"), privateMode);
++      saveAs = message.getBoolean("saveAs", false);
++      conflictAction = message.getString("conflictAction", "uniquify").toUpperCase(Locale.ROOT);
++      if (!conflictAction.equals("UNIQUIFY")
++          && !conflictAction.equals("OVERWRITE")
++          && !conflictAction.equals("PROMPT")) {
++        throw new IllegalArgumentException("Invalid filename conflict action");
++      }
++      method = message.getString("method", "GET").toUpperCase(Locale.ROOT);
++      if (!method.equals("GET") && !method.equals("POST")) {
++        throw new IllegalArgumentException("Invalid download request method");
++      }
++      headers = parseHeaders(message.getBundleArray("headers"));
++      body = optionalString(message, "body", MAX_BODY_BYTES);
++      if (body != null && body.getBytes(StandardCharsets.UTF_8).length > MAX_BODY_BYTES) {
++        throw new IllegalArgumentException("Download request body is too large");
++      }
++      allowHttpErrors = message.getBoolean("allowHttpErrors", false);
++    }
++  }
++
++  public static final class Destination {
++    public final long sessionId;
++    public final String destinationUri;
++    public final String replaceExistingUri;
++    public final boolean requireExactFileName;
++
++    public Destination(final long sessionId, final String destinationUri) {
++      this(sessionId, destinationUri, null, false);
++    }
++
++    public Destination(final long sessionId, final String destinationUri,
++        final String replaceExistingUri, final boolean requireExactFileName) {
++      if (sessionId <= 0) {
++        throw new IllegalArgumentException("Invalid extension download session");
++      }
++      if (destinationUri != null && !destinationUri.startsWith("content://")) {
++        throw new IllegalArgumentException("Invalid extension download destination");
++      }
++      this.sessionId = sessionId;
++      this.destinationUri = destinationUri;
++      if (replaceExistingUri != null && (destinationUri != null ||
++          (!replaceExistingUri.startsWith("content://") && !replaceExistingUri.startsWith("file://")))) {
++        throw new IllegalArgumentException("Invalid replacement download destination");
++      }
++      this.replaceExistingUri = replaceExistingUri;
++      this.requireExactFileName = requireExactFileName;
++    }
++  }
++
++  public static final class Response {
++    public final String finalUri;
++    public final int statusCode;
++    public final String contentType;
++    public final String contentDisposition;
++    public final Long contentLength;
++    public final InputStream body;
++
++    private Response(final WebResponse response) {
++      finalUri = boundedString(response.uri, MAX_URI_CHARS);
++      statusCode = response.statusCode;
++      contentType = boundedNullable(response.headers.get("content-type"), 256);
++      contentDisposition = boundedNullable(response.headers.get("content-disposition"), 4096);
++      contentLength = parsePositiveLong(response.headers.get("content-length"));
++      body = response.body;
++    }
++  }
++
++  public static final class Record {
++    public final long id;
++    public final String sourceUri;
++    public final String referrer;
++    public final String filename;
++    public final boolean privateMode;
++    public final String mimeType;
++    public final String startTime;
++    public final String endTime;
++    public final String state;
++    public final boolean paused;
++    public final boolean canResume;
++    public final String error;
++    public final long bytesReceived;
++    public final long totalBytes;
++    public final long fileSize;
++    public final boolean exists;
++    public final String byExtensionId;
++    public final String byExtensionName;
++
++    public Record(
++        final long id,
++        final String sourceUri,
++        final String referrer,
++        final String filename,
++        final boolean privateMode,
++        final String mimeType,
++        final String startTime,
++        final String endTime,
++        final String state,
++        final boolean paused,
++        final boolean canResume,
++        final String error,
++        final long bytesReceived,
++        final long totalBytes,
++        final long fileSize,
++        final boolean exists,
++        final String byExtensionId,
++        final String byExtensionName) {
++      if (id <= 0 || id > MAX_SAFE_INTEGER) {
++        throw new IllegalArgumentException("Invalid extension download ID");
++      }
++      this.id = id;
++      this.sourceUri = boundedString(sourceUri, MAX_URI_CHARS);
++      this.referrer = boundedString(referrer, MAX_URI_CHARS);
++      this.filename = boundedString(filename, MAX_URI_CHARS);
++      this.privateMode = privateMode;
++      this.mimeType = boundedString(mimeType, 256);
++      this.startTime = boundedString(startTime, 64);
++      this.endTime = boundedNullable(endTime, 64);
++      this.state = requiredValue(state, "IN_PROGRESS", "INTERRUPTED", "COMPLETE");
++      this.paused = paused;
++      this.canResume = canResume;
++      this.error = boundedNullable(error, 64);
++      this.bytesReceived = Math.max(0L, bytesReceived);
++      this.totalBytes = Math.max(-1L, totalBytes);
++      this.fileSize = Math.max(-1L, fileSize);
++      this.exists = exists;
++      this.byExtensionId = boundedNullable(byExtensionId, 256);
++      this.byExtensionName = boundedNullable(byExtensionName, 256);
++    }
++
++    private GeckoBundle toBundle() {
++      final GeckoBundle value = new GeckoBundle(20);
++      value.putLong("id", id);
++      value.putString("url", sourceUri);
++      value.putString("referrer", referrer);
++      value.putString("filename", filename);
++      value.putBoolean("incognito", privateMode);
++      value.putString("cookieStoreId", privateMode ? "firefox-private" : "firefox-default");
++      value.putString("danger", "safe");
++      value.putString("mime", mimeType);
++      value.putString("startTime", startTime);
++      value.putString("endTime", endTime);
++      value.putString("state", state.toLowerCase(Locale.ROOT));
++      value.putBoolean("paused", paused);
++      value.putBoolean("canResume", canResume);
++      value.putString("error", error);
++      value.putLong("bytesReceived", bytesReceived);
++      value.putLong("totalBytes", totalBytes);
++      value.putLong("fileSize", fileSize);
++      value.putBoolean("exists", exists);
++      value.putString("byExtensionId", byExtensionId);
++      value.putString("byExtensionName", byExtensionName);
++      return value;
++    }
++  }
++
++  public interface Delegate {
++    CompletionStage<Destination> onPrepare(Request request);
++
++    CompletionStage<Record> onStart(Request request, Destination destination, Response response);
++
++    CompletionStage<Record[]> onList(boolean privateBrowsingAllowed);
++
++    CompletionStage<Void> onPause(long id, boolean privateBrowsingAllowed);
++
++    CompletionStage<Void> onResume(long id, boolean privateBrowsingAllowed);
++
++    CompletionStage<Void> onCancel(long id, boolean privateBrowsingAllowed);
++
++    CompletionStage<long[]> onErase(long[] ids, boolean privateBrowsingAllowed);
++
++    CompletionStage<Void> onOpen(long id, boolean privateBrowsingAllowed);
++
++    CompletionStage<Boolean> onShow(long id, boolean privateBrowsingAllowed);
++
++    CompletionStage<Void> onShowDefaultFolder();
++
++    CompletionStage<Void> onRemoveFile(long id, boolean privateBrowsingAllowed);
++
++    CompletionStage<String> onGetFileIcon(long id, int size, boolean privateBrowsingAllowed);
++  }
++
++  private static NavisAndroidExtensionDownloads sInstance;
++
++  private final Delegate mDelegate;
++  private final EventDispatcher mDispatcher;
++  private final NavisAndroidWebExecutor mExecutor = new NavisAndroidWebExecutor();
++  private final Handler mUiHandler = new Handler(Looper.getMainLooper());
++  private final BundleEventListener mListener = this::handleMessage;
++  private final Set<PendingCommand> mPending = new HashSet<>();
++  private boolean mClosed;
++
++  private NavisAndroidExtensionDownloads(final Delegate delegate) {
++    mDelegate = delegate;
++    mDispatcher = EventDispatcher.byName(DISPATCHER_NAME);
++    mDispatcher.registerUiThreadListener(
++        mListener,
++        COMMAND_DOWNLOAD,
++        COMMAND_LIST,
++        COMMAND_PAUSE,
++        COMMAND_RESUME,
++        COMMAND_CANCEL,
++        COMMAND_ERASE,
++        COMMAND_OPEN,
++        COMMAND_SHOW,
++        COMMAND_SHOW_DEFAULT_FOLDER,
++        COMMAND_REMOVE_FILE,
++        COMMAND_GET_FILE_ICON);
++  }
++
++  public static synchronized NavisAndroidExtensionDownloads install(final Delegate delegate) {
++    ThreadUtils.assertOnUiThread();
++    if (delegate == null) {
++      throw new NullPointerException("delegate");
++    }
++    if (sInstance != null) {
++      throw new IllegalStateException("Only one Navis extension-download peer may be installed");
++    }
++    sInstance = new NavisAndroidExtensionDownloads(delegate);
++    return sInstance;
++  }
++
++  public void publishCreated(final Record item) {
++    publish(EVENT_CREATED, item == null ? null : item.toBundle());
++  }
++
++  public void publishChanged(final Record previous, final Record current) {
++    if (previous == null || current == null || previous.id != current.id) {
++      return;
++    }
++    final GeckoBundle value = new GeckoBundle(2);
++    value.putBundle("previous", previous.toBundle());
++    value.putBundle("current", current.toBundle());
++    publish(EVENT_CHANGED, value);
++  }
++
++  public void publishErased(final long id, final boolean privateMode) {
++    if (!validId(id)) {
++      return;
++    }
++    final GeckoBundle value = new GeckoBundle(2);
++    value.putLong("id", id);
++    value.putBoolean("incognito", privateMode);
++    publish(EVENT_ERASED, value);
++  }
++
++  private void publish(final String event, final GeckoBundle value) {
++    final Runnable action = () -> {
++      if (!mClosed) {
++        mDispatcher.dispatch(event, value);
++      }
++    };
++    if (Looper.myLooper() == Looper.getMainLooper()) {
++      action.run();
++    } else {
++      mUiHandler.post(action);
++    }
++  }
++
++  private void handleMessage(
++      final String event, final GeckoBundle message, final EventCallback callback) {
++    ThreadUtils.assertOnUiThread();
++    if (callback == null) {
++      return;
++    }
++    if (mClosed) {
++      callback.sendError("Extension downloads are closed");
++      return;
++    }
++    try {
++      switch (event) {
++        case COMMAND_DOWNLOAD:
++          download(new Request(message), callback);
++          return;
++        case COMMAND_LIST:
++          runStage(
++              callback,
++              () -> mDelegate.onList(privateAllowed(message)),
++              records -> {
++                final GeckoBundle result = new GeckoBundle(1);
++                final GeckoBundle[] items = new GeckoBundle[records.length];
++                for (int index = 0; index < records.length; index++) {
++                  items[index] = records[index].toBundle();
++                }
++                result.putBundleArray("items", items);
++                return result;
++              });
++          return;
++        case COMMAND_PAUSE:
++          runVoid(
++              callback,
++              () -> mDelegate.onPause(requiredId(message), privateAllowed(message)));
++          return;
++        case COMMAND_RESUME:
++          runVoid(
++              callback,
++              () -> mDelegate.onResume(requiredId(message), privateAllowed(message)));
++          return;
++        case COMMAND_CANCEL:
++          runVoid(
++              callback,
++              () -> mDelegate.onCancel(requiredId(message), privateAllowed(message)));
++          return;
++        case COMMAND_ERASE:
++          final long[] ids = requiredIds(message);
++          runStage(
++              callback,
++              () -> mDelegate.onErase(ids, privateAllowed(message)),
++              erased -> {
++                final GeckoBundle result = new GeckoBundle(1);
++                result.putLongArray("ids", erased);
++                return result;
++              });
++          return;
++        case COMMAND_OPEN:
++          runVoid(
++              callback,
++              () -> mDelegate.onOpen(requiredId(message), privateAllowed(message)));
++          return;
++        case COMMAND_SHOW:
++          runStage(
++              callback,
++              () -> mDelegate.onShow(requiredId(message), privateAllowed(message)),
++              value -> value);
++          return;
++        case COMMAND_SHOW_DEFAULT_FOLDER:
++          runVoid(callback, mDelegate::onShowDefaultFolder);
++          return;
++        case COMMAND_REMOVE_FILE:
++          runVoid(callback, () -> mDelegate.onRemoveFile(requiredId(message), privateAllowed(message)));
++          return;
++        case COMMAND_GET_FILE_ICON:
++          final int size = message.getInt("size", 32);
++          if (size != 16 && size != 32) {
++            throw new IllegalArgumentException("File icon size must be 16 or 32");
++          }
++          runStage(callback,
++              () -> mDelegate.onGetFileIcon(requiredId(message), size, privateAllowed(message)),
++              value -> {
++                if (value == null || !value.startsWith("data:image/png;base64,") ||
++                    value.length() > 96 * 1024) {
++                  throw new IllegalArgumentException("Invalid Android file icon");
++                }
++                return value;
++              });
++          return;
++        default:
++          callback.sendError("Unknown extension download operation");
++      }
++    } catch (final Throwable error) {
++      callback.sendError(publicMessage(error));
++    }
++  }
++
++  /** Repeats a product-requested, bodyless GET using the original extension fetch context. */
++  public CompletionStage<Boolean> retryDownload(final Request request) {
++    final CompletableFuture<Boolean> result = new CompletableFuture<>();
++    onUi(
++        () -> {
++          if (mClosed || request == null || !request.method.equals("GET")
++              || request.body != null || !isHttp(request.sourceUri)) {
++            result.completeExceptionally(new IllegalStateException("Download cannot safely be retried"));
++            return;
++          }
++          download(
++              request,
++              new EventCallback() {
++                @Override
++                public void sendSuccess(final Object value) {
++                  result.complete(value instanceof GeckoBundle);
++                }
++
++                @Override
++                public void sendError(final Object error) {
++                  result.completeExceptionally(new IllegalStateException(String.valueOf(error)));
++                }
++              });
++        });
++    return result;
++  }
++
++  private void download(final Request request, final EventCallback callback) {
++    final PendingCommand pending = new PendingCommand(callback);
++    mPending.add(pending);
++    final CompletionStage<Destination> prepared;
++    try {
++      prepared = requireStage(mDelegate.onPrepare(request));
++    } catch (final Throwable error) {
++      pending.fail(error);
++      return;
++    }
++    prepared.whenComplete(
++        (destination, error) ->
++            onUi(
++                () -> {
++                  if (error != null) {
++                    pending.fail(error);
++                    return;
++                  }
++                  if (destination == null) {
++                    pending.fail(new IllegalStateException("Download target was not selected"));
++                    return;
++                  }
++                  fetch(request, destination, pending);
++                }));
++  }
++
++  private void fetch(
++      final Request request, final Destination destination, final PendingCommand pending) {
++    if (!pending.active()) {
++      return;
++    }
++    final WebRequest webRequest;
++    try {
++      final WebRequest.Builder builder = new WebRequest.Builder(request.sourceUri).method(request.method);
++      for (final Header header : request.headers) {
++        if (header.name.equalsIgnoreCase("referer")) {
++          builder.referrer(header.value);
++        } else {
++          builder.addHeader(header.name, header.value);
++        }
++      }
++      if (request.body != null) {
++        final byte[] encoded = request.body.getBytes(StandardCharsets.UTF_8);
++        final ByteBuffer body = ByteBuffer.allocateDirect(encoded.length);
++        body.put(encoded);
++        body.flip();
++        builder.body(body);
++      }
++      webRequest = builder.build();
++    } catch (final Throwable error) {
++      pending.fail(error);
++      return;
++    }
++
++    final int flags =
++        request.privateMode
++            ? NavisAndroidWebExecutor.FETCH_FLAGS_PRIVATE
++            : NavisAndroidWebExecutor.FETCH_FLAGS_NONE;
++    final GeckoResult<WebResponse> fetched;
++    try {
++      fetched = mExecutor.fetch(webRequest, flags);
++    } catch (final Throwable error) {
++      pending.fail(error);
++      return;
++    }
++    fetched
++        .withHandler(mUiHandler)
++        .accept(
++            response -> acceptResponse(request, destination, pending, response),
++            pending::fail);
++  }
++
++  private void acceptResponse(
++      final Request request,
++      final Destination destination,
++      final PendingCommand pending,
++      final WebResponse response) {
++    if (response == null || response.body == null) {
++      closeResponse(response);
++      pending.fail(new IllegalStateException("The download response has no body"));
++      return;
++    }
++    final boolean http = isHttp(request.sourceUri);
++    if (http && !request.allowHttpErrors && response.statusCode >= 400) {
++      closeResponse(response);
++      pending.fail(new IllegalStateException("The server rejected the download request"));
++      return;
++    }
++    if (!pending.hold(response)) {
++      closeResponse(response);
++      return;
++    }
++
++    final CompletionStage<Record> started;
++    try {
++      started = requireStage(mDelegate.onStart(request, destination, new Response(response)));
++      pending.releaseResponseOwnership();
++    } catch (final Throwable error) {
++      pending.fail(error);
++      return;
++    }
++    started.whenComplete(
++        (record, error) ->
++            onUi(
++                () -> {
++                  if (error != null) {
++                    pending.fail(error);
++                  } else if (record == null) {
++                    pending.fail(new IllegalStateException("Download did not start"));
++                  } else {
++                    pending.succeed(record.toBundle());
++                  }
++                }));
++  }
++
++  private <T> void runStage(
++      final EventCallback callback,
++      final Supplier<CompletionStage<T>> operation,
++      final Function<T, Object> encode) {
++    final PendingCommand pending = new PendingCommand(callback);
++    mPending.add(pending);
++    final CompletionStage<T> stage;
++    try {
++      stage = requireStage(operation.get());
++    } catch (final Throwable error) {
++      pending.fail(error);
++      return;
++    }
++    stage.whenComplete(
++        (value, error) ->
++            onUi(
++                () -> {
++                  if (error != null) {
++                    pending.fail(error);
++                    return;
++                  }
++                  try {
++                    pending.succeed(encode.apply(value));
++                  } catch (final Throwable encodeError) {
++                    pending.fail(encodeError);
++                  }
++                }));
++  }
++
++  private void runVoid(
++      final EventCallback callback, final Supplier<CompletionStage<Void>> operation) {
++    runStage(callback, operation, ignored -> null);
++  }
++
++  @Override
++  public void close() {
++    ThreadUtils.assertOnUiThread();
++    synchronized (NavisAndroidExtensionDownloads.class) {
++      if (mClosed) {
++        return;
++      }
++      mClosed = true;
++      if (sInstance == this) {
++        sInstance = null;
++      }
++    }
++    mDispatcher.unregisterUiThreadListener(
++        mListener,
++        COMMAND_DOWNLOAD,
++        COMMAND_LIST,
++        COMMAND_PAUSE,
++        COMMAND_RESUME,
++        COMMAND_CANCEL,
++        COMMAND_ERASE,
++        COMMAND_OPEN,
++        COMMAND_SHOW,
++        COMMAND_SHOW_DEFAULT_FOLDER,
++        COMMAND_REMOVE_FILE,
++        COMMAND_GET_FILE_ICON);
++    for (final PendingCommand pending : new ArrayList<>(mPending)) {
++      pending.fail(new IllegalStateException("Extension downloads are closed"));
++    }
++    mPending.clear();
++    mDispatcher.shutdown();
++  }
++
++  private final class PendingCommand {
++    private final EventCallback mCallback;
++    private boolean mFinished;
++    private WebResponse mResponse;
++
++    PendingCommand(final EventCallback callback) {
++      mCallback = callback;
++    }
++
++    boolean active() {
++      return !mFinished && !mClosed;
++    }
++
++    boolean hold(final WebResponse response) {
++      if (!active()) {
++        return false;
++      }
++      mResponse = response;
++      return true;
++    }
++
++    void releaseResponseOwnership() {
++      mResponse = null;
++    }
++
++    void succeed(final Object value) {
++      if (!finish()) {
++        return;
++      }
++      mCallback.sendSuccess(value);
++    }
++
++    void fail(final Throwable error) {
++      onUi(
++          () -> {
++            if (!finish()) {
++              return;
++            }
++            mCallback.sendError(publicMessage(error));
++          });
++    }
++
++    private boolean finish() {
++      if (mFinished) {
++        return false;
++      }
++      mFinished = true;
++      closeResponse(mResponse);
++      mResponse = null;
++      mPending.remove(this);
++      return true;
++    }
++  }
++
++  private void onUi(final Runnable action) {
++    if (Looper.myLooper() == Looper.getMainLooper()) {
++      action.run();
++    } else {
++      mUiHandler.post(action);
++    }
++  }
++
++  private static <T> CompletionStage<T> requireStage(final CompletionStage<T> stage) {
++    if (stage == null) {
++      throw new IllegalStateException("The product download delegate returned no result");
++    }
++    return stage;
++  }
++
++  private static Header[] parseHeaders(final GeckoBundle[] values) {
++    if (values == null) {
++      return new Header[0];
++    }
++    if (values.length > MAX_HEADERS) {
++      throw new IllegalArgumentException("Too many download request headers");
++    }
++    final Header[] result = new Header[values.length];
++    for (int index = 0; index < values.length; index++) {
++      final GeckoBundle value = values[index];
++      final String name = requiredString(value, "name", MAX_HEADER_NAME_CHARS);
++      if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")) {
++        throw new IllegalArgumentException("Invalid request header name");
++      }
++      final String upper = name.toUpperCase(Locale.ROOT);
++      if (FORBIDDEN_HEADERS.contains(upper)
++          || upper.startsWith("PROXY-")
++          || upper.startsWith("SEC-")) {
++        throw new IllegalArgumentException("Forbidden request header name");
++      }
++      final String headerValue = value.getString("value", "");
++      if (headerValue.length() > MAX_HEADER_VALUE_CHARS
++          || headerValue.indexOf('\r') >= 0
++          || headerValue.indexOf('\n') >= 0
++          || headerValue.indexOf('\u0000') >= 0) {
++        throw new IllegalArgumentException("Invalid request header value");
++      }
++      result[index] = new Header(name, headerValue);
++    }
++    return result;
++  }
++
++  private static void validateRelativePath(final String path) {
++    if (path == null) {
++      return;
++    }
++    if (path.isEmpty() || path.startsWith("/") || path.startsWith("\\")) {
++      throw new IllegalArgumentException("Invalid download filename");
++    }
++    for (final String component : path.replace('\\', '/').split("/", -1)) {
++      if (component.isEmpty() || component.equals(".") || component.equals("..")) {
++        throw new IllegalArgumentException("Invalid download filename");
++      }
++      for (int index = 0; index < component.length(); index++) {
++        final char character = component.charAt(index);
++        if (character < 0x20 || character == 0x7f) {
++          throw new IllegalArgumentException("Invalid download filename");
++        }
++      }
++    }
++  }
++
++  private static void validateCookieStore(final String storeId, final boolean privateMode) {
++    if (storeId == null) {
++      return;
++    }
++    final String expected = privateMode ? "firefox-private" : "firefox-default";
++    if (!storeId.equals(expected)) {
++      throw new IllegalArgumentException("The requested cookie store is not available on Android");
++    }
++  }
++
++  private static void requireSupportedUri(final String value) {
++    final String lower = value.toLowerCase(Locale.ROOT);
++    if (!lower.startsWith("http://")
++        && !lower.startsWith("https://")
++        && !lower.startsWith("blob:")
++        && !lower.startsWith("moz-extension://")) {
++      throw new IllegalArgumentException("Unsupported download URI scheme");
++    }
++  }
++
++  private static boolean isHttp(final String value) {
++    final String lower = value.toLowerCase(Locale.ROOT);
++    return lower.startsWith("http://") || lower.startsWith("https://");
++  }
++
++  private static boolean privateAllowed(final GeckoBundle message) {
++    return message != null && message.getBoolean("privateBrowsingAllowed", false);
++  }
++
++  private static long requiredId(final GeckoBundle message) {
++    final long id = message == null ? 0L : message.getLong("id", 0L);
++    if (!validId(id)) {
++      throw new IllegalArgumentException("Invalid download id");
++    }
++    return id;
++  }
++
++  private static long[] requiredIds(final GeckoBundle message) {
++    final long[] ids = message == null ? null : message.getLongArray("ids");
++    if (ids == null || ids.length > MAX_ERASE_IDS) {
++      throw new IllegalArgumentException("Invalid download ID list");
++    }
++    for (final long id : ids) {
++      if (!validId(id)) {
++        throw new IllegalArgumentException("Invalid download ID list");
++      }
++    }
++    return ids;
++  }
++
++  private static boolean validId(final long id) {
++    return id > 0 && id <= MAX_SAFE_INTEGER;
++  }
++
++  private static String requiredString(
++      final GeckoBundle bundle, final String key, final int maximum) {
++    if (bundle == null) {
++      throw new IllegalArgumentException("Missing download value");
++    }
++    final String value = bundle.getString(key);
++    if (value == null || value.isEmpty() || value.length() > maximum) {
++      throw new IllegalArgumentException("Invalid download value: " + key);
++    }
++    return value;
++  }
++
++  private static String optionalString(
++      final GeckoBundle bundle, final String key, final int maximum) {
++    if (bundle == null) {
++      return null;
++    }
++    final String value = bundle.getString(key);
++    if (value == null) {
++      return null;
++    }
++    if (value.length() > maximum) {
++      throw new IllegalArgumentException("Download value is too long: " + key);
++    }
++    return value;
++  }
++
++  private static String boundedString(final String value, final int maximum) {
++    if (value == null) {
++      return "";
++    }
++    return value.length() <= maximum ? value : value.substring(0, maximum);
++  }
++
++  private static String boundedNullable(final String value, final int maximum) {
++    if (value == null) {
++      return null;
++    }
++    return boundedString(value, maximum);
++  }
++
++  private static Long parsePositiveLong(final String value) {
++    if (value == null) {
++      return null;
++    }
++    try {
++      final long parsed = Long.parseLong(value.trim());
++      return parsed > 0 ? parsed : null;
++    } catch (final NumberFormatException error) {
++      return null;
++    }
++  }
++
++  private static String requiredValue(final String value, final String... accepted) {
++    if (value != null) {
++      for (final String candidate : accepted) {
++        if (candidate.equals(value)) {
++          return value;
++        }
++      }
++    }
++    throw new IllegalArgumentException("Invalid extension download state");
++  }
++
++  private static String publicMessage(final Throwable source) {
++    if (source == null) {
++      return "The extension download operation failed";
++    }
++    Throwable error = source;
++    while ((error instanceof CompletionException || error instanceof java.util.concurrent.ExecutionException)
++        && error.getCause() != null) {
++      error = error.getCause();
++    }
++    final String message = error.getMessage();
++    return boundedString(
++        message == null || message.isEmpty() ? "The extension download operation failed" : message,
++        512);
++  }
++
++  private static void closeResponse(final WebResponse response) {
++    if (response != null && response.body != null) {
++      try {
++        response.body.close();
++      } catch (final Throwable ignored) {
++      }
++    }
++  }
++}
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java
+index 9857ff23c6233f45ba8cef1b29da2c0603a6bce3..cc4ee834c4c31289d2bb94901c4459b395ea206d 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/WebResponse.java
+@@ -30,6 +30,19 @@ public class WebResponse extends WebMessage {
+   /** A boolean indicating whether or not this response is the result of a redirection. */
+   public final boolean redirected;
+ 
++  /** Native channel metadata for Navis's constrained bodyless-GET download retry. */
++  public final @Nullable String navisRequestMethod;
++  public final boolean navisBodylessGet;
++  public final @Nullable String navisDownloadReferrer;
++  public final @Nullable String navisDownloadOriginAttributes;
++
++  /**
++   * Gecko's resolved channel filename, including an eligible HTML download attribute when no
++   * response filename takes precedence. Still untrusted: the product must sanitize it before use.
++   * This is metadata, not a synthetic HTTP response header.
++   */
++  public final @Nullable String navisSuggestedFileName;
++
+   /** Whether or not this response was delivered via a secure connection. */
+   public final boolean isSecure;
+ 
+@@ -65,6 +78,11 @@ public class WebResponse extends WebMessage {
+     super(builder);
+     this.statusCode = builder.mStatusCode;
+     this.redirected = builder.mRedirected;
++    this.navisRequestMethod = builder.mNavisRequestMethod;
++    this.navisBodylessGet = builder.mNavisBodylessGet;
++    this.navisDownloadReferrer = builder.mNavisDownloadReferrer;
++    this.navisDownloadOriginAttributes = builder.mNavisDownloadOriginAttributes;
++    this.navisSuggestedFileName = builder.mNavisSuggestedFileName;
+     this.body = builder.mBody;
+     this.requestExternalApp = builder.mRequestExternalApp;
+     this.skipConfirmation = builder.mSkipConfirmation;
+@@ -94,6 +112,11 @@ public class WebResponse extends WebMessage {
+   public static class Builder extends WebMessage.Builder {
+     /* package */ int mStatusCode;
+     /* package */ boolean mRedirected;
++    /* package */ String mNavisRequestMethod;
++    /* package */ boolean mNavisBodylessGet;
++    /* package */ String mNavisDownloadReferrer;
++    /* package */ String mNavisDownloadOriginAttributes;
++    /* package */ String mNavisSuggestedFileName;
+     /* package */ InputStream mBody;
+     /* package */ boolean mRequestExternalApp = false;
+     /* package */ boolean mSkipConfirmation = false;
+@@ -109,6 +132,23 @@ public class WebResponse extends WebMessage {
+       super(uri);
+     }
+ 
++    @WrapForJNI(exceptionMode = "nsresult")
++    private void navisSuggestedFileName(final @NonNull String fileName) {
++      mNavisSuggestedFileName = fileName;
++    }
++
++    @WrapForJNI(exceptionMode = "nsresult")
++    private void navisDownloadRetryMetadata(
++        final String method,
++        final boolean bodylessGet,
++        final String referrer,
++        final String originAttributes) {
++      mNavisRequestMethod = method;
++      mNavisBodylessGet = bodylessGet;
++      mNavisDownloadReferrer = referrer;
++      mNavisDownloadOriginAttributes = originAttributes;
++    }
++
+     @Override
+     public @NonNull Builder uri(final @NonNull String uri) {
+       super.uri(uri);
+diff --git a/mobile/shared/components/extensions/ext-downloads.js b/mobile/shared/components/extensions/ext-downloads.js
+index 62f446ef4d21f5060577dd35ee9bde51219918a5..742aee59a288fb8ee80f8b4f5d8e076b4cd7b56c 100644
+--- a/mobile/shared/components/extensions/ext-downloads.js
++++ b/mobile/shared/components/extensions/ext-downloads.js
+@@ -6,14 +6,75 @@
+ 
+ ChromeUtils.defineESModuleGetters(this, {
+   DownloadPaths: "resource://gre/modules/DownloadPaths.sys.mjs",
+-  DownloadTracker: "resource://gre/modules/GeckoViewWebExtension.sys.mjs",
+ });
+ 
++var { EventDispatcher } = ChromeUtils.importESModule(
++  "resource://gre/modules/Messaging.sys.mjs"
++);
+ var { ignoreEvent } = ExtensionCommon;
++var { ExtensionError } = ExtensionUtils;
++
++const dispatcher = EventDispatcher.byName("navis-android-extension-downloads");
++
++const COMMAND = Object.freeze({
++  download: "NavisAndroid:Downloads:Download",
++  list: "NavisAndroid:Downloads:List",
++  pause: "NavisAndroid:Downloads:Pause",
++  resume: "NavisAndroid:Downloads:Resume",
++  cancel: "NavisAndroid:Downloads:Cancel",
++  erase: "NavisAndroid:Downloads:Erase",
++  open: "NavisAndroid:Downloads:Open",
++  show: "NavisAndroid:Downloads:Show",
++  showDefaultFolder: "NavisAndroid:Downloads:ShowDefaultFolder",
++  removeFile: "NavisAndroid:Downloads:RemoveFile",
++  getFileIcon: "NavisAndroid:Downloads:GetFileIcon",
++});
++
++const EVENT = Object.freeze({
++  created: "NavisAndroid:Downloads:Created",
++  changed: "NavisAndroid:Downloads:Changed",
++  erased: "NavisAndroid:Downloads:Erased",
++});
++
++const DOWNLOAD_ITEM_FIELDS = Object.freeze([
++  "id",
++  "url",
++  "referrer",
++  "filename",
++  "incognito",
++  "cookieStoreId",
++  "danger",
++  "mime",
++  "startTime",
++  "endTime",
++  "estimatedEndTime",
++  "state",
++  "paused",
++  "canResume",
++  "error",
++  "bytesReceived",
++  "totalBytes",
++  "fileSize",
++  "exists",
++  "byExtensionId",
++  "byExtensionName",
++]);
+ 
+-const REQUEST_DOWNLOAD_MESSAGE = "GeckoView:WebExtension:Download";
++const DOWNLOAD_ITEM_CHANGE_FIELDS = Object.freeze([
++  "url",
++  "filename",
++  "danger",
++  "mime",
++  "startTime",
++  "endTime",
++  "state",
++  "paused",
++  "canResume",
++  "error",
++  "exists",
++]);
+ 
+-const FORBIDDEN_HEADERS = [
++const FORBIDDEN_HEADERS = new Set([
+   "ACCEPT-CHARSET",
+   "ACCEPT-ENCODING",
+   "ACCESS-CONTROL-REQUEST-HEADERS",
+@@ -33,262 +94,344 @@ const FORBIDDEN_HEADERS = [
+   "TRANSFER-ENCODING",
+   "UPGRADE",
+   "VIA",
+-];
+-
++]);
+ const FORBIDDEN_PREFIXES = /^PROXY-|^SEC-/i;
+ 
+-const State = {
+-  IN_PROGRESS: "in_progress",
+-  INTERRUPTED: "interrupted",
+-  COMPLETE: "complete",
+-};
++function extensionError(error) {
++  const message =
++    typeof error === "string"
++      ? error
++      : error?.message || "The download operation failed";
++  return new ExtensionError(String(message).slice(0, 512));
++}
+ 
+-const STATE_MAP = new Map([
+-  [0, State.IN_PROGRESS],
+-  [1, State.INTERRUPTED],
+-  [2, State.COMPLETE],
+-]);
++async function request(command, data = null) {
++  try {
++    return await dispatcher.sendRequestForResult(command, data);
++  } catch (error) {
++    throw extensionError(error);
++  }
++}
+ 
+-const INTERRUPT_REASON_MAP = new Map([
+-  [0, undefined],
+-  [1, "FILE_FAILED"],
+-  [2, "FILE_ACCESS_DENIED"],
+-  [3, "FILE_NO_SPACE"],
+-  [4, "FILE_NAME_TOO_LONG"],
+-  [5, "FILE_TOO_LARGE"],
+-  [6, "FILE_VIRUS_INFECTED"],
+-  [7, "FILE_TRANSIENT_ERROR"],
+-  [8, "FILE_BLOCKED"],
+-  [9, "FILE_SECURITY_CHECK_FAILED"],
+-  [10, "FILE_TOO_SHORT"],
+-  [11, "NETWORK_FAILED"],
+-  [12, "NETWORK_TIMEOUT"],
+-  [13, "NETWORK_DISCONNECTED"],
+-  [14, "NETWORK_SERVER_DOWN"],
+-  [15, "NETWORK_INVALID_REQUEST"],
+-  [16, "SERVER_FAILED"],
+-  [17, "SERVER_NO_RANGE"],
+-  [18, "SERVER_BAD_CONTENT"],
+-  [19, "SERVER_UNAUTHORIZED"],
+-  [20, "SERVER_CERT_PROBLEM"],
+-  [21, "SERVER_FORBIDDEN"],
+-  [22, "USER_CANCELED"],
+-  [23, "USER_SHUTDOWN"],
+-  [24, "CRASH"],
+-]);
++function extensionContext(extension, extra = null) {
++  return {
++    privateBrowsingAllowed: extension.privateBrowsingAllowed,
++    ...extra,
++  };
++}
+ 
+-// TODO Bug 1247794: make id and extension info persistent
+-class DownloadItem {
+-  /**
+-   * Initializes an object that represents a download
+-   *
+-   * @param {object} downloadInfo - an object from Java when creating a download
+-   * @param {object} options - an object passed in to download() function
+-   * @param {Extension} extension - instance of an extension object
+-   */
+-  constructor(downloadInfo, options, extension) {
+-    this.id = downloadInfo.id;
+-    this.url = options.url;
+-    this.referrer = downloadInfo.referrer || "";
+-    this.filename = downloadInfo.filename || "";
+-    this.incognito = options.incognito;
+-    this.danger = "safe"; // todo; not implemented in desktop either
+-    this.mime = downloadInfo.mime || "";
+-    this.startTime = downloadInfo.startTime;
+-    this.state = STATE_MAP.get(downloadInfo.state);
+-    this.paused = downloadInfo.paused;
+-    this.canResume = downloadInfo.canResume;
+-    this.bytesReceived = downloadInfo.bytesReceived;
+-    this.totalBytes = downloadInfo.totalBytes;
+-    this.fileSize = downloadInfo.fileSize;
+-    this.exists = downloadInfo.exists;
+-    this.byExtensionId = extension?.id;
+-    this.byExtensionName = extension?.name;
++function validateFilename(filename) {
++  if (filename == null) {
++    return filename;
++  }
++  if (!filename.length) {
++    throw new ExtensionError("filename must not be empty");
++  }
++  if (PathUtils.isAbsolute(filename)) {
++    throw new ExtensionError("filename must not be an absolute path");
++  }
++  filename = filename.replaceAll("%", "_");
++  const pathComponents = PathUtils.splitRelative(filename, {
++    allowEmpty: true,
++    allowCurrentDir: true,
++    allowParentDir: true,
++  });
++  if (pathComponents.some(component => component === "..")) {
++    throw new ExtensionError("filename must not contain back-references (..)");
++  }
++  if (
++    pathComponents.some((component, index) => {
++      const sanitized = DownloadPaths.sanitize(component, {
++        compressWhitespaces: false,
++        allowDirectoryNames: index < pathComponents.length - 1,
++      });
++      return component !== sanitized;
++    })
++  ) {
++    throw new ExtensionError("filename must not contain illegal characters");
+   }
++  return filename;
++}
+ 
+-  /**
+-   * This function updates the download item it was called on.
+-   *
+-   * @param {object} data that arrived from the app (Java)
+-   * @returns {object | null} an object of <a href="https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/downloads/onChanged#downloaddelta>downloadDelta type</a>
+-   */
+-  update(data) {
+-    const { downloadItemId } = data;
+-    const delta = {};
+-
+-    data.state = STATE_MAP.get(data.state);
+-    data.error = INTERRUPT_REASON_MAP.get(data.error);
+-    delete data.downloadItemId;
+-
+-    let changed = false;
+-    for (const prop in data) {
+-      const current = data[prop] ?? null;
+-      const previous = this[prop] ?? null;
+-      if (current !== previous) {
+-        delta[prop] = { current, previous };
+-        this[prop] = current;
+-        changed = true;
++function validateDownloadOptions(options, extension) {
++  if (options.incognito && !extension.privateBrowsingAllowed) {
++    throw new ExtensionError("Private browsing access not allowed");
++  }
++  if (options.headers) {
++    for (const { name } of options.headers) {
++      if (
++        FORBIDDEN_HEADERS.has(name.toUpperCase()) ||
++        FORBIDDEN_PREFIXES.test(name)
++      ) {
++        throw new ExtensionError("Forbidden request header name");
+       }
+     }
++  }
++}
+ 
+-    // Don't send empty onChange events
+-    if (!changed) {
+-      return null;
++function eventRegistrar(api, event, project) {
++  return ({ fire }) => {
++    const listener = {
++      onEvent(_event, data) {
++        const projected = project(data, api.extension);
++        if (projected !== undefined) {
++          fire.async(projected);
++        }
++      },
++    };
++    dispatcher.registerListener(listener, [event]);
++    return {
++      unregister() {
++        dispatcher.unregisterListener(listener, [event]);
++      },
++      convert(newFire) {
++        fire = newFire;
++      },
++    };
++  };
++}
++
++function accessible(item, extension) {
++  return item && (extension.privateBrowsingAllowed || !item.incognito);
++}
++
++function changedDelta(data, extension) {
++  const { previous, current } = data || {};
++  if (!accessible(current, extension) || previous?.id !== current.id) {
++    return undefined;
++  }
++  const delta = { id: current.id };
++  for (const field of DOWNLOAD_ITEM_CHANGE_FIELDS) {
++    const before = previous[field] ?? null;
++    const after = current[field] ?? null;
++    if (before !== after) {
++      delta[field] = { previous: before, current: after };
+     }
++  }
++  return Object.keys(delta).length > 1 ? delta : undefined;
++}
+ 
+-    delta.id = downloadItemId;
++function normalizeDownloadTime(value, fallback) {
++  return value == null ? fallback : ExtensionCommon.normalizeTime(value).getTime();
++}
+ 
+-    return delta;
++function makeTextMatcher(regexSource, explicitValue, field) {
++  if (regexSource == null && explicitValue == null) {
++    return () => true;
++  }
++  let expression;
++  try {
++    expression = new RegExp(regexSource || "", "i");
++  } catch (error) {
++    throw new ExtensionError(`Invalid ${field}Regex: ${error.message}`);
++  }
++  if (explicitValue == null) {
++    return input => expression.test(input);
+   }
++  const expected = explicitValue.toLowerCase();
++  return expression.test(expected) ? input => input === expected : () => false;
+ }
+ 
+-this.downloads = class extends ExtensionAPIPersistent {
+-  PERSISTENT_EVENTS = {
+-    onChanged({ fire }) {
+-      const listener = (eventName, event) => {
+-        const { delta, downloadItem } = event;
+-        const { extension } = this;
+-        if (extension.privateBrowsingAllowed || !downloadItem.incognito) {
+-          fire.async(delta);
++function downloadPredicate(query) {
++  const positive = [];
++  const negative = [];
++  for (const raw of query.query || []) {
++    const term = raw.toLowerCase();
++    if (term.startsWith("-")) {
++      negative.push(term.slice(1));
++    } else {
++      positive.push(term);
++    }
++  }
++  const matchFilename = makeTextMatcher(
++    query.filenameRegex,
++    query.filename,
++    "filename"
++  );
++  const matchUrl = makeTextMatcher(query.urlRegex, query.url, "url");
++  const startedBefore = normalizeDownloadTime(query.startedBefore, Infinity);
++  const startedAfter = normalizeDownloadTime(query.startedAfter, -Infinity);
++  const endedBefore = normalizeDownloadTime(query.endedBefore, Infinity);
++  const endedAfter = normalizeDownloadTime(query.endedAfter, -Infinity);
++  const simpleFields = [
++    "id",
++    "mime",
++    "startTime",
++    "endTime",
++    "state",
++    "paused",
++    "error",
++    "incognito",
++    "cookieStoreId",
++    "bytesReceived",
++    "totalBytes",
++    "fileSize",
++    "exists",
++  ];
++
++  return item => {
++    const url = item.url.toLowerCase();
++    const filename = item.filename.toLowerCase();
++    if (!positive.every(term => url.includes(term) || filename.includes(term))) {
++      return false;
++    }
++    if (negative.some(term => url.includes(term) || filename.includes(term))) {
++      return false;
++    }
++    if (!matchFilename(filename) || !matchUrl(url)) {
++      return false;
++    }
++    const started = Date.parse(item.startTime);
++    if (
++      (query.startedBefore != null || query.startedAfter != null) &&
++      (!Number.isFinite(started) || started > startedBefore || started < startedAfter)
++    ) {
++      return false;
++    }
++    const ended = item.endTime == null ? NaN : Date.parse(item.endTime);
++    if (
++      (query.endedBefore != null || query.endedAfter != null) &&
++      (!Number.isFinite(ended) || ended > endedBefore || ended < endedAfter)
++    ) {
++      return false;
++    }
++    if (
++      query.totalBytesGreater != null &&
++      (item.totalBytes < 0 || item.totalBytes <= query.totalBytesGreater)
++    ) {
++      return false;
++    }
++    if (
++      query.totalBytesLess != null &&
++      (item.totalBytes < 0 || item.totalBytes >= query.totalBytesLess)
++    ) {
++      return false;
++    }
++    return simpleFields.every(
++      field => query[field] == null || item[field] === query[field]
++    );
++  };
++}
++
++function queryItems(items, query) {
++  const predicate = downloadPredicate(query);
++  let result = items.filter(predicate);
++  if (query.orderBy) {
++    const ordering = query.orderBy.map(raw => {
++      const descending = raw.startsWith("-");
++      const name = descending ? raw.slice(1) : raw;
++      if (!DOWNLOAD_ITEM_FIELDS.includes(name)) {
++        throw new ExtensionError(`Invalid orderBy field ${name}`);
++      }
++      return { name, descending };
++    });
++    result.sort((left, right) => {
++      for (const { name, descending } of ordering) {
++        if (left[name] < right[name]) {
++          return descending ? 1 : -1;
++        }
++        if (left[name] > right[name]) {
++          return descending ? -1 : 1;
+         }
+-      };
+-      DownloadTracker.on("download-changed", listener);
++      }
++      return 0;
++    });
++  }
++  return query.limit ? result.slice(0, Math.max(0, query.limit)) : result;
++}
+ 
+-      return {
+-        unregister() {
+-          DownloadTracker.off("download-changed", listener);
+-        },
+-        convert(_fire) {
+-          fire = _fire;
+-        },
+-      };
+-    },
++this.downloads = class extends ExtensionAPIPersistent {
++  PERSISTENT_EVENTS = {
++    onCreated: eventRegistrar(this, EVENT.created, (item, extension) =>
++      accessible(item, extension) ? item : undefined
++    ),
++    onChanged: eventRegistrar(this, EVENT.changed, changedDelta),
++    onErased: eventRegistrar(this, EVENT.erased, (data, extension) =>
++      accessible(data, extension) ? data.id : undefined
++    ),
+   };
+ 
+   getAPI(context) {
+     const { extension } = context;
++    const operation = (name, extra) =>
++      request(COMMAND[name], extensionContext(extension, extra));
++    const allItems = async () => {
++      const value = await operation("list");
++      return Array.isArray(value?.items) ? value.items : [];
++    };
++
+     return {
+       downloads: {
+-        download(options) {
+-          // the validation checks should be kept in sync with the toolkit implementation
+-          let { filename } = options;
+-          if (filename != null) {
+-            if (!filename.length) {
+-              return Promise.reject({ message: "filename must not be empty" });
+-            }
+-
+-            if (PathUtils.isAbsolute(filename)) {
+-              return Promise.reject({
+-                message: "filename must not be an absolute path",
+-              });
+-            }
+-
+-            // % is not permitted but relatively common.
+-            filename = filename.replaceAll("%", "_");
+-
+-            const pathComponents = PathUtils.splitRelative(filename, {
+-              allowEmpty: true,
+-              allowCurrentDir: true,
+-              allowParentDir: true,
+-            });
+-
+-            if (pathComponents.some(component => component == "..")) {
+-              return Promise.reject({
+-                message: "filename must not contain back-references (..)",
+-              });
+-            }
+-
+-            if (
+-              pathComponents.some((component, i) => {
+-                const sanitized = DownloadPaths.sanitize(component, {
+-                  compressWhitespaces: false,
+-                  allowDirectoryNames: i < pathComponents.length - 1,
+-                });
+-                return component != sanitized;
+-              })
+-            ) {
+-              return Promise.reject({
+-                message: "filename must not contain illegal characters",
+-              });
+-            }
+-          }
+-
+-          if (options.incognito && !context.privateBrowsingAllowed) {
+-            return Promise.reject({
+-              message: "Private browsing access not allowed",
+-            });
+-          }
+-
+-          if (options.cookieStoreId != null) {
+-            // https://bugzilla.mozilla.org/show_bug.cgi?id=1721460
+-            throw new ExtensionError("Not implemented");
+-          }
+-
+-          if (options.headers) {
+-            for (const { name } of options.headers) {
+-              if (
+-                FORBIDDEN_HEADERS.includes(name.toUpperCase()) ||
+-                name.match(FORBIDDEN_PREFIXES)
+-              ) {
+-                return Promise.reject({
+-                  message: "Forbidden request header name",
+-                });
+-              }
+-            }
+-          }
+-
+-          return EventDispatcher.instance
+-            .sendRequestForResult(REQUEST_DOWNLOAD_MESSAGE, {
+-              options,
+-              extensionId: extension.id,
+-            })
+-            .then(value => {
+-              const downloadItem = new DownloadItem(value, options, extension);
+-              DownloadTracker.addDownloadItem(downloadItem);
+-              return downloadItem.id;
+-            });
++        async download(options) {
++          validateDownloadOptions(options, extension);
++          const filename = validateFilename(options.filename);
++          const item = await operation("download", {
++            extensionId: extension.id,
++            extensionName: extension.name,
++            extensionBaseUri: extension.baseURI.spec,
++            url: options.url,
++            filename,
++            incognito: Boolean(options.incognito),
++            cookieStoreId: options.cookieStoreId,
++            conflictAction: options.conflictAction || "uniquify",
++            saveAs: Boolean(options.saveAs),
++            method: options.method || "GET",
++            headers: options.headers || [],
++            body: options.body,
++            allowHttpErrors: Boolean(options.allowHttpErrors),
++          });
++          return item.id;
+         },
+ 
+-        removeFile() {
+-          throw new ExtensionError("Not implemented");
++        async search(query) {
++          return queryItems(await allItems(), query);
+         },
+ 
+-        search() {
+-          throw new ExtensionError("Not implemented");
++        async pause(id) {
++          await operation("pause", { id });
+         },
+ 
+-        pause() {
+-          throw new ExtensionError("Not implemented");
++        async resume(id) {
++          await operation("resume", { id });
+         },
+ 
+-        resume() {
+-          throw new ExtensionError("Not implemented");
++        async cancel(id) {
++          await operation("cancel", { id });
+         },
+ 
+-        cancel() {
+-          throw new ExtensionError("Not implemented");
++        async erase(query) {
++          const matched = queryItems(await allItems(), query).map(item => item.id);
++          const value = await operation("erase", { ids: matched });
++          return Array.isArray(value?.ids) ? value.ids : [];
+         },
+ 
+-        showDefaultFolder() {
+-          throw new ExtensionError("Not implemented");
++        async open(id) {
++          await operation("open", { id });
+         },
+ 
+-        erase() {
+-          throw new ExtensionError("Not implemented");
++        async show(id) {
++          return operation("show", { id });
+         },
+ 
+-        open() {
+-          throw new ExtensionError("Not implemented");
++        async showDefaultFolder() {
++          await operation("showDefaultFolder");
+         },
+ 
+-        show() {
+-          throw new ExtensionError("Not implemented");
++        async removeFile(id) {
++          await operation("removeFile", { id });
+         },
+ 
+-        getFileIcon() {
+-          throw new ExtensionError("Not implemented");
++        async getFileIcon(id, options) {
++          return operation("getFileIcon", { id, size: options?.size || 32 });
+         },
+ 
++        onCreated: new EventManager({
++          context,
++          module: "downloads",
++          event: "onCreated",
++          extensionApi: this,
++        }).api(),
++
+         onChanged: new EventManager({
+           context,
+           module: "downloads",
+@@ -296,9 +439,12 @@ this.downloads = class extends ExtensionAPIPersistent {
+           extensionApi: this,
+         }).api(),
+ 
+-        onCreated: ignoreEvent(context, "downloads.onCreated"),
+-
+-        onErased: ignoreEvent(context, "downloads.onErased"),
++        onErased: new EventManager({
++          context,
++          module: "downloads",
++          event: "onErased",
++          extensionApi: this,
++        }).api(),
+ 
+         onDeterminingFilename: ignoreEvent(
+           context,

@@ -1,0 +1,285 @@
+diff --git a/mobile/android/branding/unofficial/content/jar.mn b/mobile/android/branding/unofficial/content/jar.mn
+index 9e23656457086b650692a8aea8e90c32785a4732..04df77e4a7fed2e26db8d45edb066c744de1ad29 100644
+--- a/mobile/android/branding/unofficial/content/jar.mn
++++ b/mobile/android/branding/unofficial/content/jar.mn
+@@ -4,6 +4,18 @@
+ 
+ geckoview.jar:
+ % content branding %content/branding/ contentaccessible=yes
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  content/branding/about.png                     (/navis/branding/generated/default128.png)
++  content/branding/favicon32.png                 (/navis/branding/generated/default32.png)
++  content/branding/favicon64.png                 (/navis/branding/generated/default64.png)
++  content/branding/icon16.png                    (/navis/branding/generated/default16.png)
++  content/branding/icon32.png                    (/navis/branding/generated/default32.png)
++  content/branding/icon48.png                    (/navis/branding/generated/default48.png)
++  content/branding/icon64.png                    (/navis/branding/generated/default64.png)
++  content/branding/icon128.png                   (/navis/branding/generated/default128.png)
++  content/branding/about-logo.svg                (/navis/branding/generated/navis-mark.svg)
++#else
+   content/branding/about.png                     (about.png)
+   content/branding/favicon32.png                 (favicon32.png)
+   content/branding/favicon64.png                 (favicon64.png)
++#endif
+diff --git a/mobile/android/branding/unofficial/locales/jar.mn b/mobile/android/branding/unofficial/locales/jar.mn
+index dbab39423691e4e2bc07970f134d388a7735dea3..180c4b6ccfd8597833190bcdb344e0ee3a2e3e2b 100644
+--- a/mobile/android/branding/unofficial/locales/jar.mn
++++ b/mobile/android/branding/unofficial/locales/jar.mn
+@@ -4,9 +4,17 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ [localization] @AB_CD@.jar:
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  branding/brand.ftl               (/navis/branding/locales/en-US/brand.ftl)
++#else
+   branding                         (en-US/**/*.ftl)
++#endif
+ 
+ @AB_CD@.jar:
+ % locale branding @AB_CD@ %locale/branding/
+ # Nightly branding only exists in en-US
++#ifdef MOZ_NAVIS_ANDROID_RUNTIME
++  locale/branding/brand.properties (/navis/branding/locales/en-US/brand.properties)
++#else
+   locale/branding/brand.properties (en-US/brand.properties)
++#endif
+diff --git a/mobile/android/geckoview/build.gradle b/mobile/android/geckoview/build.gradle
+index d20f7a9a0b7c7812d03939f94622e9e9ec4067a8..526ca70a1351efcb3c8465d13ccf5de0cf20c0b8 100644
+--- a/mobile/android/geckoview/build.gradle
++++ b/mobile/android/geckoview/build.gradle
+@@ -7,6 +7,10 @@ plugins {
+ 
+ import groovy.json.JsonOutput
+ 
++def navisProductUserAgentSuffix = mozconfig.substs.MOZ_NAVIS_CORE
++        ? " + \" Navis/${mozconfig.substs.MOZ_NAVIS_PRODUCT_VERSION}\""
++        : ""
++
+ // The SDK binding generation tasks depend on the JAR creation task of the
+ // :annotations project.
+ evaluationDependsOn(':annotations')
+@@ -52,8 +56,8 @@ android {
+         buildConfigField 'String', "OMNIJAR_NAME", "\"${mozconfig.substs.OMNIJAR_NAME}\"";
+ 
+         // Keep in sync with actual user agent in nsHttpHandler::BuildUserAgent
+-        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE", "\"Mozilla/5.0 (Android \" + android.os.Build.VERSION.RELEASE + \"; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}";
+-        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE_ANDROID_10", "\"Mozilla/5.0 (Android 10; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}";
++        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE", "\"Mozilla/5.0 (Android \" + android.os.Build.VERSION.RELEASE + \"; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}${navisProductUserAgentSuffix}";
++        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE_ANDROID_10", "\"Mozilla/5.0 (Android 10; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}${navisProductUserAgentSuffix}";
+ 
+         buildConfigField 'int', 'MIN_SDK_VERSION', mozconfig.substs.MOZ_ANDROID_MIN_SDK_VERSION;
+ 
+diff --git a/netwerk/protocol/http/moz.build b/netwerk/protocol/http/moz.build
+index 1b8068f235e421e97fc316f218efc14e551a07a5..bd82aec9fdbbb7ccdda3421ad2875fb561d5c349 100644
+--- a/netwerk/protocol/http/moz.build
++++ b/netwerk/protocol/http/moz.build
+@@ -238,6 +238,11 @@ LOCAL_INCLUDES += [
+ 
+ DEFINES["MOZ_APP_UA_NAME"] = f'"{CONFIG["MOZ_APP_UA_NAME"]}"'
+ 
++if CONFIG["MOZ_NAVIS_CORE"] and CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
++    DEFINES["MOZ_NAVIS_PRODUCT_UA_TOKEN"] = (
++        '"Navis/%s"' % CONFIG["MOZ_NAVIS_PRODUCT_VERSION"]
++    )
++
+ if CONFIG["MOZ_AUTH_EXTENSION"]:
+     LOCAL_INCLUDES += [
+         "/extensions/auth",
+diff --git a/netwerk/protocol/http/nsHttpHandler.cpp b/netwerk/protocol/http/nsHttpHandler.cpp
+index d7c4ee4d66f11ec37fbb9a32a979def59ab5b229..3138c149bd6590bf1b4cbc7175805858de2c0390 100644
+--- a/netwerk/protocol/http/nsHttpHandler.cpp
++++ b/netwerk/protocol/http/nsHttpHandler.cpp
+@@ -1079,6 +1079,10 @@ void nsHttpHandler::BuildUserAgent() {
+     mUserAgent += '/';
+     mUserAgent += mAppVersion;
+   }
++#ifdef MOZ_NAVIS_PRODUCT_UA_TOKEN
++  mUserAgent += ' ';
++  mUserAgent += MOZ_NAVIS_PRODUCT_UA_TOKEN;
++#endif
+ }
+ 
+ #ifdef XP_WIN
+diff --git a/toolkit/components/extensions/Extension.sys.mjs b/toolkit/components/extensions/Extension.sys.mjs
+index 18ec729c625f098fa652a2585cee267c1d8b7976..0401135d6486a4b5d26285e9ac5826c4355d4fbb 100644
+--- a/toolkit/components/extensions/Extension.sys.mjs
++++ b/toolkit/components/extensions/Extension.sys.mjs
+@@ -2239,6 +2239,13 @@ export class ExtensionData {
+         for (const [alias, path] of Object.entries(
+           entry.chrome_resources || {}
+         )) {
++          // A language pack translates the application, but it does not own
++          // the embedding product's identity. Keep Navis branding on the
++          // application package so Mozilla language packs cannot replace it
++          // with Firefox/Fennec names when the requested locale changes.
++          if (AppConstants.MOZ_NAVIS_CORE && alias === "branding") {
++            continue;
++          }
+           if (typeof path === "string") {
+             chromeEntries.push(["locale", alias, language, path]);
+           } else if (platform in path) {
+@@ -4698,6 +4705,28 @@ export class Langpack extends ExtensionData {
+       );
+     });
+ 
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      // Register this after the translated sources and in the same
++      // metasource. The exact index makes only the two identity resources
++      // fall back to the application-owned en-US brand vocabulary; all
++      // ordinary UI strings continue to come from the signed language pack.
++      const prePath = "resource://gre/localization/en-US/";
++      const resources = [
++        "branding/brand.ftl",
++        "toolkit/branding/brandings.ftl",
++      ];
++      fileSources.push(
++        new L10nFileSource(
++          `navis-branding-${langpackId}`,
++          langpackId,
++          this.startupData.languages,
++          prePath,
++          {},
++          resources.map(resource => prePath + resource),
++        )
++      );
++    }
++
+     L10nRegistry.getInstance().registerSources(fileSources);
+ 
+     Langpack.activeLangpackIds.add(langpackId);
+@@ -4718,6 +4747,9 @@ export class Langpack extends ExtensionData {
+     const sourcesToRemove = Object.keys(
+       this.startupData.l10nRegistrySources
+     ).map(sourceName => `${sourceName}-${this.startupData.langpackId}`);
++    if (AppConstants.MOZ_NAVIS_CORE) {
++      sourcesToRemove.push(`navis-branding-${this.startupData.langpackId}`);
++    }
+     L10nRegistry.getInstance().removeSources(sourcesToRemove);
+ 
+     if (this.chromeRegistryHandle) {
+diff --git a/toolkit/components/extensions/parent/ext-runtime.js b/toolkit/components/extensions/parent/ext-runtime.js
+index 8278148b88861be48fa10b39f4cd05f5ceaaf53d..fef6c791026cdf32f9d3398ad3f8583225327f17 100644
+--- a/toolkit/components/extensions/parent/ext-runtime.js
++++ b/toolkit/components/extensions/parent/ext-runtime.js
+@@ -334,6 +334,17 @@ this.runtime = class extends ExtensionAPIPersistent {
+         },
+ 
+         getBrowserInfo: function () {
++          if (
++            AppConstants.MOZ_NAVIS_CORE &&
++            AppConstants.platform === "android"
++          ) {
++            return Promise.resolve({
++              name: "Navis",
++              vendor: "Navis",
++              version: AppConstants.MOZ_NAVIS_PRODUCT_VERSION_DISPLAY,
++              buildID: Services.appinfo.appBuildID,
++            });
++          }
+           const { name, vendor, version, appBuildID } = Services.appinfo;
+           const info = { name, vendor, version, buildID: appBuildID };
+           return Promise.resolve(info);
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index 307a8298cd5cbbafb1fb53eceb6ed149d025669f..4a44326521741890ef623d7801d476593fb239e7 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -140,6 +140,13 @@ export var AppConstants = Object.freeze({
+ 
+   MOZ_BITS_DOWNLOAD: @MOZ_BITS_DOWNLOAD_BOOL@,
+ 
++  MOZ_NAVIS_CORE:
++#ifdef MOZ_NAVIS_CORE
++  true,
++#else
++  false,
++#endif
++
+   MOZ_DESKTOP_EMBEDDER:
+ #ifdef MOZ_DESKTOP_EMBEDDER
+   true,
+@@ -245,6 +252,8 @@ export var AppConstants = Object.freeze({
+   MOZ_APP_DISPLAYNAME_DO_NOT_USE: "@MOZ_APP_DISPLAYNAME@",
+   MOZ_APP_VERSION: "@MOZ_APP_VERSION@",
+   MOZ_APP_VERSION_DISPLAY: "@MOZ_APP_VERSION_DISPLAY@",
++  MOZ_NAVIS_PRODUCT_VERSION: "@MOZ_NAVIS_PRODUCT_VERSION@",
++  MOZ_NAVIS_PRODUCT_VERSION_DISPLAY: "@MOZ_NAVIS_PRODUCT_VERSION_DISPLAY@",
+   MOZ_BUILDID: "@MOZ_BUILDID@",
+   MOZ_BUILD_APP: "@MOZ_BUILD_APP@",
+   MOZ_MACBUNDLE_ID: "@MOZ_MACBUNDLE_ID@",
+diff --git a/toolkit/modules/moz.build b/toolkit/modules/moz.build
+index d8784faf50935ef319ea155f48fe15959cb74efb..2d5d76704707c51b27d7b43ad21c752b3e67b229 100644
+--- a/toolkit/modules/moz.build
++++ b/toolkit/modules/moz.build
+@@ -293,6 +293,8 @@ for var in (
+     "MOZ_APP_DISPLAYNAME",
+     "MOZ_APP_VERSION",
+     "MOZ_APP_VERSION_DISPLAY",
++    "MOZ_NAVIS_PRODUCT_VERSION",
++    "MOZ_NAVIS_PRODUCT_VERSION_DISPLAY",
+     "MOZ_BING_API_CLIENTID",
+     "MOZ_BING_API_KEY",
+     "MOZ_GOOGLE_SAFEBROWSING_API_KEY",
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+index 5783f29491bc6986ee62750934632dd208703f2e..5093b1e444d6e6a6fa8f8d6f5969358bca8297e0 100644
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -52,6 +52,59 @@ option(
+ set_config("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+ set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+ 
++option(
++    "--with-navis-product-version-file-path",
++    nargs=1,
++    help=(
++        "Read the Android Navis product version independently of Gecko's "
++        "engine version"
++    ),
++)
++
++
++@depends(
++    "--with-navis-product-version-file-path",
++    navis_core,
++    target,
++    build_environment,
++)
++@imports(_from="__builtin__", _import="open")
++@imports("os")
++@imports("re")
++def navis_product_versions(path, has_navis_core, target, build_env):
++    if not path:
++        if has_navis_core and target.os == "Android":
++            die("Android Navis Core requires a product version file path")
++        return namespace(version="", display_version="")
++    if not has_navis_core or target.os != "Android":
++        die("--with-navis-product-version-file-path requires Android Navis Core")
++
++    directory = path[0]
++    values = []
++    for name in ("version.txt", "version_display.txt"):
++        version_path = os.path.join(build_env.topsrcdir, directory, name)
++        try:
++            with open(version_path, "r") as version_file:
++                lines = version_file.read().splitlines()
++        except OSError as error:
++            die("Cannot read Navis product version {}: {}".format(version_path, error))
++        if len(lines) != 1 or not re.fullmatch(
++            r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", lines[0]
++        ):
++            die("Invalid Navis product version in {}".format(version_path))
++        values.append(lines[0])
++
++    version, display_version = values
++    if display_version != version and not display_version.startswith(version + "-"):
++        die("Navis display version must extend its base version")
++    return namespace(version=version, display_version=display_version)
++
++
++set_config("MOZ_NAVIS_PRODUCT_VERSION", navis_product_versions.version)
++set_config(
++    "MOZ_NAVIS_PRODUCT_VERSION_DISPLAY", navis_product_versions.display_version
++)
++
+ option(
+     "--enable-desktop-embedder-devtools",
+     help="Build Gecko page developer tools for the desktop embedder",

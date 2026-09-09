@@ -1,0 +1,58 @@
+diff --git a/build/moz.configure/update-programs.configure b/build/moz.configure/update-programs.configure
+index 5a4f2fbd7fd833f2beab1e4e37f37503e74fafbb..a3dce16547c8353dad7485d93ea40ecf616f415f 100644
+--- a/build/moz.configure/update-programs.configure
++++ b/build/moz.configure/update-programs.configure
+@@ -250,11 +250,15 @@ set_config("MOZ_DEFAULT_BROWSER_AGENT", default_agent_flag)
+ # notifications to persist when the application is not running and relaunch as
+ # necessary.
+ # ==============================================================================
+-@depends(target, build_project)
+-def notification_server_default(target, build_project):
+-    return target.os == "WINNT" and build_project in (
+-        "browser",
+-        "comm/mail",
++@depends(target, build_project, "--enable-desktop-embedder")
++def notification_server_default(target, build_project, desktop_embedder):
++    return target.os == "WINNT" and (
++        desktop_embedder
++        or build_project
++        in (
++            "browser",
++            "comm/mail",
++        )
+     )
+ 
+ 
+diff --git a/toolkit/library/moz.build b/toolkit/library/moz.build
+index 377b348dfd1b579f2d4c31b9187b353e59254afb..3e8f357a78766e0227e3131074d99a8d3e5557ac 100644
+--- a/toolkit/library/moz.build
++++ b/toolkit/library/moz.build
+@@ -377,6 +377,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
+     if CONFIG["ACCESSIBILITY"]:
+         OS_LIBS += [
+             "oleacc",
++            "propsys",
+             "uiautomationcore",
+         ]
+ 
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+index f6f23bf6a644d3de3c72983ef9b9b87af00dcac3..ca99d04cd962e27906b1e3a9b7e15bedb35233d9 100644
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -2157,9 +2157,13 @@ set_define("MOZ_LAUNCHER_PROCESS", launcher)
+ # ==============================================================
+ 
+ 
+-@depends(build_project, target, "--enable-compile-environment")
+-def check_for_llvm_dlltool(build_project, target, compile_environment):
+-    if build_project != "browser":
++@depends(
++    build_project, "--enable-desktop-embedder", target, "--enable-compile-environment"
++)
++def check_for_llvm_dlltool(
++    build_project, desktop_embedder, target, compile_environment
++):
++    if build_project != "browser" and not desktop_embedder:
+         return
+ 
+     if target.os != "WINNT":

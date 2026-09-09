@@ -1,0 +1,176 @@
+diff --git a/dom/geolocation/Geolocation.cpp b/dom/geolocation/Geolocation.cpp
+index 87b78f8d13a1a118eedb032d8feaf7d371e13844..b7a6e3695a4c743e724905c441486fdab70300c0 100644
+--- a/dom/geolocation/Geolocation.cpp
++++ b/dom/geolocation/Geolocation.cpp
+@@ -784,7 +784,8 @@ nsresult nsGeolocationService::Init() {
+   }
+ #endif
+ 
+-  if (Preferences::GetBool("geo.provider.use_mls", false)) {
++  if (!StaticPrefs::geo_provider_native_only() &&
++      Preferences::GetBool("geo.provider.use_mls", false)) {
+     mProvider = do_CreateInstance("@mozilla.org/geolocation/mls-provider;1");
+   }
+ 
+@@ -793,7 +794,8 @@ nsresult nsGeolocationService::Init() {
+   // the provider, and some tests rely on the network provider being used.
+   // "geo.provider.testing" is always set for all plain and browser chrome
+   // mochitests, and also for xpcshell tests.
+-  if (!mProvider || Preferences::GetBool("geo.provider.testing", false)) {
++  if (!StaticPrefs::geo_provider_native_only() &&
++      (!mProvider || Preferences::GetBool("geo.provider.testing", false))) {
+     nsCOMPtr<nsIGeolocationProvider> geoTestProvider =
+         do_GetService(NS_GEOLOCATION_PROVIDER_CONTRACTID);
+ 
+diff --git a/dom/geolocation/MLSFallback.cpp b/dom/geolocation/MLSFallback.cpp
+index 366ece527c9dd4817eff35bb52fd9fa943bdf029..c58f7d108ce255feb3d6df87be3fef9ffb6dc88c 100644
+--- a/dom/geolocation/MLSFallback.cpp
++++ b/dom/geolocation/MLSFallback.cpp
+@@ -6,6 +6,8 @@
+ 
+ #include "GeolocationPosition.h"
+ #include "mozilla/Logging.h"
++#include "mozilla/StaticPrefs_geo.h"
++#include "mozilla/dom/GeolocationPositionErrorBinding.h"
+ #include "mozilla/glean/DomGeolocationMetrics.h"
+ #include "nsComponentManagerUtils.h"
+ #include "nsIGeolocationProvider.h"
+@@ -40,6 +42,14 @@ nsresult MLSFallback::Startup(nsIGeolocationUpdate* aWatcher,
+ 
+   mUpdateWatcher = aWatcher;
+ 
++  // A native-only product still needs the delayed fallback object as a
++  // watchdog for native providers that never answer. It must report the
++  // standard unavailable result instead of creating the network provider.
++  if (mozilla::StaticPrefs::geo_provider_native_only() && mDelayMs == 0) {
++    mUpdateWatcher = nullptr;
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
+   // No need to schedule a timer callback if there is no startup delay.
+   if (mDelayMs == 0) {
+     mozilla::glean::geolocation::fallback.EnumGet(MapReasonToLabel(aReason))
+@@ -75,6 +85,15 @@ nsresult MLSFallback::Shutdown(ShutdownReason aReason) {
+ 
+ NS_IMETHODIMP
+ MLSFallback::Notify(nsITimer* aTimer) {
++  if (mozilla::StaticPrefs::geo_provider_native_only()) {
++    nsCOMPtr<nsIGeolocationUpdate> watcher = mUpdateWatcher;
++    mUpdateWatcher = nullptr;
++    return watcher ? watcher->NotifyError(
++                         mozilla::dom::GeolocationPositionError_Binding::
++                             POSITION_UNAVAILABLE)
++                   : NS_OK;
++  }
++
+   mozilla::glean::geolocation::fallback
+       .EnumGet(mozilla::glean::geolocation::FallbackLabel::eOnTimeout)
+       .Add();
+@@ -88,6 +107,10 @@ MLSFallback::GetName(nsACString& aName) {
+ }
+ 
+ nsresult MLSFallback::CreateMLSFallbackProvider() {
++  if (mozilla::StaticPrefs::geo_provider_native_only()) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
+   if (mMLSFallbackProvider || !mUpdateWatcher) {
+     return NS_OK;
+   }
+diff --git a/dom/system/linux/GeoclueLocationProvider.cpp b/dom/system/linux/GeoclueLocationProvider.cpp
+index d553c5e96729f624cfaff7ec04803b7a0b370a85..f559ac0c7c4e37f0e00646830848fc9d11ed91a8 100644
+--- a/dom/system/linux/GeoclueLocationProvider.cpp
++++ b/dom/system/linux/GeoclueLocationProvider.cpp
+@@ -342,6 +342,10 @@ void GCLocProviderPriv::UpdateLastPosition() {
+ }
+ 
+ nsresult GCLocProviderPriv::FallbackToMLS(MLSFallback::FallbackReason aReason) {
++  if (StaticPrefs::geo_provider_native_only()) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
+   GCL_LOG(Debug, "trying to fall back to MLS");
+   StopMLSFallback();
+ 
+@@ -911,6 +915,10 @@ void GCLocProviderPriv::MLSFallbackTimerFired() {
+   GCL_LOG(Info,
+           "Didn't get a location in a reasonable amount of time, trying to "
+           "fall back to MLS");
++  if (StaticPrefs::geo_provider_native_only()) {
++    NotifyError(GeolocationPositionError_Binding::POSITION_UNAVAILABLE);
++    return;
++  }
+   FallbackToMLS(MLSFallback::FallbackReason::Timeout);
+ }
+ 
+diff --git a/dom/system/linux/PortalLocationProvider.cpp b/dom/system/linux/PortalLocationProvider.cpp
+index 712f71bad29c35dba46cf1c130e61f8e8ddbf17b..86b497196f7dcc8abce04e472d2feda46b1acf8f 100644
+--- a/dom/system/linux/PortalLocationProvider.cpp
++++ b/dom/system/linux/PortalLocationProvider.cpp
+@@ -12,6 +12,7 @@
+ #include "mozilla/FloatingPoint.h"
+ #include "mozilla/GUniquePtr.h"
+ #include "mozilla/Logging.h"
++#include "mozilla/StaticPrefs_geo.h"
+ #include "mozilla/XREAppData.h"
+ #include "mozilla/dom/GeolocationPositionErrorBinding.h"
+ #include "mozilla/glean/DomGeolocationMetrics.h"
+@@ -126,7 +127,7 @@ void PortalLocationProvider::NotifyError(int aError) {
+     return;  // not initialized or already shut down
+   }
+ 
+-  if (!mMLSProvider) {
++  if (!mMLSProvider && !StaticPrefs::geo_provider_native_only()) {
+     /* With Portal failed, we restart MLS. It will be canceled once we
+      * get another location from Portal. Start it immediately.
+      */
+@@ -216,7 +217,8 @@ PortalLocationProvider::Startup() {
+       getter_Transfers(error)));
+   if (!mDBUSLocationProxy) {
+     g_printerr("Error creating location dbus proxy: %s\n", error->message);
+-    return NS_OK;  // fallback to MLS
++    return StaticPrefs::geo_provider_native_only() ? NS_ERROR_FAILURE
++                                                   : NS_OK;
+   }
+ 
+   // Listen to signals which will be send to us with the location data
+@@ -241,7 +243,8 @@ PortalLocationProvider::Startup() {
+ 
+   if (!result) {
+     g_printerr("Error calling CreateSession method: %s\n", error->message);
+-    return NS_OK;  // fallback to MLS
++    return StaticPrefs::geo_provider_native_only() ? NS_ERROR_FAILURE
++                                                   : NS_OK;
+   }
+ 
+   // Start to listen to the location changes
+@@ -268,7 +271,8 @@ PortalLocationProvider::Startup() {
+ 
+   if (!result) {
+     g_printerr("Error calling Start method: %s\n", error->message);
+-    return NS_OK;  // fallback to MLS
++    return StaticPrefs::geo_provider_native_only() ? NS_ERROR_FAILURE
++                                                   : NS_OK;
+   }
+ 
+   glean::geolocation::geolocation_service
+diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
+index 239164bb2c7953101ebbc3be5a819b27f8afa860..da98252cf7c71796bdb2dc7153d426ead93fd32b 100644
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -7079,6 +7079,15 @@
+   value: 6000
+   mirror: always
+ 
++# If true, geolocation may use only the operating-system provider. The
++# network provider and the network fallback used by Linux providers are not
++# selected. Products enabling this policy receive POSITION_UNAVAILABLE when
++# the native provider cannot supply a position.
++- name: geo.provider.native_only
++  type: bool
++  value: false
++  mirror: always
++
+ #ifdef MOZ_ENABLE_DBUS
+ # Whether to use Geoclue location provider (if available on the system).
+ - name: geo.provider.use_geoclue

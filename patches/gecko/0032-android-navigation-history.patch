@@ -1,0 +1,168 @@
+diff --git a/mobile/shared/modules/navis/NavisAndroidPresentation.sys.mjs b/mobile/shared/modules/navis/NavisAndroidPresentation.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9bead15eeb504391fa85ed534b8ccf74a352238
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidPresentation.sys.mjs
+@@ -0,0 +1,162 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++const { SessionHistory } = ChromeUtils.importESModule(
++  "resource://gre/modules/sessionstore/SessionHistory.sys.mjs"
++);
++
++const OPERATIONS = new Set(["session:presentation", "session:history", "session:traverse", "session:load"]);
++const pendingTraversals = new WeakMap();
++
++function cancelTraversal(browser) {
++  pendingTraversals.get(browser)?.();
++}
++
++function entryIdentity(entry, depth = 0) {
++  if (depth > 32) throw new RangeError("History entry tree exceeds the product limit");
++  return `${entry.ID}${entry.navigationKey ?? ""}` + (entry.children ?
++    `[${entry.children.map(child => entryIdentity(child, depth + 1)).join(",")}]` : "");
++}
++
++function collect(browser) {
++  const context = browser.browsingContext;
++  const uri = context?.currentURI?.spec;
++  const history = context?.sessionHistory;
++  const data = uri && history ? SessionHistory.collectFromParent(uri, true, history) : null;
++  if (data && (!Array.isArray(data.entries) || data.entries.length > 512)) {
++    throw new RangeError("Session history exceeds the product limit");
++  }
++  const state = data ? JSON.stringify({ version: 1, history: data }) : null;
++  if (state?.length > 1024 * 1024) throw new RangeError("Session snapshot exceeds the product limit");
++  const security = browser.securityUI?.state ?? 0;
++  const progress = Ci.nsIWebProgressListener;
++  return {
++    state,
++    current: {
++      uri: uri ?? "",
++      title: context?.currentWindowGlobal?.documentTitle ?? "",
++      errorPage: /^about:(?:neterror|certerror|blocked)(?:[?#]|$)/u.test(
++        context?.currentWindowGlobal?.documentURI?.spec ?? ""
++      ),
++      security: security & progress.STATE_IS_BROKEN ? 2 :
++        security & progress.STATE_IS_SECURE ? 3 : security & progress.STATE_IS_INSECURE ? 1 : 0,
++    },
++  };
++}
++
++export const NavisAndroidPresentation = Object.freeze({
++  handles(operation) { return OPERATIONS.has(operation); },
++  cancelTraversal,
++
++  query(window, operation, data) {
++    const browser = window.tab?.linkedBrowser;
++    if (!browser || window.closed || !OPERATIONS.has(operation)) {
++      throw new TypeError("No live Navis presentation owner");
++    }
++    if (!data || typeof data !== "object" || Array.isArray(data)) throw new TypeError("Invalid presentation request");
++    if (operation === "session:presentation") {
++      if (typeof data.native !== "boolean") throw new TypeError("Invalid native presentation flag");
++      cancelTraversal(browser);
++      if (data.native && !browser.navisNativePresentation) browser.stop();
++      browser.navisNativePresentation = data.native;
++      return collect(browser);
++    }
++    if (operation === "session:history") return collect(browser);
++    if (operation === "session:load") {
++      if (!browser.navisNativePresentation || typeof data.uri !== "string" || !data.uri ||
++          data.uri.length > 65536 || /[\x00-\x1f\x7f]/u.test(data.uri)) throw new TypeError("Invalid native page navigation");
++      const destination = Services.io.newURI(data.uri);
++      if (destination.schemeIs("navis")) throw new TypeError("Native routes are not web history entries");
++      const state = collect(browser);
++      const history = state.state && JSON.parse(state.state).history;
++      let flags = 0;
++      if (data.root === true) {
++        if (history?.entries?.length && history.index !== 1) throw new Error("The native root no longer owns the first entry");
++        flags = Ci.nsIWebNavigation.LOAD_FLAGS_REPLACE_HISTORY;
++      } else if (!Number.isInteger(data.index) || history?.index - 1 !== data.index ||
++          !Number.isSafeInteger(data.entryId) || data.entryId <= 0 ||
++          history.entries?.[data.index]?.ID !== data.entryId ||
++          entryIdentity(history.entries[data.index]) !== data.entryIdentity) {
++        throw new Error("The native page source entry changed");
++      }
++      cancelTraversal(browser);
++      browser.loadURI(destination, {
++        triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
++        loadFlags: flags,
++      });
++      browser.navisNativePresentation = false;
++      return { loaded: true };
++    }
++    if (!Number.isInteger(data.index) || data.index < 0 || data.index >= 512 ||
++        !Number.isSafeInteger(data.entryId) || data.entryId <= 0 ||
++        typeof data.entryIdentity !== "string" || !data.entryIdentity || data.entryIdentity.length > 65536) {
++      throw new TypeError("Invalid real history entry");
++    }
++    // Capture and validate the actual SHEntry in the same synchronous turn as gotoIndex.
++    // A stale URL or recycled index cannot silently navigate to a different document.
++    const snapshot = collect(browser);
++    const history = snapshot.state && JSON.parse(snapshot.state).history;
++    const entry = history?.entries?.[data.index];
++    if (!entry || entry.ID !== data.entryId || entryIdentity(entry) !== data.entryIdentity) {
++      throw new Error("The history entry is no longer available");
++    }
++    if (data.native !== undefined && typeof data.native !== "boolean") throw new TypeError("Invalid traversal presentation");
++    cancelTraversal(browser);
++    const traversed = history.index - 1 !== data.index;
++    browser.navisNativePresentation = data.native === true;
++    if (!traversed) return { ...snapshot, traversed };
++    return new Promise((resolve, reject) => {
++      let done = false;
++      let timer;
++      const finish = error => {
++        if (done) return;
++        done = true;
++        window.clearTimeout(timer);
++        browser.removeProgressListener(listener);
++        pendingTraversals.delete(browser);
++        if (error) reject(error);
++        else resolve({ ...collect(browser), traversed: true });
++      };
++      const arrived = () => {
++        // BFCache/COOP can legitimately replace the BrowsingContext while keeping
++        // this product browser owner and its session-history target intact.
++        const context = browser.browsingContext;
++        if (window.closed || window.tab?.linkedBrowser !== browser || !context) {
++          finish(new Error("The presentation owner changed"));
++          return false;
++        }
++        const actual = context.sessionHistory;
++        const actualEntry = actual.index === data.index ? actual.getEntryAtIndex(data.index) : null;
++        return actual.index === data.index &&
++          actualEntry.ID === data.entryId &&
++          entryIdentity(JSON.parse(collect(browser).state).history.entries[data.index]) === data.entryIdentity &&
++          context.currentURI?.equals(actualEntry.URI);
++      };
++      const listener = {
++        QueryInterface: ChromeUtils.generateQI(["nsIWebProgressListener", "nsISupportsWeakReference"]),
++        onLocationChange(progress, request, location, flags) {
++          // A full document load is not finished at location commit. Wait for STOP
++          // before a following native-page link may load and replace its branch.
++          // Same-document history has no load/STOP and completes at its own location.
++          if (progress.isTopLevel &&
++              (flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT) && arrived()) finish();
++        },
++        onStateChange(progress, request, flags) {
++          if (!progress.isTopLevel || !(flags & Ci.nsIWebProgressListener.STATE_STOP)) return;
++          if (arrived()) finish();
++          else if (browser.browsingContext?.sessionHistory?.requestedIndex !== data.index) {
++            finish(new Error("History traversal did not reach its target"));
++          }
++        },
++        onSecurityChange() {}, onProgressChange() {}, onStatusChange() {}, onContentBlockingEvent() {},
++      };
++      pendingTraversals.set(browser, () => finish(new Error("History traversal was superseded")));
++      timer = window.setTimeout(() => finish(new Error("History traversal timed out")), 30000);
++      browser.addProgressListener(listener,
++        Ci.nsIWebProgress.NOTIFY_LOCATION | Ci.nsIWebProgress.NOTIFY_STATE_DOCUMENT);
++      try { browser.gotoIndex(data.index); }
++      catch (error) { finish(error); }
++    });
++  },
++});

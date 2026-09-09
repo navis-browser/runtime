@@ -1,0 +1,700 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidContextMenu.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidContextMenu.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e0580e8b8ab7bca9e8e7831fc4413337e14f477
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidContextMenu.java
+@@ -0,0 +1,130 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import org.mozilla.gecko.util.GeckoBundle;
++
++/** Immutable, bounded context-menu data crossing the direct runtime peer. */
++public final class NavisAndroidContextMenu {
++  public static final int MAX_ITEMS = 256;
++  public static final int MAX_TEXT = 4096;
++
++  public static final class PageAction {
++    public final String id;
++    public final boolean enabled;
++
++    private PageAction(final GeckoBundle bundle) {
++      id = bounded(bundle.getString("id", ""), 32);
++      enabled = bundle.getBoolean("enabled", false);
++      if (!id.matches("[a-z-]{1,32}")) {
++        throw new IllegalArgumentException("Invalid Navis page action");
++      }
++    }
++  }
++
++  public static final class Item {
++    public final String id;
++    public final String parentId;
++    public final String extensionId;
++    public final String extensionName;
++    public final String title;
++    public final String type;
++    public final boolean checked;
++    public final boolean enabled;
++
++    private Item(final GeckoBundle bundle) {
++      id = bounded(bundle.getString("id", ""), 256);
++      final String rawParentId = bounded(bundle.getString("parentId", ""), 256);
++      parentId = rawParentId.isEmpty() ? null : rawParentId;
++      extensionId = bounded(bundle.getString("extensionId", ""), 256);
++      extensionName = bounded(bundle.getString("extensionName", ""), 64);
++      title = bounded(bundle.getString("title", ""), 64);
++      type = bounded(bundle.getString("type", "normal"), 16);
++      checked = bundle.getBoolean("checked", false);
++      enabled = bundle.getBoolean("enabled", false);
++      if (id.isEmpty() || (title.isEmpty() && !"separator".equals(type)) || extensionId.isEmpty()) {
++        throw new IllegalArgumentException("Invalid Navis context-menu item");
++      }
++    }
++
++    static Item fromBundle(final GeckoBundle bundle) {
++      return new Item(bundle);
++    }
++  }
++
++  public final String token;
++  public final long tabId;
++  public final String pageUrl;
++  public final String frameUrl;
++  public final int frameId;
++  public final boolean inFrame;
++  public final boolean onLink;
++  public final boolean onImage;
++  public final boolean onAudio;
++  public final boolean onVideo;
++  public final boolean isTextSelected;
++  public final boolean editable;
++  public final String linkUrl;
++  public final String linkText;
++  public final String srcUrl;
++  public final String selectionText;
++  public final String mediaType;
++  public final List<Item> items;
++  public final List<PageAction> pageActions;
++
++  private NavisAndroidContextMenu(final GeckoBundle bundle) {
++    token = bounded(bundle.getString("token", ""), 32);
++    pageUrl = bounded(bundle.getString("pageUrl", ""), MAX_TEXT);
++    frameUrl = bounded(bundle.getString("frameUrl", ""), MAX_TEXT);
++    frameId = bundle.getInt("frameId", 0);
++    tabId = bundle.getLong("tabId", 0L);
++    inFrame = bundle.getBoolean("inFrame", false);
++    onLink = bundle.getBoolean("onLink", false);
++    onImage = bundle.getBoolean("onImage", false);
++    onAudio = bundle.getBoolean("onAudio", false);
++    onVideo = bundle.getBoolean("onVideo", false);
++    isTextSelected = bundle.getBoolean("isTextSelected", false);
++    editable = bundle.getBoolean("editable", false);
++    linkUrl = bounded(bundle.getString("linkUrl", ""), MAX_TEXT);
++    linkText = bounded(bundle.getString("linkText", ""), MAX_TEXT);
++    srcUrl = bounded(bundle.getString("srcUrl", ""), MAX_TEXT);
++    selectionText = bounded(bundle.getString("selectionText", ""), MAX_TEXT);
++    mediaType = bounded(bundle.getString("mediaType", ""), 16);
++    if (token.length() != 32 || tabId <= 0 || pageUrl.isEmpty()) {
++      throw new IllegalArgumentException("Invalid Navis context-menu request");
++    }
++    final GeckoBundle[] bundles = bundle.getBundleArray("items");
++    if (bundles == null || bundles.length > MAX_ITEMS) {
++      throw new IllegalArgumentException("Invalid Navis context-menu item count");
++    }
++    final ArrayList<Item> parsed = new ArrayList<>(bundles.length);
++    for (final GeckoBundle item : bundles) {
++      if (item != null) parsed.add(Item.fromBundle(item));
++    }
++    items = Collections.unmodifiableList(parsed);
++    final GeckoBundle[] pageBundles = bundle.getBundleArray("pageActions");
++    final ArrayList<PageAction> actions = new ArrayList<>();
++    if (pageBundles != null) {
++      if (pageBundles.length > 32) throw new IllegalArgumentException("Too many Navis page actions");
++      for (final GeckoBundle action : pageBundles) {
++        if (action != null) actions.add(new PageAction(action));
++      }
++    }
++    pageActions = Collections.unmodifiableList(actions);
++  }
++
++  public static NavisAndroidContextMenu fromBundle(final GeckoBundle bundle) {
++    if (bundle == null) throw new IllegalArgumentException("Missing context-menu request");
++    return new NavisAndroidContextMenu(bundle);
++  }
++
++  private static String bounded(final String value, final int max) {
++    if (value == null) return "";
++    return value.length() <= max ? value : value.substring(0, max);
++  }
++}
+diff --git a/mobile/shared/actors/ContentDelegateChild.sys.mjs b/mobile/shared/actors/ContentDelegateChild.sys.mjs
+index 8552387bddb39a564e9a8244cf35385183b2710a..4a504217ac04e52b647b4a1011c46700ebb8fbe1 100644
+--- a/mobile/shared/actors/ContentDelegateChild.sys.mjs
++++ b/mobile/shared/actors/ContentDelegateChild.sys.mjs
+@@ -16,6 +16,85 @@ ChromeUtils.defineESModuleGetters(lazy, {
+ const MAX_TEXT_LENGTH = 4096;
+ 
+ export class ContentDelegateChild extends GeckoViewActorChild {
++  #navisContextTarget = null;
++  #navisContextToken = 0;
++  #navisContextCommands = new Set();
++
++  #navisPageActions(target, editable, hasSelection) {
++    const actions = [];
++    const add = (id, enabled = true) => actions.push({ id, enabled });
++    if (this.contentWindow.HTMLMediaElement.isInstance(target)) {
++      add(target.paused ? "play-media" : "pause-media");
++      add(target.muted ? "unmute-media" : "mute-media");
++      add(target.controls ? "hide-media-controls" : "show-media-controls");
++    }
++    const can = command => {
++      try { return target.ownerDocument.queryCommandEnabled(command); }
++      catch { return false; }
++    };
++    if (editable) {
++      add("undo", can("undo"));
++      add("redo", can("redo"));
++      add("cut", hasSelection && can("cut"));
++      add("copy", hasSelection && can("copy"));
++      add("paste");
++    } else if (hasSelection) {
++      add("copy", can("copy"));
++    }
++    add("select-all");
++    this.#navisContextCommands = new Set(actions.filter(action => action.enabled).map(action => action.id));
++    return actions;
++  }
++
++  async receiveMessage(message) {
++    if (message.name === "NavisAndroid:ContextDismiss") {
++      if (message.data?.token === this.#navisContextToken) {
++        this.#navisContextTarget = null;
++        this.#navisContextCommands.clear();
++      }
++      return null;
++    }
++    if (message.name !== "NavisAndroid:ContextAction") {
++      return super.receiveMessage(message);
++    }
++    const target = this.#navisContextTarget;
++    const command = message.data?.command;
++    if (message.data?.token !== this.#navisContextToken || !target?.isConnected ||
++        target.ownerDocument !== this.contentWindow.document ||
++        !this.#navisContextCommands.has(command)) {
++      return { handled: false };
++    }
++    // One action consumes the original target, even if script changes focus.
++    this.#navisContextTarget = null;
++    this.#navisContextCommands.clear();
++    const media = this.contentWindow.HTMLMediaElement.isInstance(target);
++    if (command.endsWith("-media") || command.endsWith("-media-controls")) {
++      if (!media) return { handled: false };
++      switch (command) {
++        case "play-media": await target.play(); break;
++        case "pause-media": target.pause(); break;
++        case "mute-media": target.muted = true; break;
++        case "unmute-media": target.muted = false; break;
++        case "show-media-controls": target.controls = true; break;
++        case "hide-media-controls": target.controls = false; break;
++        default: return { handled: false };
++      }
++      return { handled: true };
++    }
++    const textControl = this.contentWindow.HTMLTextAreaElement.isInstance(target) ||
++      (this.contentWindow.HTMLInputElement.isInstance(target) && target.mozIsTextField(false));
++    if (textControl || target.isContentEditable) target.focus({ preventScroll: true });
++    if (command === "select-all") {
++      if (textControl && typeof target.select === "function") {
++        target.select();
++        return { handled: true };
++      }
++      return { handled: target.ownerDocument.execCommand("selectAll") };
++    }
++    if (!["undo", "redo", "cut", "copy", "paste"].includes(command)) return { handled: false };
++    return { handled: target.ownerDocument.execCommand(command) };
++  }
++
+   notifyParentOfViewportFit() {
+     if (this.triggerViewportFitChange) {
+       this.contentWindow.cancelIdleCallback(this.triggerViewportFitChange);
+@@ -127,7 +206,7 @@ export class ContentDelegateChild extends GeckoViewActorChild {
+ 
+     switch (aEvent.type) {
+       case "contextmenu": {
+-        if (aEvent.defaultPrevented) {
++        if (!aEvent.isTrusted || aEvent.defaultPrevented) {
+           return;
+         }
+ 
+@@ -154,7 +233,9 @@ export class ContentDelegateChild extends GeckoViewActorChild {
+           return Services.io.newURI(aUri, null, aBaseUri).displaySpec;
+         }
+ 
+-        const node = aEvent.composedTarget;
++        const node = aEvent.composedTarget?.nodeType === 1
++          ? aEvent.composedTarget : aEvent.composedTarget?.parentElement;
++        if (!node || node.ownerDocument !== this.contentWindow.document) return;
+         const baseUri = node.ownerDocument.baseURIObject;
+         const uri = createAbsoluteUri(
+           baseUri,
+diff --git a/mobile/shared/actors/ContentDelegateParent.sys.mjs b/mobile/shared/actors/ContentDelegateParent.sys.mjs
+index bfe51b03138c264bb4d310324eba4280b05eaaf8..fccf087ae78a845aaaff8c8aaf71ff4a273e2ff8 100644
+--- a/mobile/shared/actors/ContentDelegateParent.sys.mjs
++++ b/mobile/shared/actors/ContentDelegateParent.sys.mjs
+@@ -39,6 +39,7 @@ export class ContentDelegateParent extends GeckoViewActorParent {
+ 
+       case "GeckoView:ContextMenu": {
+         if (this.window.navisAndroidContextMenus) {
++          return this.window.navisAndroidContextMenus.show(aMsg.data, this);
+         }
+         return this.eventDispatcher.sendRequest(
+           "GeckoView:ContextMenu",
+diff --git a/mobile/shared/modules/navis/NavisAndroidContextMenus.sys.mjs b/mobile/shared/modules/navis/NavisAndroidContextMenus.sys.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..02edd812455908a9889dd818a495a4ef857c7be4
+--- /dev/null
++++ b/mobile/shared/modules/navis/NavisAndroidContextMenus.sys.mjs
+@@ -0,0 +1,436 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++"use strict";
++
++// The browser extension menus implementation remains the source of truth for
++// matching contexts and click semantics.  This module is only the direct
++// Android presentation seam: no XUL menu, GeckoView Session, or extension URL
++// is created here.
++const MAX_ITEMS = 256;
++const MAX_TEXT = 4096;
++const MAX_LABEL = 64;
++const TOKEN_RE = /^[0-9a-f]{32}$/;
++const PAGE_COMMAND_PREFIX = "navis-context:";
++const PAGE_COMMANDS = new Set([
++  "play-media", "pause-media", "mute-media", "unmute-media",
++  "show-media-controls", "hide-media-controls", "undo", "redo", "cut", "copy", "paste", "select-all",
++]);
++
++function sourceIsCurrent(actor) {
++  try { return Boolean(actor?.manager?.isCurrentGlobal); }
++  catch { return false; }
++}
++
++const { PrivateBrowsingUtils } = ChromeUtils.importESModule(
++  "resource://gre/modules/PrivateBrowsingUtils.sys.mjs"
++);
++
++const registeredItems = new Set();
++let pending;
++
++function bounded(value, limit = MAX_TEXT) {
++  return typeof value === "string" ? value.slice(0, limit) : null;
++}
++
++function immutableItem(item, contextData) {
++  const extension = item.extension;
++  const browser = contextData.tab?.linkedBrowser;
++  if (!browser) {
++    return null;
++  }
++  // The synthetic root is a grouping implementation detail, never an
++  // actionable extension menu entry.
++  if (!item.parent) {
++    return null;
++  }
++  const privateTab = (() => {
++    try {
++      return PrivateBrowsingUtils.isBrowserPrivate(browser);
++    } catch {
++      return null;
++    }
++  })();
++  if (privateTab === null) {
++    return null;
++  }
++  if (!extension?.isActive || extension.hasShutdown ||
++      (privateTab && !extension.privateBrowsingAllowed)) {
++    return null;
++  }
++  try {
++    if (!item.enabledForContext(contextData)) {
++      return null;
++    }
++  } catch {
++    return null;
++  }
++  const menuId = String(item.id);
++  const id = `${extension.id}::${menuId}`;
++  if (!menuId || id.length > 256) {
++    return null;
++  }
++  let title = bounded(item.title, MAX_LABEL) || "";
++  if (contextData.isTextSelected && title.includes("%s")) {
++    title = title.replace(/%s/g, bounded(contextData.selectionText?.trim(), MAX_LABEL) || "");
++  }
++  return Object.freeze({
++    id,
++    menuId,
++    parentId: item.parent?.parent
++      ? `${extension.id}::${String(item.parent.id)}` : null,
++    extensionId: bounded(extension.id, 256),
++    extensionName: bounded(extension.name, MAX_LABEL) || "Extension",
++    title: title.slice(0, MAX_LABEL),
++    type: item.type === "checkbox" || item.type === "radio" || item.type === "separator"
++      ? item.type : "normal",
++    command: bounded(item.command, 128) || null,
++    checked: Boolean(item.checked),
++    enabled: Boolean(item.enabled),
++  });
++}
++
++function contextFromPayload(payload, tab, menu) {
++  const pageUrl = bounded(payload?.pageUrl || payload?.baseUri);
++  if (!pageUrl) {
++    return null;
++  }
++  const linkUrl = bounded(payload?.linkUrl || payload?.uri);
++  let linkURI = null;
++  try {
++    if (linkUrl) linkURI = Services.io.newURI(linkUrl);
++  } catch {
++    linkURI = null;
++  }
++  return {
++    menu,
++    tab,
++    pageUrl,
++    frameUrl: bounded(payload?.frameUrl || pageUrl),
++    frameId: Number.isSafeInteger(payload?.frameId) ? payload.frameId : 0,
++    inFrame: Boolean(payload?.inFrame),
++    onLink: Boolean(payload?.onLink || payload?.uri),
++    onImage: Boolean(payload?.onImage),
++    onAudio: Boolean(payload?.onAudio),
++    onVideo: Boolean(payload?.onVideo),
++    onSelection: Boolean(payload?.isTextSelected),
++    isTextSelected: Boolean(payload?.isTextSelected),
++    selectionText: bounded(payload?.selectionText),
++    linkUrl,
++    linkURI,
++    linkText: bounded(payload?.linkText),
++    srcUrl: bounded(payload?.srcUrl || payload?.elementSrc),
++    mediaType: bounded(payload?.mediaType),
++    editable: Boolean(payload?.editable),
++    onEditable: Boolean(payload?.editable),
++    onPassword: Boolean(payload?.onPassword),
++    targetToken: Number.isSafeInteger(payload?.targetToken) && payload.targetToken > 0
++      ? payload.targetToken : 0,
++    pageActions: Object.freeze((Array.isArray(payload?.pageActions) ? payload.pageActions : [])
++      .slice(0, 32).filter(action => PAGE_COMMANDS.has(action?.id))
++      .map(action => Object.freeze({ id: action.id, enabled: Boolean(action.enabled) }))),
++    targetElementId: Number.isSafeInteger(payload?.targetElementId)
++      ? payload.targetElementId
++      : 0,
++    modifiers: Array.isArray(payload?.modifiers) ? payload.modifiers.slice(0, 8) : [],
++    button: Number.isInteger(payload?.button) ? payload.button : 2,
++  };
++}
++
++function buildItems(contextData) {
++  const items = [];
++  const itemsById = new Map();
++  const extensions = new Set();
++  for (const item of registeredItems) {
++    if (items.length >= MAX_ITEMS) break;
++    const dto = immutableItem(item, contextData);
++    if (!dto || itemsById.has(dto.id)) continue;
++    items.push(dto);
++    itemsById.set(dto.id, item);
++    extensions.add(item.extension);
++  }
++  // Stable DFS preserves root/child order. The synthetic root is represented
++  // by null and is never sent to Android as a parent item.
++  const children = new Map();
++  for (const item of items) {
++    const list = children.get(item.parentId) || [];
++    list.push(item);
++    children.set(item.parentId, list);
++  }
++  const ordered = [];
++  const visit = parentId => {
++    for (const item of children.get(parentId) || []) {
++      ordered.push(item);
++      visit(item.id);
++    }
++  };
++  visit(null);
++  return { items: ordered, itemsById, extensions };
++}
++
++function nativeRequest(token, tab, contextData, items) {
++  return Object.freeze({
++    token,
++    tabId: tab?.id || 0,
++    pageUrl: contextData.pageUrl,
++    frameUrl: contextData.frameUrl,
++    frameId: contextData.frameId,
++    inFrame: contextData.inFrame,
++    onLink: contextData.onLink,
++    onImage: contextData.onImage,
++    onAudio: contextData.onAudio,
++    onVideo: contextData.onVideo,
++    isTextSelected: contextData.isTextSelected,
++    editable: contextData.editable,
++    linkUrl: contextData.linkUrl,
++    linkText: contextData.linkText,
++    srcUrl: contextData.srcUrl,
++    selectionText: contextData.selectionText,
++    mediaType: contextData.mediaType,
++    button: contextData.button,
++    modifiers: Object.freeze(contextData.modifiers),
++    items: Object.freeze(items),
++    pageActions: contextData.pageActions,
++  });
++}
++
++function finishPending() {
++  const current = pending;
++  pending = null;
++  if (!current) {
++    return;
++  }
++  try {
++    current.sourceActor?.sendAsyncMessage("NavisAndroid:ContextDismiss", {
++      token: current.contextData.targetToken,
++    });
++  } catch {}
++  try {
++    current.cancelNative?.();
++  } catch (error) {
++    Cu.reportError(error);
++  }
++  for (const extension of current.extensions) {
++    try {
++      extension.emit("webext-menu-hidden");
++    } catch (error) {
++      Cu.reportError(error);
++    }
++  }
++}
++
++const NavisAndroidContextMenus = {
++  registerMenuItem(item) {
++    registeredItems.add(item);
++    pending?.rebuild?.();
++  },
++
++  unregisterMenuItem(item) {
++    registeredItems.delete(item);
++    if (pending) {
++      for (const [id, pendingItem] of pending.itemsById) {
++        if (pendingItem === item) pending.itemsById.delete(id);
++      }
++      pending.rebuild?.();
++    }
++  },
++
++  unregisterExtension(extension) {
++    for (const item of registeredItems) {
++      if (item.extension === extension) registeredItems.delete(item);
++    }
++    if (pending && pending.extensions.has(extension)) finishPending();
++  },
++
++  refreshMenuItem(item) {
++    if (pending && registeredItems.has(item)) {
++      // onShown listeners may update/create/remove items. Refresh is an
++      // in-place DTO update on the same token, never a cancellation.
++      pending.rebuild?.();
++    }
++  },
++
++  close() {
++    finishPending();
++  },
++
++  createBridge({ getWindow, getTab, getDispatcher, isLive, invokeCommand }) {
++    const bridge = {
++      async show(payload, sourceActor = null) {
++        if (!isLive() || pending) {
++          finishPending();
++        }
++        if (!isLive() || (sourceActor && !sourceIsCurrent(sourceActor))) {
++          return null;
++        }
++        const win = getWindow();
++        const tab = getTab();
++        if (!tab?.getActive?.()) {
++          return null;
++        }
++        const menu = {
++          id: "contentAreaContextMenu",
++          documentGlobal: win,
++          ownerDocument: win?.document,
++        };
++        const contextData = contextFromPayload(payload, tab, menu);
++        if (!contextData) {
++          return null;
++        }
++        const built = buildItems(contextData);
++        const { items, itemsById, extensions } = built;
++        // Navis supplies ordinary page/link actions even when no extension
++        // contributes an item. Keep the same single-use native transaction.
++        const token = Services.uuid.generateUUID().toString()
++          .slice(1, -1).replace(/-/g, "");
++        pending = {
++          token,
++          win,
++          tab,
++          contextData,
++          sourceActor,
++          items,
++          itemsById,
++          extensions,
++          rebuild() {
++            if (pending?.token !== token || !isLive()) return;
++            const next = buildItems(contextData);
++            pending.itemsById = next.itemsById;
++            pending.extensions = next.extensions;
++            pending.items = next.items;
++            try {
++              pending.updateNative?.(nativeRequest(token, tab, contextData, next.items));
++            } catch (error) {
++              finishPending();
++            }
++          },
++          cancelNative: () => getDispatcher().sendRequest(
++            "GeckoView:ContextMenu:Cancel", { token }),
++          updateNative: request => getDispatcher().sendRequest(
++            "GeckoView:ContextMenu:Update", request),
++        };
++        for (const extension of extensions) {
++          try {
++            extension.emit("webext-menu-shown", items
++              .filter(item => item.extensionId === extension.id)
++              .map(item => item.menuId), contextData);
++          } catch (error) {
++            Cu.reportError(error);
++          }
++        }
++        let result;
++        try {
++          result = await getDispatcher().sendRequestForResult(
++            "GeckoView:ContextMenu", nativeRequest(
++              token, tab, contextData,
++              pending?.token === token ? pending.items : items));
++        } catch (error) {
++          if (pending?.token === token) finishPending();
++          return null;
++        }
++        return bridge.select(token, result?.itemId);
++      },
++
++      async select(token, itemId) {
++        const current = pending;
++        if (!TOKEN_RE.test(token || "") || !current || current.token !== token || !isLive() ||
++            getWindow() !== current.win || getTab() !== current.tab ||
++            !current.tab?.getActive?.()) {
++          return null;
++        }
++        if (typeof itemId !== "string" || itemId.length > 256) {
++          finishPending();
++          return null;
++        }
++        if (current.sourceActor && !sourceIsCurrent(current.sourceActor)) {
++          finishPending();
++          return null;
++        }
++        if (itemId.startsWith(PAGE_COMMAND_PREFIX)) {
++          const command = itemId.slice(PAGE_COMMAND_PREFIX.length);
++          if (!sourceIsCurrent(current.sourceActor) || !current.contextData.targetToken ||
++              !current.contextData.pageActions.some(action => action.id === command && action.enabled)) {
++            finishPending();
++            return null;
++          }
++          try {
++            const result = await current.sourceActor.sendQuery("NavisAndroid:ContextAction", {
++              token: current.contextData.targetToken, command,
++            });
++            if (pending === current) finishPending();
++            return result?.handled ? Object.freeze({}) : null;
++          } catch {
++            if (pending === current) finishPending();
++            return null;
++          }
++        }
++        const item = current.itemsById.get(itemId);
++        if (!item || item.type === "separator" || !item.enabled ||
++            !item.extension?.isActive || item.extension.hasShutdown) {
++          finishPending();
++          return null;
++        }
++        try {
++          if (!item.enabledForContext(current.contextData)) {
++            finishPending();
++            return null;
++          }
++          const wasChecked = Boolean(item.checked);
++          if (item.type === "checkbox") item.checked = !wasChecked;
++          if (item.type === "radio") {
++            for (const sibling of item.parent?.children || []) {
++              if (sibling.type === "radio" && sibling.groupName === item.groupName) {
++                sibling.checked = false;
++              }
++            }
++            item.checked = true;
++          }
++          if (current.tab && (!current.contextData.webExtContextData ||
++              current.contextData.webExtContextData.extensionId !== item.extension.id)) {
++            item.tabManager.addActiveTabPermission(current.tab);
++          }
++          const info = item.getClickInfo(current.contextData, wasChecked);
++          info.modifiers = current.contextData.modifiers;
++          info.button = current.contextData.button;
++          if (item.command === "_execute_action" ||
++              item.command === "_execute_browser_action" ||
++              item.command === "_execute_page_action") {
++            const privateMode = (() => {
++              try {
++                return PrivateBrowsingUtils.isBrowserPrivate(current.tab.linkedBrowser);
++              } catch {
++                return null;
++              }
++            })();
++            const handled = privateMode !== null && await invokeCommand?.(
++              item.extension.id, current.tab.id, privateMode, item.command);
++            if (pending !== current) return null;
++            if (!handled) {
++              finishPending();
++              return null;
++            }
++            finishPending();
++            return Object.freeze({});
++          }
++          if (item.command === "_execute_sidebar_action") {
++            finishPending();
++            return null;
++          }
++          item.extension.emit("webext-menu-menuitem-click", info, current.tab);
++        } catch (error) {
++          Cu.reportError(error);
++        }
++        finishPending();
++        return Object.freeze({});
++      },
++    };
++    return Object.freeze(bridge);
++  },
++};
++
++function createNavisAndroidContextMenuBridge(options) {
++  return NavisAndroidContextMenus.createBridge(options);
++}
++
++export { NavisAndroidContextMenus, createNavisAndroidContextMenuBridge };

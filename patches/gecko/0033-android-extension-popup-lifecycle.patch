@@ -1,0 +1,550 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupBindingFailure.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupBindingFailure.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb510efa93e27d971cc2cf6ae21edb343f28363c
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupBindingFailure.java
+@@ -0,0 +1,56 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import java.util.concurrent.CompletionException;
++import java.util.concurrent.ExecutionException;
++import org.mozilla.gecko.EventDispatcher;
++import org.mozilla.gecko.util.GeckoBundle;
++
++/** Preserves only reviewed binding phases, never exception text or popup identifiers. */
++final class NavisAndroidPopupBindingFailure {
++  private NavisAndroidPopupBindingFailure() {}
++
++  static String code(final Throwable failure) {
++    Throwable error = failure;
++    for (int depth = 0; depth < 4
++        && (error instanceof CompletionException || error instanceof ExecutionException);
++        depth++) {
++      error = error.getCause();
++    }
++    if (error instanceof EventDispatcher.QueryException) {
++      final Object data = ((EventDispatcher.QueryException) error).data;
++      if (data instanceof GeckoBundle) {
++        final String candidate;
++        try {
++          candidate = ((GeckoBundle) data).getString("code");
++        } catch (final RuntimeException invalidData) {
++          return "popup-bind-failed";
++        }
++        if (candidate != null) {
++          switch (candidate) {
++            case "popup-invalid-target":
++            case "popup-transaction-stale":
++            case "popup-owner-invalid":
++            case "popup-owner-reused":
++            case "popup-owner-name":
++            case "popup-source-inaccessible":
++            case "popup-source-inactive":
++            case "popup-private-mismatch":
++            case "popup-target-reused":
++            case "popup-viewtype":
++            case "popup-viewtype-failed":
++            case "popup-insertion-failed":
++            case "popup-load-failed":
++              return candidate;
++            default:
++              break;
++          }
++        }
++      }
++    }
++    return "popup-bind-failed";
++  }
++}
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupLoadState.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupLoadState.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8154d769f807a9a0f1fe9566b473a4bb89a777da
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupLoadState.java
+@@ -0,0 +1,41 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++/** Only the authorized extension document's own navigation can complete its popup. */
++final class NavisAndroidPopupLoadState {
++  enum Completion { IGNORE, LOADED, FAILED }
++
++  private final String expectedUri;
++  private long generation;
++  private boolean settled;
++
++  NavisAndroidPopupLoadState(final String uri) {
++    expectedUri = withoutFragment(uri);
++  }
++
++  void started(final long nextGeneration, final String uri) {
++    if (!settled && nextGeneration > 0 && expectedUri.equals(withoutFragment(uri))) {
++      generation = nextGeneration;
++    }
++  }
++
++  Completion completed(final long completedGeneration, final int status,
++      final boolean statusKnown, final boolean cancelled, final boolean errorPage, final String uri) {
++    if (settled || generation == 0 || !expectedUri.equals(withoutFragment(uri))
++        || (completedGeneration != 0 && generation != completedGeneration)
++        || !statusKnown || cancelled) {
++      return Completion.IGNORE;
++    }
++    settled = true;
++    return !errorPage && (status & 0x80000000) == 0 ? Completion.LOADED : Completion.FAILED;
++  }
++
++  private static String withoutFragment(final String uri) {
++    if (uri == null) return "";
++    final int hash = uri.indexOf('#');
++    return hash < 0 ? uri : uri.substring(0, hash);
++  }
++}
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..783d703559e26891ce9bcfff77a0ad813942a3d3
+--- /dev/null
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidPopupSurface.java
+@@ -0,0 +1,435 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++package org.mozilla.gecko.navis;
++
++import android.content.Context;
++import android.os.Handler;
++import android.view.DragEvent;
++import android.view.KeyEvent;
++import android.view.MotionEvent;
++import android.view.SurfaceHolder;
++import android.view.SurfaceView;
++import android.view.View;
++import android.view.ViewTreeObserver;
++import android.view.inputmethod.EditorInfo;
++import android.view.inputmethod.InputConnection;
++import android.widget.FrameLayout;
++import java.util.concurrent.atomic.AtomicLong;
++import java.util.function.Consumer;
++import org.mozilla.gecko.util.ThreadUtils;
++
++/**
++ * Navis-owned render target for one WebExtension popup document.
++ *
++ * <p>The popup is a real engine window backed by {@link NavisAndroidSession}; this class only
++ * owns the Android Surface used by that private peer. No GeckoView runtime, session, view, or
++ * WebExtension controller crosses into the product layer.
++ */
++public final class NavisAndroidPopupSurface extends FrameLayout {
++  // Popup sessions use a distinct, still-JavaScript-safe ID namespace. Product Session IDs come
++  // from Navis Core's low monotonic allocator, so this prevents dispatcher/window-name collisions.
++  private static final AtomicLong NEXT_SESSION_ID = new AtomicLong(0x10000000000000L);
++  private static final int MAX_URI_LENGTH = 1024;
++
++  private final String mTargetToken;
++  private final String mExtensionId;
++  private final String mPopupUri;
++  private final Runnable mOnDismissed;
++  private final Runnable mOnLoaded;
++  private final Consumer<String> mOnFailed;
++  private final NavisAndroidPopupLoadState mLoadState;
++  private final Runnable mLoadTimeout = () -> notifyFailed("load-timeout");
++  private final PopupSurfaceView mSurfaceView;
++  private final SurfaceCallback mSurfaceCallback = new SurfaceCallback();
++  private final NavisAndroidSession mSession;
++  private final int[] mScreenLocation = new int[2];
++  private final ViewTreeObserver.OnPreDrawListener mGeometryListener = () -> {
++    updateScreenBounds(false);
++    return true;
++  };
++  private ViewTreeObserver mGeometryObserver;
++  private boolean mGeometryKnown;
++  private int mLastScreenX;
++  private int mLastScreenY;
++  private int mLastWidth;
++  private int mLastHeight;
++  private boolean mReleased;
++  private boolean mBindingStarted;
++  private boolean mFailed;
++
++  public NavisAndroidPopupSurface(
++      final Context context,
++      final String extensionId,
++      final String targetToken,
++      final String popupUri,
++      final boolean privateMode,
++      final Runnable onDismissed,
++      final Runnable onLoaded,
++      final Consumer<String> onFailed) {
++    super(context);
++    if (extensionId == null || extensionId.isEmpty() || extensionId.length() > 256) {
++      throw new IllegalArgumentException("Invalid popup extension ID");
++    }
++    if (targetToken == null || !targetToken.matches("[0-9a-f]{32}")) {
++      throw new IllegalArgumentException("Invalid popup target token");
++    }
++    if (popupUri == null
++        || popupUri.length() > MAX_URI_LENGTH
++        || !popupUri.startsWith("moz-extension://")) {
++      throw new IllegalArgumentException("Invalid popup URI");
++    }
++    if (onDismissed == null || onLoaded == null || onFailed == null) {
++      throw new NullPointerException("Popup lifecycle callbacks");
++    }
++    mExtensionId = extensionId;
++    mTargetToken = targetToken;
++    mPopupUri = popupUri;
++    mOnDismissed = onDismissed;
++    mOnLoaded = onLoaded;
++    mOnFailed = onFailed;
++    mLoadState = new NavisAndroidPopupLoadState(popupUri);
++    setFocusable(true);
++    setFocusableInTouchMode(true);
++
++    mSession = new NavisAndroidSession(NEXT_SESSION_ID.incrementAndGet(), new SessionDelegate());
++    mSurfaceView = new PopupSurfaceView(context);
++    mSurfaceView.setFocusable(true);
++    mSurfaceView.setFocusableInTouchMode(true);
++    mSurfaceView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
++    mSurfaceView.getHolder().addCallback(mSurfaceCallback);
++    addView(
++        mSurfaceView,
++        new FrameLayout.LayoutParams(
++            LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
++    // Opening is independent of Surface creation. Use the tokenized private-window path so the
++    // chrome host marks this window as a popup before extension TabTracker can observe it.
++    ThreadUtils.getUiHandler().postDelayed(mLoadTimeout, 30_000);
++    mSession
++        .openPopupWindow(privateMode, mTargetToken)
++        .whenComplete(
++            (opened, error) -> {
++              if (!mReleased && (error != null || !Boolean.TRUE.equals(opened))) {
++                notifyFailed("native-open-failed");
++              }
++            });
++    mSession.attachInputView(mSurfaceView, this);
++    requestFocus();
++  }
++
++  /** The opaque token that binds this surface to exactly one engine popup transaction. */
++  public String getTargetToken() {
++    return mTargetToken;
++  }
++
++  /** Idempotently dismisses the remote popup window and releases its compositor/input handles. */
++  public void release() {
++    if (mReleased) {
++      return;
++    }
++    mReleased = true;
++    stopObservingGeometry();
++    ThreadUtils.getUiHandler().removeCallbacks(mLoadTimeout);
++    mSurfaceView.getHolder().removeCallback(mSurfaceCallback);
++    mSession.onSurfaceDestroyed();
++    mSession.detachInputView();
++    mSession.close();
++    removeAllViews();
++  }
++
++  private void notifyDismissed() {
++    if (!mReleased && !mFailed) {
++      mOnDismissed.run();
++    }
++  }
++
++  private void notifyFailed(final String code) {
++    if (mReleased || mFailed) return;
++    mFailed = true;
++    stopObservingGeometry();
++    ThreadUtils.getUiHandler().removeCallbacks(mLoadTimeout);
++    // Do not log the popup URL, document content, or extension credentials.
++    android.util.Log.w("NavisAndroidPopup", "Popup failed: " + code);
++    mOnFailed.accept(code);
++  }
++
++  @Override
++  protected void onAttachedToWindow() {
++    super.onAttachedToWindow();
++    observeGeometry();
++  }
++
++  private void observeGeometry() {
++    if (mReleased || mFailed) return;
++    final ViewTreeObserver observer = getViewTreeObserver();
++    if (observer == mGeometryObserver) return;
++    stopObservingGeometry();
++    if (observer.isAlive()) {
++      mGeometryObserver = observer;
++      mGeometryKnown = false;
++      observer.addOnPreDrawListener(mGeometryListener);
++    }
++  }
++
++  private void stopObservingGeometry() {
++    if (mGeometryObserver != null && mGeometryObserver.isAlive()) {
++      mGeometryObserver.removeOnPreDrawListener(mGeometryListener);
++    }
++    mGeometryObserver = null;
++    mGeometryKnown = false;
++  }
++
++  // BottomSheet translation can move the render host without child layout or
++  // Surface callbacks. Sample before drawing, but send no JNI for unchanged
++  // geometry and never resume the compositor from this animation path.
++  private void updateScreenBounds(final boolean force) {
++    if (mReleased || mFailed || mSession.isClosed()) return;
++    final int width = mSurfaceView.getWidth();
++    final int height = mSurfaceView.getHeight();
++    if (width <= 0 || height <= 0 || !mSurfaceView.getHolder().getSurface().isValid()) return;
++    // Session accessibility and the touch raw-minus-local correction both use
++    // screen coordinates; a dialog's window origin need not be the screen origin.
++    mSurfaceView.getLocationOnScreen(mScreenLocation);
++    final int x = mScreenLocation[0];
++    final int y = mScreenLocation[1];
++    if (!force && mGeometryKnown && x == mLastScreenX && y == mLastScreenY
++        && width == mLastWidth && height == mLastHeight) return;
++    mSession.onBoundsChanged(x, y, width, height);
++    mLastScreenX = x;
++    mLastScreenY = y;
++    mLastWidth = width;
++    mLastHeight = height;
++    mGeometryKnown = true;
++  }
++
++  @Override
++  protected void onLayout(
++      final boolean changed, final int left, final int top, final int right, final int bottom) {
++    super.onLayout(changed, left, top, right, bottom);
++    if (!changed || mReleased) {
++      return;
++    }
++    refreshSurface();
++  }
++
++  // Match the ordinary Navis render host: a Surface can precede native/window
++  // readiness, and compositor resume alone does not resize Gecko's chrome
++  // widget. Replay both the Surface and layout bounds at either readiness edge.
++  private void refreshSurface() {
++    if (mReleased || mFailed || mSession.isClosed()) return;
++    final SurfaceHolder holder = mSurfaceView.getHolder();
++    final int width = mSurfaceView.getWidth();
++    final int height = mSurfaceView.getHeight();
++    if (width <= 0 || height <= 0 || !holder.getSurface().isValid()) return;
++    mSession.onSurfaceChanged(0, 0, width, height, holder.getSurface());
++    // onSurfaceChanged resets the Session rectangle to surface-local (0, 0),
++    // and native readiness can need a replay even if Android geometry is stable.
++    updateScreenBounds(true);
++  }
++
++  @Override
++  protected void onDetachedFromWindow() {
++    // A platform detach is also a popup dismissal. Notify the product owner before releasing the
++    // private Session so it can revoke the exact action grant and engine popup transaction.
++    notifyDismissed();
++    release();
++    super.onDetachedFromWindow();
++  }
++
++  private final class SurfaceCallback implements SurfaceHolder.Callback {
++    @Override
++    public void surfaceCreated(final SurfaceHolder holder) {
++      refreshSurface();
++    }
++
++    @Override
++    public void surfaceChanged(
++        final SurfaceHolder holder, final int format, final int width, final int height) {
++      refreshSurface();
++    }
++
++    @Override
++    public void surfaceDestroyed(final SurfaceHolder holder) {
++      if (!mReleased) {
++        mSession.onSurfaceDestroyed();
++      }
++    }
++  }
++
++  private final class PopupSurfaceView extends SurfaceView {
++    PopupSurfaceView(final Context context) {
++      super(context);
++    }
++
++    @Override
++    public Handler getHandler() {
++      final Handler fallback = super.getHandler();
++      return mSession.getInputConnectionHandler(fallback);
++    }
++
++    @Override
++    public boolean onCheckIsTextEditor() {
++      return !mReleased;
++    }
++
++    @Override
++    public InputConnection onCreateInputConnection(final EditorInfo outAttrs) {
++      return mSession.onCreateInputConnection(outAttrs);
++    }
++
++    @Override
++    public boolean onKeyPreIme(final int keyCode, final KeyEvent event) {
++      return super.onKeyPreIme(keyCode, event) || mSession.onKeyPreIme(keyCode, event);
++    }
++
++    @Override
++    public boolean onKeyDown(final int keyCode, final KeyEvent event) {
++      return super.onKeyDown(keyCode, event) || mSession.onKeyDown(keyCode, event);
++    }
++
++    @Override
++    public boolean onKeyUp(final int keyCode, final KeyEvent event) {
++      return super.onKeyUp(keyCode, event) || mSession.onKeyUp(keyCode, event);
++    }
++
++    @Override
++    public boolean onKeyLongPress(final int keyCode, final KeyEvent event) {
++      return super.onKeyLongPress(keyCode, event) || mSession.onKeyLongPress(keyCode, event);
++    }
++
++    @Override
++    public boolean onKeyMultiple(
++        final int keyCode, final int repeatCount, final KeyEvent event) {
++      return super.onKeyMultiple(keyCode, repeatCount, event)
++          || mSession.onKeyMultiple(keyCode, repeatCount, event);
++    }
++
++    @Override
++    public boolean onTouchEvent(final MotionEvent event) {
++      if (mReleased) {
++        return false;
++      }
++      return mSession.onTouchEvent(event) || super.onTouchEvent(event);
++    }
++
++    @Override
++    public boolean onGenericMotionEvent(final MotionEvent event) {
++      if (mReleased) {
++        return false;
++      }
++      return mSession.onGenericMotionEvent(event) || super.onGenericMotionEvent(event);
++    }
++
++    @Override
++    public boolean onDragEvent(final DragEvent event) {
++      return !mReleased && mSession.onDragEvent(event);
++    }
++
++    @Override
++    public boolean dispatchKeyEvent(final KeyEvent event) {
++      if (mReleased) {
++        return false;
++      }
++      return super.dispatchKeyEvent(event);
++    }
++  }
++
++  private final class SessionDelegate implements NavisAndroidSession.Delegate {
++    @Override
++    public void onNativeWindowReady(final long sessionId) {
++      refreshSurface();
++    }
++
++    @Override
++    public void onHostReady(final long sessionId) {
++      if (!mReleased && !mBindingStarted) {
++        mBindingStarted = true;
++        // The private host validates all three values atomically before assigning
++        // popup view semantics or loading the moz-extension document.
++        mSession
++            .loadExtensionPopup(mExtensionId, mTargetToken, mPopupUri)
++            .whenComplete(
++                (loaded, error) -> {
++                  if (mReleased) {
++                    return;
++                  }
++                  if (error != null || !Boolean.TRUE.equals(loaded)) {
++                    notifyFailed(NavisAndroidPopupBindingFailure.code(error));
++                  }
++                });
++      }
++    }
++
++    @Override
++    public void onLocationChanged(
++        final long sessionId, final String uri, final long generation,
++        final boolean sameDocument, final boolean errorPage) {}
++
++    @Override
++    public void onTitleChanged(final long sessionId, final String title) {}
++
++    @Override
++    public void onLoadStarted(final long sessionId, final long generation, final String uri) {
++      mLoadState.started(generation, uri);
++    }
++
++    @Override
++    public void onLoadCompleted(
++        final long sessionId, final long generation, final int status,
++        final boolean statusKnown, final boolean cancelled, final boolean errorPage, final String uri) {
++      if (mReleased || mFailed) return;
++      switch (mLoadState.completed(generation, status, statusKnown, cancelled, errorPage, uri)) {
++        case LOADED:
++          ThreadUtils.getUiHandler().removeCallbacks(mLoadTimeout);
++          mOnLoaded.run();
++          break;
++        case FAILED:
++          notifyFailed("popup-document-failed");
++          break;
++        case IGNORE:
++          // The host's initial about:blank, replaced loads and late/unknown terminals
++          // are not failures of this extension document.
++          break;
++      }
++    }
++
++    @Override
++    public void onSessionStateChanged(final long sessionId, final String serializedState) {}
++
++    @Override
++    public void onHistoryChanged(
++        final long sessionId, final boolean canGoBack, final boolean canGoForward) {}
++
++    @Override
++    public void onSecurityChanged(final long sessionId, final int securityState) {}
++
++    @Override
++    public void onCompositorAttached(final long sessionId) {
++      refreshSurface();
++    }
++
++    @Override
++    public void onCompositorDetached(final long sessionId) {}
++
++    @Override
++    public void onNewSurfaceRequired(final long sessionId) {
++      refreshSurface();
++    }
++
++    @Override
++    public void onSessionError(final long sessionId, final String message) {
++      notifyFailed("session-error");
++    }
++
++    @Override
++    public void onContentProcessGone(final long sessionId, final boolean crashed) {
++      notifyFailed("content-process-lost");
++    }
++
++    @Override
++    public void onSessionClosed(final long sessionId) {
++      notifyDismissed();
++    }
++  }
++}

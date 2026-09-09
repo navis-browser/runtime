@@ -1,0 +1,48 @@
+diff --git a/toolkit/components/certviewer/jar.mn b/toolkit/components/certviewer/jar.mn
+index 84dc2526069c418e9ee3ae559768a3443233751e..ddc9f9e3fa869eec64c8c6243ada3eb14b114e5e 100644
+--- a/toolkit/components/certviewer/jar.mn
++++ b/toolkit/components/certviewer/jar.mn
+@@ -3,6 +3,12 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ toolkit.jar:
++#ifdef MOZ_DESKTOP_EMBEDDER
++  content/global/certviewer/certDecoder.mjs  (content/certDecoder.mjs)
++  content/global/certviewer/components/utils.mjs  (content/components/utils.mjs)
++  content/global/certviewer/components/logNameTable.mjs  (content/components/logNameTable.mjs)
++  content/global/certviewer/vendor/pkijs.js  (content/vendor/pkijs.js)
++#else
+   content/global/certviewer/certviewer.html  (content/certviewer.html)
+   content/global/certviewer/certviewer.css   (content/certviewer.css)
+   content/global/certviewer/certviewer.mjs   (content/certviewer.mjs)
+@@ -10,3 +16,4 @@ toolkit.jar:
+   content/global/certviewer/components/      (content/components/*.css)
+   content/global/certviewer/certDecoder.mjs  (content/certDecoder.mjs)
+   content/global/certviewer/vendor/pkijs.js  (content/vendor/pkijs.js)
++#endif
+diff --git a/toolkit/components/certviewer/moz.build b/toolkit/components/certviewer/moz.build
+index 4ee2d58a48dda4ba4486a6f24709f56cb943d3d1..c7157f3ee04fa451613684416eb1e4b578f1374f 100644
+--- a/toolkit/components/certviewer/moz.build
++++ b/toolkit/components/certviewer/moz.build
+@@ -4,14 +4,15 @@
+ 
+ JAR_MANIFESTS += ["jar.mn"]
+ 
+-BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
++if not CONFIG["MOZ_DESKTOP_EMBEDDER"]:
++    BROWSER_CHROME_MANIFESTS += ["tests/browser/browser.toml"]
+ 
+-MOCHITEST_CHROME_MANIFESTS += ["tests/chrome/chrome.toml"]
++    MOCHITEST_CHROME_MANIFESTS += ["tests/chrome/chrome.toml"]
+ 
+-EXTRA_JS_MODULES += [
+-    "AboutCertViewerChild.sys.mjs",
+-    "AboutCertViewerParent.sys.mjs",
+-]
++    EXTRA_JS_MODULES += [
++        "AboutCertViewerChild.sys.mjs",
++        "AboutCertViewerParent.sys.mjs",
++    ]
+ 
+ with Files("**"):
+     BUG_COMPONENT = ("Firefox", "Security")

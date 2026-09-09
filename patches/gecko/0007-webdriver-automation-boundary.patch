@@ -1,0 +1,922 @@
+diff --git a/dom/webauthn/WebAuthnService.cpp b/dom/webauthn/WebAuthnService.cpp
+index fc4176892df9ab42c51e58fd4591bce2e21ba9d6..bf71c5797ec02edbca7bbb3972449617f347c1ba 100644
+--- a/dom/webauthn/WebAuthnService.cpp
++++ b/dom/webauthn/WebAuthnService.cpp
+@@ -474,16 +474,24 @@ WebAuthnService::AddVirtualAuthenticator(
+     bool aHasResidentKey, bool aHasUserVerification, bool aIsUserConsenting,
+     bool aIsUserVerified, nsACString& aRetval) {
+   MOZ_ASSERT(NS_IsMainThread());
+-  return AuthrsService()->AddVirtualAuthenticator(
++  nsresult rv = AuthrsService()->AddVirtualAuthenticator(
+       aProtocol, aTransport, aHasResidentKey, aHasUserVerification,
+       aIsUserConsenting, aIsUserVerified, aRetval);
++  if (NS_SUCCEEDED(rv) && !aRetval.IsEmpty()) {
++    mVirtualAuthenticatorIds.Insert(aRetval);
++  }
++  return rv;
+ }
+ 
+ NS_IMETHODIMP
+ WebAuthnService::RemoveVirtualAuthenticator(
+     const nsACString& aAuthenticatorId) {
+   MOZ_ASSERT(NS_IsMainThread());
+-  return AuthrsService()->RemoveVirtualAuthenticator(aAuthenticatorId);
++  nsresult rv = AuthrsService()->RemoveVirtualAuthenticator(aAuthenticatorId);
++  if (NS_SUCCEEDED(rv)) {
++    mVirtualAuthenticatorIds.Remove(aAuthenticatorId);
++  }
++  return rv;
+ }
+ 
+ NS_IMETHODIMP
+diff --git a/dom/webauthn/WebAuthnService.h b/dom/webauthn/WebAuthnService.h
+index 7f79a43da411f476c6f6a2c38393ef57b6783287..4d794796c7dc50e344e49d0d0a41913875d008e9 100644
+--- a/dom/webauthn/WebAuthnService.h
++++ b/dom/webauthn/WebAuthnService.h
+@@ -10,6 +10,7 @@
+ #include "mozilla/StaticPrefs_security.h"
+ #include "mozilla/dom/WebAuthnPromiseHolder.h"
+ #include "nsIWebAuthnService.h"
++#include "nsTHashSet.h"
+ 
+ #ifdef MOZ_WIDGET_ANDROID
+ #  include "AndroidWebAuthnService.h"
+@@ -89,7 +90,8 @@ class WebAuthnService final : public nsIWebAuthnService {
+                                            nsIWebAuthnSignArgs* aArgs);
+ 
+   nsIWebAuthnService* DefaultService() {
+-    if (StaticPrefs::security_webauth_webauthn_enable_softtoken()) {
++    if (!mVirtualAuthenticatorIds.IsEmpty() ||
++        StaticPrefs::security_webauth_webauthn_enable_softtoken()) {
+       return mAuthrsService;
+     }
+     return mPlatformService;
+@@ -111,6 +113,7 @@ class WebAuthnService final : public nsIWebAuthnService {
+ 
+   nsCOMPtr<nsIWebAuthnService> mAuthrsService;
+   nsCOMPtr<nsIWebAuthnService> mPlatformService;
++  nsTHashSet<nsCStringHashKey> mVirtualAuthenticatorIds;
+ };
+ 
+ }  // namespace mozilla::dom
+diff --git a/dom/webauthn/authrs_bridge/src/lib.rs b/dom/webauthn/authrs_bridge/src/lib.rs
+index c06b1242e8ce83470186a15d03b3b2e51a1b0ae0..6f23b0134d864ea8a6b59357cb62bcabe7c81bb0 100644
+--- a/dom/webauthn/authrs_bridge/src/lib.rs
++++ b/dom/webauthn/authrs_bridge/src/lib.rs
+@@ -748,12 +748,17 @@ impl AuthrsService {
+ 
+     xpcom_method!(get_is_uvpaa => GetIsUVPAA() -> bool);
+     fn get_is_uvpaa(&self) -> Result<bool, nsresult> {
+-        if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
+-            Ok(false)
+-        } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
++        // WebDriver virtual authenticators are a privileged automation
++        // surface. Prefer them while at least one is registered without
++        // changing the product's locked production USB-token policy.
++        if self.test_token_manager.has_virtual_authenticators()
++            || static_prefs::pref!("security.webauth.webauthn_enable_softtoken")
++        {
+             Ok(self
+                 .test_token_manager
+                 .has_user_verifying_platform_authenticator())
++        } else if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
++            Ok(false)
+         } else {
+             Err(NS_ERROR_NOT_AVAILABLE)
+         }
+@@ -1010,7 +1015,10 @@ impl AuthrsService {
+         // in parallel to any number of transports. We only support the USB transport in production
+         // configurations, so we do not need the full generality of `AuthenticatorService` here.
+         // We disable the USB transport in tests that use virtual devices.
+-        if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
++        if self.test_token_manager.has_virtual_authenticators() {
++            self.test_token_manager
++                .register(timeout_ms.into(), info, status_tx, state_callback);
++        } else if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
+             // TODO(Bug 1855290) Remove this presence prompt
+             send_prompt(
+                 BrowserPromptType::Presence,
+@@ -1257,17 +1265,19 @@ impl AuthrsService {
+             }),
+         );
+ 
+-        // TODO(Bug 1855290) Remove this presence prompt
+-        send_prompt(
+-            BrowserPromptType::Presence,
+-            tid,
+-            Some(&info.origin),
+-            Some(browsing_context_id),
+-        )
+-        .inspect_err(|_| self.discard_transaction())?;
+-
+         // As in `register`, we are intentionally avoiding `AuthenticatorService` here.
+-        if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
++        if self.test_token_manager.has_virtual_authenticators() {
++            self.test_token_manager
++                .sign(timeout_ms as u64, info, status_tx, state_callback);
++        } else if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
++            // TODO(Bug 1855290) Remove this presence prompt
++            send_prompt(
++                BrowserPromptType::Presence,
++                tid,
++                Some(&info.origin),
++                Some(browsing_context_id),
++            )
++            .inspect_err(|_| self.discard_transaction())?;
+             self.usb_token_manager.lock().unwrap().sign(
+                 timeout_ms as u64,
+                 info,
+@@ -1311,12 +1321,9 @@ impl AuthrsService {
+         allow_list: &ThinVec<ThinVec<u8>>,
+         callback: &nsIWebAuthnAutoFillEntriesCallback,
+     ) -> Result<(), nsresult> {
+-        if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
+-            // We don't currently support silent discovery for credentials on USB tokens.
+-            let empty: ThinVec<Option<RefPtr<nsIWebAuthnAutoFillEntry>>> = thin_vec![];
+-            unsafe { callback.Resolve(&empty) };
+-            return Ok(());
+-        } else if static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
++        if self.test_token_manager.has_virtual_authenticators()
++            || static_prefs::pref!("security.webauth.webauthn_enable_softtoken")
++        {
+             let rp_id_string = rp_id.to_string();
+             let allow_list: Vec<PublicKeyCredentialDescriptor> = allow_list
+                 .iter()
+@@ -1333,6 +1340,11 @@ impl AuthrsService {
+                 Err(err) => unsafe { callback.Reject(err) },
+             };
+             return Ok(());
++        } else if static_prefs::pref!("security.webauth.webauthn_enable_usbtoken") {
++            // We don't currently support silent discovery for credentials on USB tokens.
++            let empty: ThinVec<Option<RefPtr<nsIWebAuthnAutoFillEntry>>> = thin_vec![];
++            unsafe { callback.Resolve(&empty) };
++            return Ok(());
+         } else {
+             unsafe { callback.Reject(NS_ERROR_FAILURE) };
+             return Ok(());
+diff --git a/dom/webauthn/authrs_bridge/src/test_token.rs b/dom/webauthn/authrs_bridge/src/test_token.rs
+index ec9dff56266413bcdd8064c9910129fdf6eda219..98347690591c0a061554d2750ed30758b305856b 100644
+--- a/dom/webauthn/authrs_bridge/src/test_token.rs
++++ b/dom/webauthn/authrs_bridge/src/test_token.rs
+@@ -794,6 +794,13 @@ impl TestTokenManager {
+         Default::default()
+     }
+ 
++    pub fn has_virtual_authenticators(&self) -> bool {
++        self.state
++            .lock()
++            .map(|state| !state.is_empty())
++            .unwrap_or(false)
++    }
++
+     pub fn add_virtual_authenticator(
+         &self,
+         protocol: AuthenticatorVersion,
+@@ -934,7 +941,9 @@ impl TestTokenManager {
+         status: Sender<StatusUpdate>,
+         callback: StateCallback<Result<RegisterResult, AuthenticatorError>>,
+     ) {
+-        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
++        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken")
++            && !self.has_virtual_authenticators()
++        {
+             return;
+         }
+ 
+@@ -973,7 +982,9 @@ impl TestTokenManager {
+         status: Sender<StatusUpdate>,
+         callback: StateCallback<Result<SignResult, AuthenticatorError>>,
+     ) {
+-        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
++        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken")
++            && !self.has_virtual_authenticators()
++        {
+             return;
+         }
+ 
+@@ -1005,7 +1016,9 @@ impl TestTokenManager {
+     }
+ 
+     pub fn has_user_verifying_platform_authenticator(&self) -> bool {
+-        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken") {
++        if !static_prefs::pref!("security.webauth.webauthn_enable_softtoken")
++            && !self.has_virtual_authenticators()
++        {
+             return false;
+         }
+ 
+diff --git a/remote/components/RemoteAgent.sys.mjs b/remote/components/RemoteAgent.sys.mjs
+index 2d006b20794b5448884e62a4e317f397b47d53a1..a9e5d09af81387c2fb1c26592245c67bc83b0073 100644
+--- a/remote/components/RemoteAgent.sys.mjs
++++ b/remote/components/RemoteAgent.sys.mjs
+@@ -2,6 +2,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+@@ -43,7 +45,13 @@ class RemoteAgentParentProcess {
+   constructor() {
+     this.#allowHosts = null;
+     this.#allowOrigins = null;
+-    this.#allowSystemAccess = Services.env.exists(ENV_ALLOW_SYSTEM_ACCESS);
++    // Desktop Embedder production builds never expose parent-process
++    // automation. Gecko's own WPT harness needs it to install and restore
++    // per-test preferences, so retain the explicit upstream opt-in only in
++    // --enable-tests builds.
++    this.#allowSystemAccess =
++      (!AppConstants.MOZ_DESKTOP_EMBEDDER || AppConstants.ENABLE_TESTS) &&
++      Services.env.exists(ENV_ALLOW_SYSTEM_ACCESS);
+     this.#browserStartupFinished = lazy.Deferred();
+     this.#enabled = false;
+ 
+@@ -94,6 +102,13 @@ class RemoteAgentParentProcess {
+   }
+ 
+   set allowSystemAccess(value) {
++    // Desktop Embedder exposes content automation only. Privileged parent-
++    // process script execution would become a generic side door around the
++    // product's deliberately absent extension-install and management APIs.
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER && !AppConstants.ENABLE_TESTS) {
++      return;
++    }
++
+     // Return early if system access is already marked being allowed.
+     // There is also no possibility to disallow once it got allowed except
+     // quitting Firefox and starting it again.
+diff --git a/remote/jar.mn b/remote/jar.mn
+index a30fd74cbedfa63db5151f6bfdcaac265521064e..f0042db4d0047fb56c84ad37ccb3c37919520849 100644
+--- a/remote/jar.mn
++++ b/remote/jar.mn
+@@ -13,7 +13,9 @@ remote.jar:
+   content/server/WebSocketTransport.sys.mjs (server/WebSocketTransport.sys.mjs)
+ 
+   # shared modules (all protocols)
++#ifndef MOZ_DESKTOP_EMBEDDER
+   content/shared/Addon.sys.mjs (shared/Addon.sys.mjs)
++#endif
+   content/shared/AppInfo.sys.mjs (shared/AppInfo.sys.mjs)
+   content/shared/AsyncQueue.sys.mjs (shared/AsyncQueue.sys.mjs)
+   content/shared/BiMap.sys.mjs (shared/BiMap.sys.mjs)
+diff --git a/remote/marionette/browser.sys.mjs b/remote/marionette/browser.sys.mjs
+index e7c065f02c22dafb8bf10a57566b39c953fb6774..e95bd9a44f20301a4c5fc0a371b0b94afc22414d 100644
+--- a/remote/marionette/browser.sys.mjs
++++ b/remote/marionette/browser.sys.mjs
+@@ -209,6 +209,8 @@ browser.Context = class {
+     } else if (lazy.AppInfo.isFirefox) {
+       tabClosed = new lazy.EventPromise(this.tab, "TabClose");
+       await this.tabBrowser.removeTab(this.tab);
++    } else if (lazy.TabManager.supportsTabs()) {
++      await lazy.TabManager.removeTab(this.tab);
+     } else {
+       throw new lazy.error.UnsupportedOperationError(
+         `closeTab() not supported for ${lazy.AppInfo.name}`
+@@ -240,6 +242,8 @@ browser.Context = class {
+       if (!focus) {
+         await lazy.TabManager.selectTab(this.tab);
+       }
++    } else if (lazy.TabManager.supportsTabs()) {
++      tab = await lazy.TabManager.addTab({ focus, window: this.window });
+     } else {
+       throw new lazy.error.UnsupportedOperationError(
+         `openTab() not supported for ${lazy.AppInfo.name}`
+diff --git a/remote/marionette/driver.sys.mjs b/remote/marionette/driver.sys.mjs
+index cdf61e7a201fb5766d2a2175cc1a32fa31ed4525..d556116e71481899f744deeffaaf0c8c6ed3293c 100644
+--- a/remote/marionette/driver.sys.mjs
++++ b/remote/marionette/driver.sys.mjs
+@@ -2,11 +2,15 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+   actions: "chrome://remote/content/shared/webdriver/Actions.sys.mjs",
+-  Addon: "chrome://remote/content/shared/Addon.sys.mjs",
++  ...(AppConstants.MOZ_DESKTOP_EMBEDDER
++    ? {}
++    : { Addon: "chrome://remote/content/shared/Addon.sys.mjs" }),
+   AnimationFramePromise: "chrome://remote/content/shared/Sync.sys.mjs",
+   AppInfo: "chrome://remote/content/shared/AppInfo.sys.mjs",
+   assert: "chrome://remote/content/shared/webdriver/Assert.sys.mjs",
+@@ -802,7 +806,9 @@ export class GeckoDriver {
+       this.#promptListener = null;
+     }
+ 
+-    lazy.Addon.cleanupTemporaryAddonFiles();
++    if (!AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      lazy.Addon.cleanupTemporaryAddonFiles();
++    }
+ 
+     try {
+       Services.obs.removeObserver(this.#observer, TOPIC_BROWSER_READY);
+@@ -2457,7 +2463,7 @@ export class GeckoDriver {
+         await lazy.Marionette.browserStartupFinished;
+ 
+         // This call includes a fallback to "mail:3pane" as well.
+-        const appWin = Services.wm.getMostRecentBrowserWindow();
++        const appWin = lazy.TabManager.getMostRecentWindow();
+         await lazy.windowManager.waitForChromeWindowLoaded(appWin);
+ 
+         if (lazy.MarionettePrefs.clickToStart) {
+@@ -4385,9 +4391,13 @@ export class GeckoDriver {
+   }
+ 
+   static #commandHandlers = {
+-    // Custom commands for addon support
+-    "Addon:Install": GeckoDriver.prototype.installAddon,
+-    "Addon:Uninstall": GeckoDriver.prototype.uninstallAddon,
++    ...(AppConstants.MOZ_DESKTOP_EMBEDDER
++      ? {}
++      : {
++          // Custom commands for addon support
++          "Addon:Install": GeckoDriver.prototype.installAddon,
++          "Addon:Uninstall": GeckoDriver.prototype.uninstallAddon,
++        }),
+ 
+     // Custom commands for localization
+     "L10n:LocalizeProperty": GeckoDriver.prototype.localizeProperty,
+@@ -4405,6 +4415,10 @@ export class GeckoDriver {
+     "Marionette:Quit": GeckoDriver.prototype.quit,
+     "Marionette:RegisterChromeHandler":
+       GeckoDriver.prototype.registerChromeHandler,
++    // Desktop Embedder keeps this command for content-only harnesses. Its
++    // context setter still calls assert.hasSystemAccess() for "chrome";
++    // production builds deny that access, while explicit --enable-tests builds
++    // may opt in for Gecko's own harnesses.
+     "Marionette:SetContext": GeckoDriver.prototype.setContext,
+     "Marionette:SetScreenOrientation":
+       GeckoDriver.prototype.setScreenOrientation,
+diff --git a/remote/shared/Realm.sys.mjs b/remote/shared/Realm.sys.mjs
+index eac924fc02d4e4a17423b8749bf64036e7372cac..e995354a4d474ef88a68ead2a07e96d4b267d71e 100644
+--- a/remote/shared/Realm.sys.mjs
++++ b/remote/shared/Realm.sys.mjs
+@@ -145,6 +145,7 @@ export class Realm {
+  * Wrapper for Window realms including sandbox objects.
+  */
+ export class WindowRealm extends Realm {
++  #innerWindowId;
+   #realmAutomationFeaturesEnabled;
+   #globalObject;
+   #globalObjectReference;
+@@ -171,6 +172,7 @@ export class WindowRealm extends Realm {
+     this.#isSandbox = sandboxName !== null;
+     this.#sandboxName = sandboxName;
+     this.#window = window;
++    this.#innerWindowId = window.windowGlobalChild.innerWindowId;
+     this.#globalObject = this.#isSandbox ? this.#createSandbox() : this.#window;
+     this.#globalObjectReference = lazy.dbg.makeGlobalObjectReference(
+       this.#globalObject
+@@ -181,8 +183,13 @@ export class WindowRealm extends Realm {
+ 
+   destroy() {
+     if (this.#realmAutomationFeaturesEnabled) {
+-      lazy.dbg.disableAsyncStack(this.#globalObject);
+-      lazy.dbg.disableUnlimitedStacksCapturing(this.#globalObject);
++      if (
++        WindowGlobalChild.getByInnerWindowId(this.#innerWindowId)
++          ?.isCurrentGlobal
++      ) {
++        lazy.dbg.disableAsyncStack(this.#globalObject);
++        lazy.dbg.disableUnlimitedStacksCapturing(this.#globalObject);
++      }
+       this.#realmAutomationFeaturesEnabled = false;
+     }
+ 
+diff --git a/remote/shared/TabManager.sys.mjs b/remote/shared/TabManager.sys.mjs
+index b3b7693c45d94146124476ad95ae44d65101e80a..5a4eb53958a93f03b4102559937b8120e1732d34 100644
+--- a/remote/shared/TabManager.sys.mjs
++++ b/remote/shared/TabManager.sys.mjs
+@@ -2,10 +2,14 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+   AppInfo: "chrome://remote/content/shared/AppInfo.sys.mjs",
++  DesktopExtensionTabs:
++    "resource://gre/modules/DesktopExtensionTabs.sys.mjs",
+   EventPromise: "chrome://remote/content/shared/Sync.sys.mjs",
+   MobileTabBrowser: "chrome://remote/content/shared/MobileTabBrowser.sys.mjs",
+   UserContextManager:
+@@ -13,6 +17,54 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   windowManager: "chrome://remote/content/shared/WindowManager.sys.mjs",
+ });
+ 
++class DesktopEmbedderTabBrowser {
++  constructor(window) {
++    this.window = window;
++  }
++
++  get tabs() {
++    return lazy.DesktopExtensionTabs.tabsForWindow(this.window);
++  }
++
++  get selectedTab() {
++    return lazy.DesktopExtensionTabs.activeTabForWindow(this.window);
++  }
++
++  set selectedTab(tab) {
++    lazy.DesktopExtensionTabs.updateTab(tab, { active: true });
++  }
++
++  get selectedBrowser() {
++    return this.selectedTab?.linkedBrowser ?? null;
++  }
++
++  addEventListener(...args) {
++    this.window.addEventListener(...args);
++  }
++
++  addTab(url, { triggeringPrincipal } = {}) {
++    return lazy.DesktopExtensionTabs.createTab(
++      this.window,
++      url,
++      false,
++      triggeringPrincipal ??
++        Services.scriptSecurityManager.getSystemPrincipal()
++    );
++  }
++
++  removeTab(tab) {
++    lazy.DesktopExtensionTabs.closeTab(tab);
++  }
++
++  getTabForBrowser(browser) {
++    return lazy.DesktopExtensionTabs.getForBrowser(browser);
++  }
++
++  removeEventListener(...args) {
++    this.window.removeEventListener(...args);
++  }
++}
++
+ class TabManagerClass {
+   /**
+    * Retrieve all the tabs in open browser windows.
+@@ -82,7 +134,9 @@ class TabManagerClass {
+       return null;
+     }
+ 
+-    if (lazy.AppInfo.isAndroid) {
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      return new DesktopEmbedderTabBrowser(win);
++    } else if (lazy.AppInfo.isAndroid) {
+       return new lazy.MobileTabBrowser(win);
+     } else if (lazy.AppInfo.isFirefox) {
+       return win.gBrowser;
+@@ -115,9 +169,11 @@ class TabManagerClass {
+       focus = false,
+       referenceTab = null,
+       userContextId = null,
+-      window = Services.wm.getMostRecentBrowserWindow(),
++      window = null,
+     } = options;
+ 
++    window ??= this.getMostRecentWindow();
++
+     let tabIndex;
+     if (referenceTab != null) {
+       // If a reference tab was specified, the window should be the window
+@@ -157,6 +213,13 @@ class TabManagerClass {
+     }, 0);
+   }
+ 
++  getMostRecentWindow() {
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      return lazy.DesktopExtensionTabs.windows[0] ?? null;
++    }
++    return Services.wm.getMostRecentBrowserWindow();
++  }
++
+   /**
+    * Retrieve the tab owning a Browsing Context.
+    *
+@@ -241,6 +304,10 @@ class TabManagerClass {
+ 
+     const ownerWindow = this.getWindowForTab(tab);
+     const tabBrowser = this.getTabBrowser(ownerWindow);
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      tabBrowser.removeTab(tab);
++      return;
++    }
+     await tabBrowser.removeTab(tab, {
+       skipPermitUnload,
+     });
+@@ -267,6 +334,14 @@ class TabManagerClass {
+       return Promise.resolve();
+     }
+ 
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      tabBrowser.selectedTab = tab;
++      if (Services.focus.activeWindow != ownerWindow) {
++        ownerWindow.focus();
++      }
++      return Promise.resolve();
++    }
++
+     const selected = new lazy.EventPromise(ownerWindow, "TabSelect");
+     tabBrowser.selectedTab = tab;
+ 
+@@ -283,7 +358,11 @@ class TabManagerClass {
+   }
+ 
+   supportsTabs() {
+-    return lazy.AppInfo.isAndroid || lazy.AppInfo.isFirefox;
++    return (
++      AppConstants.MOZ_DESKTOP_EMBEDDER ||
++      lazy.AppInfo.isAndroid ||
++      lazy.AppInfo.isFirefox
++    );
+   }
+ }
+ 
+diff --git a/remote/shared/UserContextManager.sys.mjs b/remote/shared/UserContextManager.sys.mjs
+index c813cca8d1e8678a1ac3114292aec7ea778112f2..6249690478125e990c09fceca1903cff3eabe33a 100644
+--- a/remote/shared/UserContextManager.sys.mjs
++++ b/remote/shared/UserContextManager.sys.mjs
+@@ -2,15 +2,20 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
+-  ContextualIdentityService:
+-    "resource://gre/modules/ContextualIdentityService.sys.mjs",
++  ...(AppConstants.MOZ_DESKTOP_EMBEDDER
++    ? {}
++    : {
++        ContextualIdentityService:
++          "resource://gre/modules/ContextualIdentityService.sys.mjs",
++        ContextualIdentityListener:
++          "chrome://remote/content/shared/listeners/ContextualIdentityListener.sys.mjs",
++      }),
+   EventEmitter: "resource://gre/modules/EventEmitter.sys.mjs",
+-
+-  ContextualIdentityListener:
+-    "chrome://remote/content/shared/listeners/ContextualIdentityListener.sys.mjs",
+   generateUUID: "chrome://remote/content/shared/UUID.sys.mjs",
+   TabManager: "chrome://remote/content/shared/TabManager.sys.mjs",
+ });
+@@ -47,21 +52,26 @@ export class UserContextManagerClass {
+     // and should be exposed as "default" instead of a randomly generated id.
+     this.#userContextIds.set(DEFAULT_INTERNAL_ID, DEFAULT_CONTEXT_ID);
+ 
+-    // Register other (non-default) public contexts.
+-    lazy.ContextualIdentityService.getPublicIdentities().forEach(identity =>
+-      this.#registerIdentity(identity)
+-    );
++    this.#contextualIdentityListener = null;
++    if (!AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      // Register other (non-default) public contexts.
++      lazy.ContextualIdentityService.getPublicIdentities().forEach(identity =>
++        this.#registerIdentity(identity)
++      );
+ 
+-    this.#contextualIdentityListener = new lazy.ContextualIdentityListener();
+-    this.#contextualIdentityListener.on("created", this.#onIdentityCreated);
+-    this.#contextualIdentityListener.on("deleted", this.#onIdentityDeleted);
+-    this.#contextualIdentityListener.startListening();
++      this.#contextualIdentityListener = new lazy.ContextualIdentityListener();
++      this.#contextualIdentityListener.on("created", this.#onIdentityCreated);
++      this.#contextualIdentityListener.on("deleted", this.#onIdentityDeleted);
++      this.#contextualIdentityListener.startListening();
++    }
+   }
+ 
+   destroy() {
+-    this.#contextualIdentityListener.off("created", this.#onIdentityCreated);
+-    this.#contextualIdentityListener.off("deleted", this.#onIdentityDeleted);
+-    this.#contextualIdentityListener.destroy();
++    if (this.#contextualIdentityListener) {
++      this.#contextualIdentityListener.off("created", this.#onIdentityCreated);
++      this.#contextualIdentityListener.off("deleted", this.#onIdentityDeleted);
++      this.#contextualIdentityListener.destroy();
++    }
+ 
+     this.#userContextIds = null;
+   }
+@@ -86,6 +96,9 @@ export class UserContextManagerClass {
+    *     The user context id of the new user context.
+    */
+   createContext(prefix = "remote") {
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      throw new Error("Desktop Embedder exposes only the default user context");
++    }
+     // Prepare a unique name.
+     const name = `${prefix}-${lazy.generateUUID()}`;
+ 
+@@ -169,10 +182,11 @@ export class UserContextManagerClass {
+    */
+   getTabsForUserContext(internalId) {
+     return lazy.TabManager.allTabs.filter(tab => {
++      const browser = lazy.TabManager.getBrowserForTab(tab);
+       return (
+-        (tab.hasAttribute("usercontextid") &&
+-          parseInt(tab.getAttribute("usercontextid"), 10) == internalId) ||
+-        (!tab.hasAttribute("usercontextid") && internalId === 0)
++        (browser.hasAttribute("usercontextid") &&
++          parseInt(browser.getAttribute("usercontextid"), 10) == internalId) ||
++        (!browser.hasAttribute("usercontextid") && internalId === 0)
+       );
+     });
+   }
+@@ -216,6 +230,9 @@ export class UserContextManagerClass {
+     if (!this.hasUserContextId(userContextId)) {
+       return;
+     }
++    if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
++      return;
++    }
+ 
+     const internalId = this.getInternalIdById(userContextId);
+     if (closeContextTabs) {
+diff --git a/remote/shared/messagehandler/test/browser/browser_realms.js b/remote/shared/messagehandler/test/browser/browser_realms.js
+index 815bfbbe85afe2a7cfb9d5c6aa90367e488e2980..6c0e4e32517e35a7a3c6cf5eafb612e33db0f053 100644
+--- a/remote/shared/messagehandler/test/browser/browser_realms.js
++++ b/remote/shared/messagehandler/test/browser/browser_realms.js
+@@ -7,6 +7,17 @@ const { RootMessageHandler } = ChromeUtils.importESModule(
+   "chrome://remote/content/shared/messagehandler/RootMessageHandler.sys.mjs"
+ );
+ 
++async function executeInDefaultRealm(rootMessageHandler, browsingContext) {
++  return rootMessageHandler.handleCommand({
++    moduleName: "command",
++    commandName: "testExecuteInDefaultRealm",
++    destination: {
++      type: WindowGlobalMessageHandler.type,
++      id: browsingContext.id,
++    },
++  });
++}
++
+ add_task(async function test_tab_is_removed() {
+   const tab = await addTab("https://example.com/document-builder.sjs?html=tab");
+   const sessionId = "realms";
+@@ -33,6 +44,12 @@ add_task(async function test_tab_is_removed() {
+ 
+   is(rootMessageHandler.realms.size, 1, "Realm is added in the internal map");
+ 
++  is(
++    await executeInDefaultRealm(rootMessageHandler, browsingContext),
++    "normal",
++    "Executed in the realm before tab removal"
++  );
++
+   const onRealmDestroyed = rootMessageHandler.once("realm-destroyed");
+ 
+   gBrowser.removeTab(tab);
+@@ -75,6 +92,12 @@ add_task(async function test_same_origin_navigation() {
+ 
+   is(rootMessageHandler.realms.size, 1, "Realm is added in the internal map");
+ 
++  is(
++    await executeInDefaultRealm(rootMessageHandler, browsingContext),
++    "normal",
++    "Executed in the realm before same-origin navigation"
++  );
++
+   const onRealmDestroyed = rootMessageHandler.once("realm-destroyed");
+   const onNewRealmCreated = rootMessageHandler.once("realm-created");
+ 
+@@ -126,6 +149,12 @@ add_task(async function test_cross_origin_navigation() {
+ 
+   is(rootMessageHandler.realms.size, 1, "Realm is added in the internal map");
+ 
++  is(
++    await executeInDefaultRealm(rootMessageHandler, browsingContext),
++    "normal",
++    "Executed in the realm before cross-origin navigation"
++  );
++
+   const onRealmDestroyed = rootMessageHandler.once("realm-destroyed");
+   const onNewRealmCreated = rootMessageHandler.once("realm-created");
+ 
+diff --git a/remote/shared/messagehandler/test/browser/resources/modules/windowglobal/command.sys.mjs b/remote/shared/messagehandler/test/browser/resources/modules/windowglobal/command.sys.mjs
+index 99ee76a4b8c8a1feffd961b17d7a04e11d6c5848..367f06854936d99ee19b82d6750b51c256df158e 100644
+--- a/remote/shared/messagehandler/test/browser/resources/modules/windowglobal/command.sys.mjs
++++ b/remote/shared/messagehandler/test/browser/resources/modules/windowglobal/command.sys.mjs
+@@ -52,6 +52,11 @@ class CommandModule extends Module {
+     return "windowglobal-value";
+   }
+ 
++  testExecuteInDefaultRealm() {
++    const realm = this.messageHandler.realms.get("");
++    return realm.executeInRealm("1 + 1").evaluationStatus;
++  }
++
+   testSetValue(params) {
+     const { value } = params;
+ 
+diff --git a/remote/webdriver-bidi/jar.mn b/remote/webdriver-bidi/jar.mn
+index b6cf6c4564e71ec92120e970489b53aef4e8f68a..529cab48ffbb2e753e460e0ef2520da2d4e35e9b 100644
+--- a/remote/webdriver-bidi/jar.mn
++++ b/remote/webdriver-bidi/jar.mn
+@@ -33,7 +33,9 @@ remote.jar:
+   content/webdriver-bidi/modules/root/script.sys.mjs (modules/root/script.sys.mjs)
+   content/webdriver-bidi/modules/root/session.sys.mjs (modules/root/session.sys.mjs)
+   content/webdriver-bidi/modules/root/storage.sys.mjs (modules/root/storage.sys.mjs)
++#ifndef MOZ_DESKTOP_EMBEDDER
+   content/webdriver-bidi/modules/root/webExtension.sys.mjs (modules/root/webExtension.sys.mjs)
++#endif
+ 
+   # WebDriver BiDi windowglobal modules
+   content/webdriver-bidi/modules/windowglobal/_configuration.sys.mjs (modules/windowglobal/_configuration.sys.mjs)
+diff --git a/remote/webdriver-bidi/modules/ModuleRegistry.sys.mjs b/remote/webdriver-bidi/modules/ModuleRegistry.sys.mjs
+index c3af262024e79413338a9026ef158e541d794c95..88b88b82adac892f2a37eb2730658bb0ad03478d 100644
+--- a/remote/webdriver-bidi/modules/ModuleRegistry.sys.mjs
++++ b/remote/webdriver-bidi/modules/ModuleRegistry.sys.mjs
+@@ -2,6 +2,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
++
+ export const modules = {
+   root: {
+     moz: {},
+@@ -35,8 +37,12 @@ ChromeUtils.defineESModuleGetters(modules.root, {
+     "chrome://remote/content/webdriver-bidi/modules/root/session.sys.mjs",
+   storage:
+     "chrome://remote/content/webdriver-bidi/modules/root/storage.sys.mjs",
+-  webExtension:
+-    "chrome://remote/content/webdriver-bidi/modules/root/webExtension.sys.mjs",
++  ...(AppConstants.MOZ_DESKTOP_EMBEDDER
++    ? {}
++    : {
++        webExtension:
++          "chrome://remote/content/webdriver-bidi/modules/root/webExtension.sys.mjs",
++      }),
+ });
+ 
+ // eslint-disable-next-line mozilla/lazy-getter-object-name
+diff --git a/remote/webdriver-bidi/modules/root/browsingContext.sys.mjs b/remote/webdriver-bidi/modules/root/browsingContext.sys.mjs
+index de27d46ebfe98c4c590133dfdfb9388c41f7ae0f..057789c00803875613f186363fd271b2bc629eca 100644
+--- a/remote/webdriver-bidi/modules/root/browsingContext.sys.mjs
++++ b/remote/webdriver-bidi/modules/root/browsingContext.sys.mjs
+@@ -686,7 +686,7 @@ class BrowsingContextModule extends RootBiDiModule {
+     // Since each tab in GeckoView has its own Gecko instance running,
+     // which means also its own window object, for Android we will need to focus
+     // a previously focused window in case of opening the tab in the background.
+-    const previousWindow = Services.wm.getMostRecentBrowserWindow();
++    const previousWindow = lazy.TabManager.getMostRecentWindow();
+     const previousTab =
+       lazy.TabManager.getTabBrowser(previousWindow).selectedTab;
+ 
+@@ -720,7 +720,7 @@ class BrowsingContextModule extends RootBiDiModule {
+       }
+       case "tab": {
+         // The window to open the new tab in.
+-        let window = Services.wm.getMostRecentBrowserWindow();
++        let window = lazy.TabManager.getMostRecentWindow();
+ 
+         let referenceTab;
+         if (referenceContext !== null) {
+diff --git a/remote/webdriver-bidi/modules/root/permissions.sys.mjs b/remote/webdriver-bidi/modules/root/permissions.sys.mjs
+index 098f8e09f0b47b34ac5b8966dff55d0b529058e3..beb01ffda0d17207e8a6d8ec8862998f44577d3d 100644
+--- a/remote/webdriver-bidi/modules/root/permissions.sys.mjs
++++ b/remote/webdriver-bidi/modules/root/permissions.sys.mjs
+@@ -11,6 +11,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   error: "chrome://remote/content/shared/webdriver/Errors.sys.mjs",
+   permissions: "chrome://remote/content/shared/Permissions.sys.mjs",
+   pprint: "chrome://remote/content/shared/Format.sys.mjs",
++  TabManager: "chrome://remote/content/shared/TabManager.sys.mjs",
+   UserContextManager:
+     "chrome://remote/content/shared/UserContextManager.sys.mjs",
+ });
+@@ -97,7 +98,7 @@ class PermissionsModule extends RootBiDiModule {
+       userContext = lazy.UserContextManager.getInternalIdById(userContextId);
+     }
+ 
+-    const activeWindow = Services.wm.getMostRecentBrowserWindow();
++    const activeWindow = lazy.TabManager.getMostRecentWindow();
+     let typedDescriptor;
+     try {
+       typedDescriptor = activeWindow.navigator.permissions.parseSetParameters({
+diff --git a/testing/web-platform/mach_commands.py b/testing/web-platform/mach_commands.py
+index 1caba01f3e91e781af71fb50a9e68ceb3dcb2e13..b4390ea8ecba5fe1fb55e99b0a11fd49efa4ad1b 100644
+--- a/testing/web-platform/mach_commands.py
++++ b/testing/web-platform/mach_commands.py
+@@ -20,6 +20,13 @@ here = os.path.abspath(os.path.dirname(__file__))
+ INTEROP_REQUIREMENTS_PATH = os.path.join(here, "interop_requirements.txt")
+ 
+ 
++def is_supported_gecko_product(command_context):
++    return (
++        conditions.is_firefox_or_android(command_context)
++        or command_context.substs.get("MOZ_DESKTOP_EMBEDDER")
++    )
++
++
+ class WebPlatformTestsRunnerSetup(MozbuildObject):
+     default_log_type = "mach"
+ 
+@@ -476,7 +483,7 @@ def create_parser_testpaths():
+ @Command(
+     "web-platform-tests",
+     category="testing",
+-    conditions=[conditions.is_firefox_or_android],
++    conditions=[is_supported_gecko_product],
+     description="Run web-platform-tests.",
+     parser=create_parser_wpt,
+     virtualenv_name="wpt",
+@@ -529,7 +536,7 @@ def run_web_platform_tests(command_context, **params):
+ @Command(
+     "wpt",
+     category="testing",
+-    conditions=[conditions.is_firefox_or_android],
++    conditions=[is_supported_gecko_product],
+     description="Run web-platform-tests.",
+     parser=create_parser_wpt,
+     virtualenv_name="wpt",
+diff --git a/toolkit/components/extensions/parent/ext-storage.js b/toolkit/components/extensions/parent/ext-storage.js
+index 54e29430c8ffce6ff39f3a5b446bf63050aaafdb..a72b7600c9190cea0ec2bf2d975d4fd608351c7d 100644
+--- a/toolkit/components/extensions/parent/ext-storage.js
++++ b/toolkit/components/extensions/parent/ext-storage.js
+@@ -79,8 +79,41 @@ async function recordSyncQuotaTelemetry(extension, context) {
+ 
+ // WeakMap[extension -> Promise<SerializableMap?>]
+ const managedStorage = new WeakMap();
++const PREF_APPLICATION_BUILTIN_TEST_MANAGED_STORAGE =
++  "extensions.applicationBuiltins.testManagedStorage";
++
++const lookupApplicationBuiltinTestManagedStorage = extensionId => {
++  if (!AppConstants.MOZ_DESKTOP_EMBEDDER || !AppConstants.ENABLE_TESTS) {
++    return null;
++  }
++
++  const serialized = Services.prefs.getStringPref(
++    PREF_APPLICATION_BUILTIN_TEST_MANAGED_STORAGE,
++    ""
++  );
++  if (!serialized) {
++    return null;
++  }
++
++  try {
++    const policies = JSON.parse(serialized);
++    const extensionPolicy = policies?.[extensionId];
++    if (extensionPolicy && typeof extensionPolicy === "object") {
++      return ExtensionStorage._serializableMap(extensionPolicy);
++    }
++  } catch (error) {
++    Cu.reportError(
++      `Invalid ${PREF_APPLICATION_BUILTIN_TEST_MANAGED_STORAGE}: ${error}`
++    );
++  }
++  return null;
++};
+ 
+ const lookupManagedStorage = async (extensionId, context) => {
++  const testPolicy = lookupApplicationBuiltinTestManagedStorage(extensionId);
++  if (testPolicy) {
++    return testPolicy;
++  }
+   if (Services.policies) {
+     let extensionPolicy = Services.policies.getExtensionPolicy(extensionId);
+     if (extensionPolicy) {
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+index e2a4606e9a0466d0d97bd8d474acc937b78aa4b6..1f73af0bcfead523ec3263d9e94d9e7cb009ff34 100644
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -147,6 +147,13 @@ export var AppConstants = Object.freeze({
+   false,
+ #endif
+ 
++  ENABLE_TESTS:
++#ifdef ENABLE_TESTS
++  true,
++#else
++  false,
++#endif
++
+   MOZ_WEBEXTENSIONS_RUNTIME:
+ #ifdef MOZ_WEBEXTENSIONS_RUNTIME
+   true,
+diff --git a/toolkit/toolkit.mozbuild b/toolkit/toolkit.mozbuild
+index 3f3b968de17411e52dadd47c0fe7fa5804ab9bcd..4a4788c50a262379e5eac50681bbf8803bc088b1 100644
+--- a/toolkit/toolkit.mozbuild
++++ b/toolkit/toolkit.mozbuild
+@@ -137,6 +137,11 @@ if CONFIG["MOZ_PREF_EXTENSIONS"]:
+ 
+ if CONFIG["MOZ_DEVTOOLS"] != "none":
+     DIRS += ["/devtools"]
++elif CONFIG["MOZ_DESKTOP_EMBEDDER"] and CONFIG["ENABLE_WEBDRIVER"]:
++    # WebDriver's standards-facing script realms use the SpiderMonkey
++    # Debugger API bridge, but Desktop Embedder does not ship the DevTools
++    # client, server, shared framework or startup integration.
++    DIRS += ["/devtools/platform"]
+ 
+ DIRS += [
+     "/toolkit/library",

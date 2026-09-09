@@ -1,0 +1,147 @@
+diff --git a/docshell/base/nsAboutRedirector.cpp b/docshell/base/nsAboutRedirector.cpp
+index 891578cb4625b689372a184a3ea0ecc2619bae6e..2eec640956e0ad4f404a446135d115f55b3c6a85 100644
+--- a/docshell/base/nsAboutRedirector.cpp
++++ b/docshell/base/nsAboutRedirector.cpp
+@@ -158,6 +158,12 @@ static const RedirEntry kRedirMap[] = {
+ #if !defined(ANDROID) && !defined(XP_WIN)
+     {"webauthn", "chrome://global/content/aboutWebauthn.html",
+      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI},
++#endif
++#ifdef MOZ_DESKTOP_EMBEDDER
++    {"certerror", "chrome://global/content/aboutNetError.html",
++     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
++         nsIAboutModule::URI_CAN_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
++         nsIAboutModule::HIDE_FROM_ABOUTABOUT},
+ #endif
+     {"neterror", "chrome://global/content/aboutNetError.html",
+      nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
+diff --git a/docshell/build/components.conf b/docshell/build/components.conf
+index 15b704d22467e8b6db6236c324cbf5bbd7e71514..63c90be4393cc38c4b7ad63eb40dbe32240da2dc 100644
+--- a/docshell/build/components.conf
++++ b/docshell/build/components.conf
+@@ -32,6 +32,9 @@ about_pages = [
+     'webrtc',
+ ]
+ 
++if defined('MOZ_DESKTOP_EMBEDDER'):
++    about_pages.append('certerror')
++
+ if defined('MOZ_SAFE_BROWSING'):
+     about_pages.append('url-classifier')
+ 
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+index aa2e90aad0bb1166fd24c0f776b2292a15fbed87..1079588b8ac34419bc11329c4fdeaa56258f77af 100644
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -13534,11 +13534,42 @@ bool Document::CanRewriteURL(nsIURI* aTargetURL, bool aReportErrors) const {
+     return NS_SUCCEEDED(principal->CheckMayLoad(aTargetURL, false));
+   }
+ 
++#if defined(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME) && !defined(ANDROID)
++  // The desktop settings document owns these same-origin SPA routes. Do not
++  // grant path rewriting to other internal hosts or arbitrary internal paths.
++  bool navisSettingsRewrite = false;
++  if (scheme.EqualsLiteral(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME)) {
++    const auto isSettingsRoute = [](nsIURI* aURI) {
++      nsAutoCString host, userPass, path, query;
++      int32_t port = -1;
++      if (NS_FAILED(aURI->GetAsciiHost(host)) || host != "settings"_ns ||
++          NS_FAILED(aURI->GetUserPass(userPass)) || !userPass.IsEmpty() ||
++          NS_FAILED(aURI->GetPort(&port)) || port != -1 ||
++          NS_FAILED(aURI->GetFilePath(path)) ||
++          NS_FAILED(aURI->GetQuery(query)) || !query.IsEmpty()) {
++        return false;
++      }
++      if (path.Length() > 1 && path.Last() == '/') {
++        path.Truncate(path.Length() - 1);
++      }
++      return path == "/"_ns || path == "/search"_ns || path == "/privacy"_ns ||
++             path == "/appearance"_ns || path == "/downloads"_ns ||
++             path == "/help"_ns;
++    };
++    navisSettingsRewrite =
++        isSettingsRoute(mDocumentURI) && isSettingsRoute(aTargetURL);
++  }
++#endif
++
+   // If the URI isn't allowed to change path with pushState, we know it doesn't
+   // match (as we checked EqualsExceptRef above), so return immediately.
+   if (scheme != "http"_ns && scheme != "https"_ns &&
+       scheme != "moz-extension"_ns && scheme != "chrome"_ns &&
+-      scheme != "resource"_ns) {
++      scheme != "resource"_ns
++#if defined(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME) && !defined(ANDROID)
++      && !navisSettingsRewrite
++#endif
++  ) {
+     return false;
+   }
+ 
+diff --git a/netwerk/base/nsNetUtil.cpp b/netwerk/base/nsNetUtil.cpp
+index 5b27e9190c238591845288815e84a2b812e29107..fb04d49eb5db76ccb81187dd46896ad973d686d3 100644
+--- a/netwerk/base/nsNetUtil.cpp
++++ b/netwerk/base/nsNetUtil.cpp
+@@ -1919,6 +1919,13 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
+     return NewStandardURI(aSpec, aCharset, aBaseURI, 21, aURI);
+   }
+ 
++#if defined(MOZ_DESKTOP_EMBEDDER) && \
++    defined(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME)
++  if (scheme.EqualsLiteral(MOZ_DESKTOP_EMBEDDER_INTERNAL_SCHEME)) {
++    return NewStandardURI(aSpec, aCharset, aBaseURI, -1, aURI);
++  }
++#endif
++
+   if (scheme.EqualsLiteral("file")) {
+     return NS_MutateURI(new nsStandardURL::Mutator())
+         .Apply(&nsIFileURLMutator::MarkFileURL)
+diff --git a/netwerk/protocol/about/nsAboutProtocolHandler.cpp b/netwerk/protocol/about/nsAboutProtocolHandler.cpp
+index a5478ab5e2f3f632f0f5689aa16c35f983162621..8337daae876a63ffb695d355c520e5e821832dba 100644
+--- a/netwerk/protocol/about/nsAboutProtocolHandler.cpp
++++ b/netwerk/protocol/about/nsAboutProtocolHandler.cpp
+@@ -27,6 +27,19 @@ namespace net {
+ 
+ static NS_DEFINE_CID(kNestedAboutURICID, NS_NESTEDABOUTURI_CID);
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++static bool IsDesktopEmbedderEngineAboutURI(nsIURI* aURI) {
++  nsAutoCString name;
++  if (NS_FAILED(NS_GetAboutModuleName(aURI, name))) {
++    return false;
++  }
++  return name.EqualsLiteral("blank") || name.EqualsLiteral("srcdoc") ||
++         name.EqualsLiteral("neterror") || name.EqualsLiteral("certerror") ||
++         name.EqualsLiteral("httpsonlyerror") ||
++         name.EqualsLiteral("framecrashed");
++}
++#endif
++
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ NS_IMPL_ISUPPORTS(nsAboutProtocolHandler, nsIProtocolHandler,
+@@ -47,6 +60,12 @@ nsAboutProtocolHandler::GetFlagsForURI(nsIURI* aURI, uint32_t* aFlags) {
+   *aFlags = URI_NORELATIVE | URI_NOAUTH | URI_DANGEROUS_TO_LOAD |
+             URI_SCHEME_NOT_SELF_LINKABLE;
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++  if (!IsDesktopEmbedderEngineAboutURI(aURI)) {
++    return NS_OK;
++  }
++#endif
++
+   // Now try to see if this URI overrides the default:
+   nsCOMPtr<nsIAboutModule> aboutMod;
+   nsresult rv = NS_GetAboutModule(aURI, getter_AddRefs(aboutMod));
+@@ -119,6 +138,12 @@ nsAboutProtocolHandler::NewChannel(nsIURI* uri, nsILoadInfo* aLoadInfo,
+                                    nsIChannel** result) {
+   NS_ENSURE_ARG_POINTER(uri);
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++  if (!IsDesktopEmbedderEngineAboutURI(uri)) {
++    return NS_ERROR_MALFORMED_URI;
++  }
++#endif
++
+   // about:what you ask?
+   nsCOMPtr<nsIAboutModule> aboutMod;
+   nsresult rv = NS_GetAboutModule(uri, getter_AddRefs(aboutMod));

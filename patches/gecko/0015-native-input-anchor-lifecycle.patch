@@ -1,0 +1,228 @@
+diff --git a/toolkit/actors/InputPickerChildCommon.sys.mjs b/toolkit/actors/InputPickerChildCommon.sys.mjs
+index 3537a9da11f8854d77e2669783e1e41e11f55c03..b4e7f1f97e1a7a7d44ba8c5f04614b8f4ae0644a 100644
+--- a/toolkit/actors/InputPickerChildCommon.sys.mjs
++++ b/toolkit/actors/InputPickerChildCommon.sys.mjs
+@@ -10,6 +10,8 @@ export class InputPickerChildCommon extends JSWindowActorChild {
+   /** @type {HTMLInputElement} */
+   #inputElement = null;
+   #inputType = "";
++  #openingRect = null;
++  #anchorMutationObserver = null;
+   #namespace;
+   /** @type {AbortController} */
+   #abortController;
+@@ -32,9 +34,12 @@ export class InputPickerChildCommon extends JSWindowActorChild {
+    */
+   close() {
+     this.#abortController.abort();
++    this.#anchorMutationObserver?.disconnect();
++    this.#anchorMutationObserver = null;
+     this.closeImpl(this.#inputElement);
+     this.#inputElement = null;
+     this.#inputType = "";
++    this.#openingRect = null;
+   }
+ 
+   /**
+@@ -50,7 +55,29 @@ export class InputPickerChildCommon extends JSWindowActorChild {
+    */
+   addListeners(aElement) {
+     this.#abortController = new AbortController();
+-    aElement.documentGlobal.addEventListener("pagehide", this, {
++    const win = aElement.documentGlobal;
++    this.#anchorMutationObserver = new win.MutationObserver(() => {
++      if (this.#inputElement && !this.#inputElement.isConnected) {
++        this.sendAsyncMessage(`InputPicker:Close`, {});
++        this.close();
++      }
++    });
++    this.#anchorMutationObserver.observe(aElement.ownerDocument, {
++      childList: true,
++      subtree: true,
++    });
++    win.addEventListener("pagehide", this, {
++      signal: this.#abortController.signal,
++    });
++    win.addEventListener("scroll", this, {
++      capture: true,
++      signal: this.#abortController.signal,
++    });
++    win.addEventListener("pointerdown", this, {
++      capture: true,
++      signal: this.#abortController.signal,
++    });
++    win.addEventListener("resize", this, {
+       signal: this.#abortController.signal,
+     });
+   }
+@@ -133,12 +160,14 @@ export class InputPickerChildCommon extends JSWindowActorChild {
+           return;
+         }
+ 
++        const rect = this.getBoundingContentRect(inputElement);
+         this.#inputElement = inputElement;
+         this.#inputType = inputElement.type;
++        this.#openingRect = { left: rect.left, top: rect.top };
+         this.addListeners(inputElement);
+ 
+         this.sendAsyncMessage(`InputPicker:Open`, {
+-          rect: this.getBoundingContentRect(inputElement),
++          rect,
+           dir: this.getComputedDirection(inputElement),
+           type: inputElement.type,
+           detail: openPickerDetail,
+@@ -157,6 +186,39 @@ export class InputPickerChildCommon extends JSWindowActorChild {
+         }
+         break;
+       }
++      case "scroll": {
++        if (this.#inputElement) {
++          const rect = this.getBoundingContentRect(this.#inputElement);
++          if (
++            this.#openingRect &&
++            rect.left === this.#openingRect.left &&
++            rect.top === this.#openingRect.top
++          ) {
++            break;
++          }
++          this.sendAsyncMessage(`InputPicker:Close`, {});
++          this.close();
++        }
++        break;
++      }
++      case "resize": {
++        if (this.#inputElement) {
++          this.sendAsyncMessage(`InputPicker:Close`, {});
++          this.close();
++        }
++        break;
++      }
++      case "pointerdown": {
++        if (
++          this.#inputElement &&
++          aEvent.target !== this.#inputElement &&
++          !this.#inputElement.contains(aEvent.target)
++        ) {
++          this.sendAsyncMessage(`InputPicker:Close`, {});
++          this.close();
++        }
++        break;
++      }
+       default:
+         break;
+     }
+diff --git a/toolkit/actors/SelectChild.sys.mjs b/toolkit/actors/SelectChild.sys.mjs
+index f83f89ad8f5c40b0cae68eb398e5591c03820b80..17049bbd820251b3cec7a06b85b2b8ddf113aee8 100644
+--- a/toolkit/actors/SelectChild.sys.mjs
++++ b/toolkit/actors/SelectChild.sys.mjs
+@@ -46,6 +46,7 @@ export var SelectContentHelper = function (aElement, aOptions, aActor) {
+   this.closedWithClickOn = false;
+   this.isOpenedViaTouch = aOptions.isOpenedViaTouch;
+   this._closeAfterBlur = true;
++  this._openingRect = null;
+   this._pseudoStylesSetup = false;
+   this.init();
+   this.showDropDown();
+@@ -62,6 +63,10 @@ SelectContentHelper.prototype = {
+   init() {
+     let win = this.element.documentGlobal;
+     win.addEventListener("pagehide", this, { mozSystemGroup: true });
++    win.addEventListener("scroll", this, {
++      capture: true,
++    });
++    win.addEventListener("resize", this);
+     this.element.addEventListener("blur", this, { mozSystemGroup: true });
+     this.element.addEventListener("transitionend", this, {
+       mozSystemGroup: true,
+@@ -77,6 +82,16 @@ SelectContentHelper.prototype = {
+       subtree: true,
+       attributes: true,
+     });
++    this.anchorMut = new win.MutationObserver(() => {
++      if (this.element && !this.element.isConnected) {
++        this.actor.sendAsyncMessage("Forms:HideDropDown", {});
++        this.uninit();
++      }
++    });
++    this.anchorMut.observe(this.element.ownerDocument, {
++      childList: true,
++      subtree: true,
++    });
+ 
+     XPCOMUtils.defineLazyPreferenceGetter(
+       this,
+@@ -90,6 +105,10 @@ SelectContentHelper.prototype = {
+     this.element.openInParentProcess = false;
+     let win = this.element.documentGlobal;
+     win.removeEventListener("pagehide", this, { mozSystemGroup: true });
++    win.removeEventListener("scroll", this, {
++      capture: true,
++    });
++    win.removeEventListener("resize", this);
+     this.element.removeEventListener("blur", this, { mozSystemGroup: true });
+     this.element.removeEventListener("transitionend", this, {
+       mozSystemGroup: true,
+@@ -97,8 +116,11 @@ SelectContentHelper.prototype = {
+     this.element = null;
+     this.actor = null;
+     this.mut.disconnect();
++    this.anchorMut.disconnect();
++    this.anchorMut = null;
+     this._updateTimer.disarm();
+     this._updateTimer = null;
++    this._openingRect = null;
+     gOpen = false;
+   },
+ 
+@@ -106,6 +128,7 @@ SelectContentHelper.prototype = {
+     this.element.openInParentProcess = true;
+     this._setupPseudoClassStyles();
+     let rect = this._getBoundingContentRect();
++    this._openingRect = { left: rect.left, top: rect.top };
+     let computedStyles = getComputedStyles(this.element);
+     let options = this._buildOptionList();
+     let defaultStyles = this.element.documentGlobal.getDefaultComputedStyle(
+@@ -329,6 +352,23 @@ SelectContentHelper.prototype = {
+           this.uninit();
+         }
+         break;
++      case "scroll": {
++        const rect = this._getBoundingContentRect();
++        if (
++          this._openingRect &&
++          rect.left === this._openingRect.left &&
++          rect.top === this._openingRect.top
++        ) {
++          break;
++        }
++        this.actor.sendAsyncMessage("Forms:HideDropDown", {});
++        this.uninit();
++        break;
++      }
++      case "resize":
++        this.actor.sendAsyncMessage("Forms:HideDropDown", {});
++        this.uninit();
++        break;
+       case "transitionend":
+         if (
+           this.element === event.target &&
+diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
+index 9d11df1895980cbc70c6eae6564537965777a848..932acbcb2be848a9384dbe54cfb719f588aedb88 100644
+--- a/widget/gtk/nsWindow.cpp
++++ b/widget/gtk/nsWindow.cpp
+@@ -3207,6 +3207,15 @@ void nsWindow::OnContainerFocusInEvent(GdkEventFocus* aEvent) {
+     // dispatching an activation notification if the widget is already
+     // active.
+     gFocusWindow = this;
++#ifdef MOZ_DESKTOP_EMBEDDER
++    // A Desktop Embedder chrome document may activate before its remote view
++    // has selected a DOM focus target.  Keep the IM context synchronized with
++    // the native fallback focus; otherwise later editable-content focus sees
++    // gFocusWindow == this and never supplies a dispatch target to the IME.
++    if (mIMContext) {
++      mIMContext->OnFocusWindow(this);
++    }
++#endif
+   }
+ 
+   LOG("Events sent from focus in event");

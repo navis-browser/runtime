@@ -1,0 +1,161 @@
+diff --git a/mobile/shared/components/geckoview/FilePickerDelegate.sys.mjs b/mobile/shared/components/geckoview/FilePickerDelegate.sys.mjs
+index f530b35826cc20531fdb1ac03a3624bfcaa66b33..64fc06fa52be3c4dcf4376215a7ffb5b36b3eb3d 100644
+--- a/mobile/shared/components/geckoview/FilePickerDelegate.sys.mjs
++++ b/mobile/shared/components/geckoview/FilePickerDelegate.sys.mjs
+@@ -119,6 +119,7 @@ export class FilePickerDelegate {
+   _filesInWebKitDirectory = [];
+   _temporaryFilePaths = new Set();
+   _activeCopiers = new Set();
++  _activeStagedDirectories = new Set();
+ 
+   /* ----------  nsIFilePicker  ---------- */
+   init(aBrowsingContext, aTitle, aMode) {
+@@ -158,6 +159,7 @@ export class FilePickerDelegate {
+     return Promise.resolve(
+       aMode === Ci.nsIFilePicker.modeOpen ||
+         aMode === Ci.nsIFilePicker.modeOpenMultiple ||
++        aMode === Ci.nsIFilePicker.modeGetFolder
+     );
+   }
+ 
+@@ -179,7 +181,7 @@ export class FilePickerDelegate {
+ 
+     this._msg.mimeTypes = this._mimeTypes;
+     this._msg.capture = this._capture;
+-    this._prompt.asyncShowPrompt(this._msg, result => {
++    this._prompt.asyncShowPrompt(this._msg, async result => {
+       // OK: result
+       // Cancel: !result
+       if (!result || !result.files || !result.files.length) {
+@@ -188,11 +190,20 @@ export class FilePickerDelegate {
+         }
+         aFilePickerShownCallback.done(Ci.nsIFilePicker.returnCancel);
+       } else {
+-        this._resolveFilesInWebKitDirectory(result.filesInWebKitDirectory).then(
+-          () => {
+-            this._resolveFiles(result.files, aFilePickerShownCallback);
++        try {
++          if (this._navisDirectRuntime && this.mode === Ci.nsIFilePicker.modeGetFolder) {
++            if (result.files.length !== 1) throw new Error("Expected one selected directory");
++            await this._resolveMaterializedDirectory(result.files[0]);
++          } else {
++            await this._resolveFilesInWebKitDirectory(result.filesInWebKitDirectory);
+           }
+-        );
++          await this._resolveFiles(result.files, aFilePickerShownCallback);
++        } catch (error) {
++          this._cleanupOwnedFiles();
++          await this._discardMaterializedSelections();
++          this._showNavisSelectionError(error);
++          aFilePickerShownCallback.done(Ci.nsIFilePicker.returnCancel);
++        }
+       }
+     });
+   }
+@@ -255,15 +266,95 @@ export class FilePickerDelegate {
+       warn`Error resolving files from file picker: ${ex}`;
+       if (this._navisDirectRuntime) {
+         this._cleanupOwnedFiles();
++        await this._discardMaterializedSelections();
++        this._showNavisSelectionError(ex);
+       }
+       aCallback.done(Ci.nsIFilePicker.returnCancel);
+       return;
+     }
+ 
+     this._fileData = fileData;
++    this._activeStagedDirectories.clear(); // Kotlin owns successful selections until their tab closes.
+     aCallback.done(Ci.nsIFilePicker.returnOK);
+   }
+ 
++  _navisMaterializedFile(uri) {
++    const root = lazy.FileUtils.getDir("TmpD", []);
++    root.append("navis-upload-staging");
++    root.normalize();
++    const file = Services.io.newURI(uri).QueryInterface(Ci.nsIFileURL).file;
++    // file:// is not an authorization token: only our exact app-private staging subtree is valid.
++    if (file.isSymlink()) throw new Error("Symbolic upload path rejected");
++    file.normalize();
++    if (!root.contains(file) || !file.exists()) throw new Error("Upload path is outside staging");
++    const relative = file.path.substring(root.path.length + 1).split("/");
++    if (relative.length < 2 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(relative[0])) {
++      throw new Error("Upload path has no selection owner");
++    }
++    for (let parent = file.parent; parent && !parent.equals(root); parent = parent.parent) {
++      if (parent.isSymlink()) throw new Error("Symbolic upload parent rejected");
++    }
++    this._activeStagedDirectories.add(`${root.path}/${relative[0]}`);
++    return file;
++  }
++
++  async _discardMaterializedSelections() {
++    const paths = [...this._activeStagedDirectories];
++    this._activeStagedDirectories.clear();
++    this._filesInWebKitDirectory = [];
++    await Promise.all(paths.map(path => IOUtils.remove(path, { recursive: true, ignoreAbsent: true }).catch(() => {})));
++  }
++
++  async _resolveMaterializedDirectory(uri) {
++    const directory = this._navisMaterializedFile(uri);
++    if (!directory.isDirectory()) throw new Error("Expected a selected directory");
++    const files = [];
++    let entries = 0;
++    let bytes = 0;
++    const visit = async (path, relative, depth) => {
++      if (depth > 32) throw new Error("Upload directory is too deep");
++      for (const child of await IOUtils.getChildren(path)) {
++        if (++entries > 2048) throw new Error("Too many upload directory entries");
++        const native = this._navisMaterializedFile(Services.io.newFileURI(new lazy.FileUtils.File(child)).spec);
++        const info = await IOUtils.stat(child);
++        const relativePath = `${relative}/${native.leafName}`;
++        if (info.type === "directory") {
++          await visit(child, relativePath, depth + 1);
++        } else if (info.type === "regular") {
++          bytes += info.size;
++          if (files.length >= MAX_TEMPORARY_FILES || info.size > MAX_TEMPORARY_FILE_BYTES || bytes > MAX_TEMPORARY_TOTAL_BYTES) {
++            throw new Error("Upload directory exceeds the storage limit");
++          }
++          let type = "";
++          try {
++            type = Cc["@mozilla.org/mime;1"].getService(Ci.nsIMIMEService).getTypeFromFile(native);
++          } catch (_) {}
++          files.push({ filePath: child, relativePath, name: native.leafName, type, lastModified: info.lastModified });
++        } else {
++          throw new Error("Unsupported upload entry");
++        }
++      }
++    };
++    await visit(directory.path, directory.leafName, 0);
++    // Reuse Gecko's file-backed DOM File conversion and setMozRelativePath; never buffer whole files.
++    await this._resolveFilesInWebKitDirectory(files);
++  }
++
++  _showNavisSelectionError(error) {
++    warn`Unable to prepare selected upload: ${error}`;
++    if (!this._navisDirectRuntime) return;
++    const chinese = Services.locale.appLocaleAsBCP47.startsWith("zh");
++    try {
++      this._prompt.asyncShowPrompt({
++        type: "alert",
++        title: chinese ? "无法准备上传" : "Unable to prepare upload",
++        msg: chinese
++          ? "无法读取所选文件或超出临时存储限制。未向页面提供文件，请重新选择。"
++          : "The selection could not be read or exceeds temporary storage limits. No files were sent to the page. Select the files again.",
++      }, () => {});
++    } catch (_) {}
++  }
++
+   async _materializeContentURI(aURI, aDisplayName = null) {
+     cleanupTemporaryFiles();
+     const root = temporaryRoot(true);
+@@ -426,6 +517,10 @@ export class FilePickerDelegate {
+     for (const fileData of this._fileData) {
+       if (aDOMFile) {
+         yield fileData.domFileOrDir;
++      } else {
++        yield this._navisDirectRuntime
++          ? fileData.file.clone()
++          : new lazy.FileUtils.File(fileData.file);
+       }
+     }
+   }

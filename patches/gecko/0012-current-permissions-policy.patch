@@ -1,0 +1,3142 @@
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+index 512d786cdafb35010631762cdca339859a47e4ca..aa2e90aad0bb1166fd24c0f776b2292a15fbed87 100644
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -4117,12 +4117,13 @@ nsresult Document::InitFeaturePolicy(nsIChannel* aChannel) {
+     return NS_OK;
+   }
+ 
+-  // query the policy from the header
++  // Parse only the current Permissions-Policy structured header. The obsolete
++  // Feature-Policy header is deliberately ignored.
+   nsAutoCString value;
+-  rv = httpChannel->GetResponseHeader("Feature-Policy"_ns, value);
++  rv = httpChannel->GetResponseHeader("Permissions-Policy"_ns, value);
+   if (NS_SUCCEEDED(rv)) {
+-    FeaturePolicy()->SetDeclaredPolicy(this, NS_ConvertUTF8toUTF16(value),
+-                                       NodePrincipal(), nullptr);
++    FeaturePolicy()->SetDeclaredPolicyFromPermissionsPolicyHeader(
++        this, value, NodePrincipal());
+   }
+ 
+   return NS_OK;
+diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
+index abe1c6a675e13a0d6e55b64614343f031a165535..7e49b52b20c1dc562cb5da5ebe14c56aedff6acd 100644
+--- a/dom/bindings/Bindings.conf
++++ b/dom/bindings/Bindings.conf
+@@ -627,6 +627,11 @@ DOMInterfaces = {
+     'concrete': True,
+ },
+ 
++'PermissionsPolicy': {
++    'nativeType': 'mozilla::dom::FeaturePolicy',
++    'headerFile': 'mozilla/dom/FeaturePolicy.h',
++},
++
+ 'TaskController' : {
+     'nativeType' : 'mozilla::dom::WebTaskController',
+     'headerFile' : 'mozilla/dom/WebTaskController.h'
+diff --git a/dom/geolocation/test/mochitest/test_crossorigin_iframe.html b/dom/geolocation/test/mochitest/test_crossorigin_iframe.html
+index f29bb7dd8f73dd98b5da931665019931c81e110e..235daa9e6c46278fd41c60e9113821178daad54c 100644
+--- a/dom/geolocation/test/mochitest/test_crossorigin_iframe.html
++++ b/dom/geolocation/test/mochitest/test_crossorigin_iframe.html
+@@ -53,8 +53,8 @@ async function nextTest() {
+ }
+ 
+ SpecialPowers.pushPrefEnv({"set": [
+-  ["dom.security.featurePolicy.header.enabled", true],
+-  ["dom.security.featurePolicy.webidl.enabled", true],
++  ["dom.security.permissionsPolicy.header.enabled", true],
++  ["dom.security.permissionsPolicy.webidl.enabled", true],
+ ]}).then(nextTest);
+ </script>
+ </body>
+diff --git a/dom/html/HTMLIFrameElement.cpp b/dom/html/HTMLIFrameElement.cpp
+index 592c0e2351e0c745624c5ccfa18088ab982f9e85..16264a86940c08ed43c29babf763ea6cbdbf2d32 100644
+--- a/dom/html/HTMLIFrameElement.cpp
++++ b/dom/html/HTMLIFrameElement.cpp
+@@ -273,6 +273,15 @@ already_AddRefed<nsIPrincipal>
+ HTMLIFrameElement::GetFeaturePolicyDefaultOrigin() const {
+   nsCOMPtr<nsIPrincipal> principal;
+ 
++  // A sandbox without allow-same-origin gives the nested document an opaque
++  // origin.  The container policy must use that prospective origin as well;
++  // otherwise a same-origin src or srcdoc would incorrectly satisfy a
++  // default-self allowlist before the document is loaded.
++  if (GetSandboxFlags() & SANDBOXED_ORIGIN) {
++    principal = NullPrincipal::CreateWithInheritedAttributes(NodePrincipal());
++    return principal.forget();
++  }
++
+   if (HasAttr(nsGkAtoms::srcdoc)) {
+     principal = NodePrincipal();
+     return principal.forget();
+diff --git a/dom/security/featurepolicy/Feature.cpp b/dom/security/featurepolicy/Feature.cpp
+index f9659a7bd0dfe06fed8f282f1d84488922ccb915..b53b5a06a6548a73964c95d4cc78a50ae10d49ab 100644
+--- a/dom/security/featurepolicy/Feature.cpp
++++ b/dom/security/featurepolicy/Feature.cpp
+@@ -5,14 +5,187 @@
+ #include "Feature.h"
+ 
+ #include "mozilla/BasePrincipal.h"
++#include "mozilla/TextUtils.h"
++#include "nsIURI.h"
++#include "nsNetUtil.h"
++#include "nsReadableUtils.h"
+ 
+ namespace mozilla::dom {
+ 
++namespace {
++
++bool IsValidScheme(const nsACString& aScheme) {
++  if (aScheme.IsEmpty() || !mozilla::IsAsciiAlpha(aScheme.First())) {
++    return false;
++  }
++
++  for (const char* cursor = aScheme.BeginReading();
++       cursor != aScheme.EndReading(); ++cursor) {
++    const char character = *cursor;
++    if (!mozilla::IsAsciiAlphanumeric(character) && character != '+' &&
++        character != '-' && character != '.') {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool ParseWildcardExpression(const nsACString& aExpression, nsACString& aScheme,
++                             nsACString& aHost, nsACString& aPort) {
++  const int32_t separator = aExpression.Find("://");
++  if (separator <= 0) {
++    return false;
++  }
++
++  aScheme.Assign(Substring(aExpression, 0, separator));
++  ToLowerCase(aScheme);
++  if (!IsValidScheme(aScheme) || aScheme.EqualsLiteral("*")) {
++    return false;
++  }
++
++  nsAutoCString authority(Substring(aExpression, separator + 3));
++  if (authority.IsEmpty() || authority.FindCharInSet("/?#@") != kNotFound) {
++    return false;
++  }
++
++  const int32_t colon = authority.RFindChar(':');
++  if (colon != kNotFound) {
++    if (authority.FindChar(':') != colon) {
++      return false;
++    }
++    aPort.Assign(Substring(authority, colon + 1));
++    authority.Truncate(colon);
++    if (aPort.IsEmpty()) {
++      return false;
++    }
++    if (!aPort.EqualsLiteral("*")) {
++      for (const char* cursor = aPort.BeginReading();
++           cursor != aPort.EndReading(); ++cursor) {
++        const char character = *cursor;
++        if (!mozilla::IsAsciiDigit(character)) {
++          return false;
++        }
++      }
++      nsresult rv = NS_OK;
++      const int32_t port = aPort.ToInteger(&rv);
++      if (NS_FAILED(rv) || port < 1 || port > 65535) {
++        return false;
++      }
++    }
++  } else {
++    aPort.Truncate();
++  }
++
++  ToLowerCase(authority);
++  if (authority.EqualsLiteral("*")) {
++    aHost.Assign(authority);
++    return true;
++  }
++  const bool isSubdomainWildcard = StringBeginsWith(authority, "*."_ns);
++  if ((isSubdomainWildcard &&
++       (authority.Length() <= 2 ||
++        Substring(authority, 2).FindChar('*') != kNotFound)) ||
++      (!isSubdomainWildcard && authority.FindChar('*') != kNotFound)) {
++    return false;
++  }
++
++  // Validate the host, or the non-wildcard suffix, with Gecko's URL
++  // implementation.
++  nsCOMPtr<nsIURI> validationURI;
++  nsAutoCString validationSpec(aScheme);
++  validationSpec.AppendLiteral("://");
++  validationSpec.Append(isSubdomainWildcard ? Substring(authority, 2)
++                                            : nsDependentCSubstring(authority));
++  nsresult rv = NS_NewURI(getter_AddRefs(validationURI), validationSpec);
++  if (NS_FAILED(rv)) {
++    return false;
++  }
++  nsAutoCString validationHost;
++  rv = validationURI->GetAsciiHost(validationHost);
++  if (NS_FAILED(rv) || validationHost.IsEmpty()) {
++    return false;
++  }
++
++  if (isSubdomainWildcard) {
++    aHost.AssignLiteral("*.");
++    aHost.Append(validationHost);
++  } else {
++    aHost.Assign(validationHost);
++  }
++  return true;
++}
++
++bool MatchesAllowListExpression(const nsAString& aExpression,
++                                nsIPrincipal* aPrincipal) {
++  nsCOMPtr<nsIURI> uri;
++  if (NS_FAILED(aPrincipal->GetURI(getter_AddRefs(uri))) || !uri) {
++    return false;
++  }
++
++  nsAutoCString expression = NS_ConvertUTF16toUTF8(aExpression);
++  if (!expression.IsEmpty() && expression.Last() == ':' &&
++      expression.Find("://") == kNotFound) {
++    expression.Truncate(expression.Length() - 1);
++    return IsValidScheme(expression) &&
++           uri->SchemeIs(PromiseFlatCString(expression).get());
++  }
++
++  nsAutoCString scheme;
++  nsAutoCString host;
++  nsAutoCString port;
++  if (!ParseWildcardExpression(expression, scheme, host, port) ||
++      !uri->SchemeIs(PromiseFlatCString(scheme).get())) {
++    return false;
++  }
++
++  nsAutoCString uriHost;
++  if (NS_FAILED(uri->GetAsciiHost(uriHost)) || uriHost.IsEmpty()) {
++    return false;
++  }
++  ToLowerCase(uriHost);
++  if (StringBeginsWith(host, "*."_ns)) {
++    const nsDependentCSubstring suffix = Substring(host, 2);
++    if (!(uriHost.Length() > suffix.Length() &&
++          StringEndsWith(uriHost, suffix) &&
++          uriHost.CharAt(uriHost.Length() - suffix.Length() - 1) == '.')) {
++      return false;
++    }
++  } else if (!host.EqualsLiteral("*") && !uriHost.Equals(host)) {
++    return false;
++  }
++
++  if (port.EqualsLiteral("*")) {
++    return true;
++  }
++
++  int32_t uriPort = -1;
++  if (NS_FAILED(uri->GetPort(&uriPort))) {
++    return false;
++  }
++  if (uriPort == -1) {
++    uriPort = NS_GetDefaultPort(scheme.get());
++  }
++
++  if (port.IsEmpty()) {
++    return uriPort == NS_GetDefaultPort(scheme.get());
++  }
++
++  nsresult rv = NS_OK;
++  return uriPort == port.ToInteger(&rv) && NS_SUCCEEDED(rv);
++}
++
++}  // namespace
++
+ void Feature::GetAllowList(nsTArray<nsCOMPtr<nsIPrincipal>>& aList) const {
+   MOZ_ASSERT(mPolicy == eAllowList);
+   aList.AppendElements(mAllowList);
+ }
+ 
++void Feature::GetAllowListExpressions(nsTArray<nsString>& aList) const {
++  MOZ_ASSERT(mPolicy == eAllowList);
++  aList.AppendElements(mAllowListExpressions);
++}
++
+ bool Feature::Allows(nsIPrincipal* aPrincipal) const {
+   if (mPolicy == eNone) {
+     return false;
+@@ -35,6 +208,7 @@ const nsAString& Feature::Name() const { return mFeatureName; }
+ void Feature::SetAllowsNone() {
+   mPolicy = eNone;
+   mAllowList.Clear();
++  mAllowListExpressions.Clear();
+ }
+ 
+ bool Feature::AllowsNone() const { return mPolicy == eNone; }
+@@ -42,6 +216,7 @@ bool Feature::AllowsNone() const { return mPolicy == eNone; }
+ void Feature::SetAllowsAll() {
+   mPolicy = eAll;
+   mAllowList.Clear();
++  mAllowListExpressions.Clear();
+ }
+ 
+ bool Feature::AllowsAll() const { return mPolicy == eAll; }
+@@ -53,6 +228,37 @@ void Feature::AppendToAllowList(nsIPrincipal* aPrincipal) {
+   mAllowList.AppendElement(aPrincipal);
+ }
+ 
++bool Feature::AppendToAllowListExpression(const nsAString& aExpression) {
++  nsAutoCString expression = NS_ConvertUTF16toUTF8(aExpression);
++  nsAutoCString scheme;
++  nsAutoCString host;
++  nsAutoCString port;
++  if (!expression.IsEmpty() && expression.Last() == ':' &&
++      expression.Find("://") == kNotFound) {
++    expression.Truncate(expression.Length() - 1);
++    if (!IsValidScheme(expression)) {
++      return false;
++    }
++    ToLowerCase(expression);
++    expression.Append(':');
++  } else {
++    if (!ParseWildcardExpression(expression, scheme, host, port)) {
++      return false;
++    }
++    expression.Assign(scheme);
++    expression.AppendLiteral("://");
++    expression.Append(host);
++    if (!port.IsEmpty()) {
++      expression.Append(':');
++      expression.Append(port);
++    }
++  }
++
++  mPolicy = eAllowList;
++  mAllowListExpressions.AppendElement(NS_ConvertUTF8toUTF16(expression));
++  return true;
++}
++
+ bool Feature::AllowListContains(nsIPrincipal* aPrincipal) const {
+   MOZ_ASSERT(aPrincipal);
+ 
+@@ -67,6 +273,12 @@ bool Feature::AllowListContains(nsIPrincipal* aPrincipal) const {
+     }
+   }
+ 
++  for (const nsString& expression : mAllowListExpressions) {
++    if (MatchesAllowListExpression(expression, aPrincipal)) {
++      return true;
++    }
++  }
++
+   return false;
+ }
+ 
+diff --git a/dom/security/featurepolicy/Feature.h b/dom/security/featurepolicy/Feature.h
+index 364794bda6f7486e97be2953e2ec0076d01a1344..bc2b09c3da00340e33801e943235e92d17a1bbc1 100644
+--- a/dom/security/featurepolicy/Feature.h
++++ b/dom/security/featurepolicy/Feature.h
+@@ -31,8 +31,15 @@ class Feature final {
+ 
+   void AppendToAllowList(nsIPrincipal* aPrincipal);
+ 
++  // Appends a validated scheme or wildcard host source expression used by the
++  // structured Permissions-Policy HTTP header. Exact origins continue to be
++  // represented as principals.
++  bool AppendToAllowListExpression(const nsAString& aExpression);
++
+   void GetAllowList(nsTArray<nsCOMPtr<nsIPrincipal>>& aList) const;
+ 
++  void GetAllowListExpressions(nsTArray<nsString>& aList) const;
++
+   bool AllowListContains(nsIPrincipal* aPrincipal) const;
+ 
+   bool HasAllowList() const;
+@@ -56,6 +63,7 @@ class Feature final {
+   Policy mPolicy;
+ 
+   CopyableTArray<nsCOMPtr<nsIPrincipal>> mAllowList;
++  CopyableTArray<nsString> mAllowListExpressions;
+ };
+ 
+ }  // namespace mozilla::dom
+diff --git a/dom/security/featurepolicy/FeaturePolicy.cpp b/dom/security/featurepolicy/FeaturePolicy.cpp
+index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f266500c7 100644
+--- a/dom/security/featurepolicy/FeaturePolicy.cpp
++++ b/dom/security/featurepolicy/FeaturePolicy.cpp
+@@ -50,21 +50,44 @@ void FeaturePolicy::InheritPolicy(FeaturePolicy* aParentPolicy) {
+       dest->mParentAllowedAllFeatures.AppendElement(featureName);
+     }
+ 
+-    // If the destination has a declared feature (via the HTTP header or 'allow'
+-    // attribute) we allow the feature if the destination allows it and the
+-    // parent allows its origin or the destinations' one.
+-    if (dest->HasDeclaredFeature(featureName) &&
+-        dest->AllowsFeatureInternal(featureName, dest->mDefaultOrigin)) {
+-      if (!src->AllowsFeatureInternal(featureName, src->mDefaultOrigin) &&
+-          !src->AllowsFeatureInternal(featureName, dest->mDefaultOrigin)) {
+-        dest->SetInheritedDeniedFeature(featureName);
+-      }
++    // A child can never receive a feature which is disabled for the parent
++    // document itself. If the parent declared an HTTP policy, that policy must
++    // also include the child's origin; an absent header does not prevent an
++    // iframe allow attribute from explicitly delegating a default-self
++    // feature.
++    if (!src->AllowsFeatureInternal(featureName, src->mDefaultOrigin) ||
++        (src->HasDeclaredFeature(featureName) &&
++         !src->AllowsFeatureInternal(featureName, dest->mDefaultOrigin))) {
++      dest->SetInheritedDeniedFeature(featureName);
+       return;
+     }
+ 
+-    // If there was not a declared feature, we allow the feature if the parent
+-    // FeaturePolicy allows the current origin.
+-    if (!src->AllowsFeatureInternal(featureName, dest->mDefaultOrigin)) {
++    bool containerAllows = false;
++    if (dest->HasDeclaredFeature(featureName)) {
++      containerAllows =
++          dest->AllowsFeatureInternal(featureName, dest->mDefaultOrigin);
++    } else {
++      // With no allow attribute, apply the feature's default container
++      // allowlist relative to the parent document, not relative to the child.
++      // In particular, a header value of '*' does not by itself delegate a
++      // default-self feature to a cross-origin iframe.
++      switch (FeaturePolicyUtils::DefaultAllowListFeature(featureName)) {
++        case FeaturePolicyUtils::FeaturePolicyValue::eAll:
++          containerAllows = true;
++          break;
++        case FeaturePolicyUtils::FeaturePolicyValue::eSelf:
++          containerAllows = BasePrincipal::Cast(src->mDefaultOrigin)
++                                ->Subsumes(dest->mDefaultOrigin,
++                                          BasePrincipal::ConsiderDocumentDomain);
++          break;
++        case FeaturePolicyUtils::FeaturePolicyValue::eNone:
++          break;
++        default:
++          MOZ_CRASH("Unknown default value");
++      }
++    }
++
++    if (!containerAllows) {
+       dest->SetInheritedDeniedFeature(featureName);
+     }
+   });
+@@ -139,7 +162,13 @@ void FeaturePolicy::AppendToDeclaredAllowInAncestorChain(
+       for (nsIPrincipal* principal : list) {
+         featureInChain.AppendToAllowList(principal);
+       }
+-      continue;
++
++      nsTArray<nsString> expressions;
++      aFeature.GetAllowListExpressions(expressions);
++      for (const nsString& expression : expressions) {
++        MOZ_ALWAYS_TRUE(featureInChain.AppendToAllowListExpression(expression));
++      }
++      return;
+     }
+   }
+ 
+@@ -178,6 +207,24 @@ void FeaturePolicy::SetDeclaredPolicy(Document* aDocument,
+   }
+ }
+ 
++void FeaturePolicy::SetDeclaredPolicyFromPermissionsPolicyHeader(
++    Document* aDocument, const nsACString& aPolicyString,
++    nsIPrincipal* aSelfOrigin) {
++  ResetDeclaredPolicy();
++
++  mDeclaredString = NS_ConvertUTF8toUTF16(aPolicyString);
++  mSelfOrigin = aSelfOrigin;
++
++  (void)NS_WARN_IF(!FeaturePolicyParser::ParsePermissionsPolicyHeader(
++      aPolicyString, aDocument, aSelfOrigin, mFeatures));
++
++  for (const Feature& feature : mFeatures) {
++    if (feature.HasAllowList()) {
++      AppendToDeclaredAllowInAncestorChain(feature);
++    }
++  }
++}
++
+ void FeaturePolicy::ResetDeclaredPolicy() {
+   mFeatures.Clear();
+   mDeclaredString.Truncate();
+@@ -189,7 +236,7 @@ void FeaturePolicy::ResetDeclaredPolicy() {
+ 
+ JSObject* FeaturePolicy::WrapObject(JSContext* aCx,
+                                     JS::Handle<JSObject*> aGivenProto) {
+-  return FeaturePolicy_Binding::Wrap(aCx, this, aGivenProto);
++  return PermissionsPolicy_Binding::Wrap(aCx, this, aGivenProto);
+ }
+ 
+ bool FeaturePolicy::AllowsFeature(const nsAString& aFeatureName,
+@@ -285,7 +332,10 @@ void FeaturePolicy::AllowedFeatures(nsTArray<nsString>& aAllowedFeatures) {
+ 
+ void FeaturePolicy::GetAllowlistForFeature(const nsAString& aFeatureName,
+                                            nsTArray<nsString>& aList) const {
+-  if (!AllowsFeatureInternal(aFeatureName, mDefaultOrigin)) {
++  // An ancestor denial collapses the effective allowlist. A declaration on
++  // this document can still exclude the document's own origin while listing
++  // origins that it delegates to, so do not use AllowsFeatureInternal() here.
++  if (HasInheritedDeniedFeature(aFeatureName)) {
+     return;
+   }
+ 
+@@ -306,8 +356,20 @@ void FeaturePolicy::GetAllowlistForFeature(const nsAString& aFeatureName,
+           return;
+         }
+ 
+-        aList.AppendElement(NS_ConvertUTF8toUTF16(originNoSuffix));
++        const nsString origin = NS_ConvertUTF8toUTF16(originNoSuffix);
++        if (!aList.Contains(origin)) {
++          aList.AppendElement(origin);
++        }
++      }
++
++      nsTArray<nsString> expressions;
++      feature.GetAllowListExpressions(expressions);
++      for (const nsString& expression : expressions) {
++        if (!aList.Contains(expression)) {
++          aList.AppendElement(expression);
++        }
+       }
++      aList.Sort();
+       return;
+     }
+   }
+diff --git a/dom/security/featurepolicy/FeaturePolicy.h b/dom/security/featurepolicy/FeaturePolicy.h
+index cd207b38e9bb5ee22938aae2f975b283215d91b5..5ffdbc06c9b7b54270de5fc452a06a08e2d11e0c 100644
+--- a/dom/security/featurepolicy/FeaturePolicy.h
++++ b/dom/security/featurepolicy/FeaturePolicy.h
+@@ -104,6 +104,12 @@ class FeaturePolicy final : public nsISupports, public nsWrapperCache {
+                          const nsAString& aPolicyString,
+                          nsIPrincipal* aSelfOrigin, nsIPrincipal* aSrcOrigin);
+ 
++  // Sets the declarative policy from the modern RFC Structured Fields
++  // Permissions-Policy response header.
++  void SetDeclaredPolicyFromPermissionsPolicyHeader(
++      mozilla::dom::Document* aDocument, const nsACString& aPolicyString,
++      nsIPrincipal* aSelfOrigin);
++
+   // This method creates a policy for aFeatureName allowing it to '*' if it
+   // doesn't exist yet. It's used by HTMLIFrameElement to enable features by
+   // attributes.
+diff --git a/dom/security/featurepolicy/FeaturePolicyParser.cpp b/dom/security/featurepolicy/FeaturePolicyParser.cpp
+index 84bf8175dc33fd11c8f6cff0fc0d21cfaf883f9e..2ea5338d7f6c18841d269dbd85c509ae69c2d0a5 100644
+--- a/dom/security/featurepolicy/FeaturePolicyParser.cpp
++++ b/dom/security/featurepolicy/FeaturePolicyParser.cpp
+@@ -8,6 +8,7 @@
+ #include "mozilla/dom/Feature.h"
+ #include "mozilla/dom/FeaturePolicyUtils.h"
+ #include "mozilla/dom/PolicyTokenizer.h"
++#include "mozilla/net/SFV.h"
+ #include "nsIScriptError.h"
+ #include "nsIURI.h"
+ #include "nsNetUtil.h"
+@@ -58,6 +59,65 @@ void ReportToConsoleInvalidAllowValue(Document* aDocument,
+                                   "FeaturePolicyInvalidAllowValue", params);
+ }
+ 
++bool AppendPermissionsPolicySource(Feature& aFeature, const nsACString& aValue,
++                                   Document* aDocument,
++                                   nsIPrincipal* aSelfOrigin) {
++  if (aValue.EqualsLiteral("*")) {
++    aFeature.SetAllowsAll();
++    return true;
++  }
++
++  if (aValue.LowerCaseEqualsLiteral("self")) {
++    aFeature.AppendToAllowList(aSelfOrigin);
++    return true;
++  }
++
++  const nsString value = NS_ConvertUTF8toUTF16(aValue);
++
++  // Scheme and wildcard-host sources cannot be represented by a principal.
++  if ((!aValue.IsEmpty() && aValue.Last() == ':' &&
++       aValue.Find("://") == kNotFound) ||
++      aValue.FindChar('*') != kNotFound) {
++    if (aFeature.AppendToAllowListExpression(value)) {
++      return true;
++    }
++    ReportToConsoleInvalidAllowValue(aDocument, value);
++    return false;
++  }
++
++  nsCOMPtr<nsIURI> uri;
++  nsresult rv = NS_NewURI(getter_AddRefs(uri), aValue);
++  if (NS_FAILED(rv)) {
++    ReportToConsoleInvalidAllowValue(aDocument, value);
++    return false;
++  }
++
++  nsCOMPtr<nsIPrincipal> origin = BasePrincipal::CreateContentPrincipal(
++      uri, BasePrincipal::Cast(aSelfOrigin)->OriginAttributesRef());
++  if (!origin) {
++    ReportToConsoleInvalidAllowValue(aDocument, value);
++    return false;
++  }
++
++  aFeature.AppendToAllowList(origin);
++  return true;
++}
++
++bool ParsePermissionsPolicyItem(const net::SFV::ItemResult& aItem,
++                                Feature& aFeature, Document* aDocument,
++                                nsIPrincipal* aSelfOrigin) {
++  nsAutoCString value;
++  if (NS_SUCCEEDED(aItem.GetValue<net::SFV::Token>(value))) {
++    return AppendPermissionsPolicySource(aFeature, value, aDocument,
++                                         aSelfOrigin);
++  }
++  if (NS_SUCCEEDED(aItem.GetValue<net::SFV::SFVString>(value))) {
++    return AppendPermissionsPolicySource(aFeature, value, aDocument,
++                                         aSelfOrigin);
++  }
++  return false;
++}
++
+ }  // namespace
+ 
+ /* static */
+@@ -152,4 +212,71 @@ bool FeaturePolicyParser::ParseString(const nsAString& aPolicy,
+   return true;
+ }
+ 
++/* static */
++bool FeaturePolicyParser::ParsePermissionsPolicyHeader(
++    const nsACString& aPolicy, Document* aDocument, nsIPrincipal* aSelfOrigin,
++    nsTArray<Feature>& aParsedFeatures) {
++  MOZ_ASSERT(aSelfOrigin);
++
++  auto dictionary = net::SFV::ParseDict(aPolicy);
++  if (!dictionary.IsValid()) {
++    aParsedFeatures.Clear();
++    return false;
++  }
++
++  nsTArray<nsCString> keys;
++  if (NS_FAILED(dictionary.GetKeys(keys))) {
++    aParsedFeatures.Clear();
++    return false;
++  }
++
++  nsTArray<Feature> parsedFeatures;
++  for (const nsCString& key : keys) {
++    const nsString featureName = NS_ConvertUTF8toUTF16(key);
++    if (!FeaturePolicyUtils::IsSupportedFeature(featureName)) {
++      ReportToConsoleUnsupportedFeature(aDocument, featureName);
++      continue;
++    }
++
++    Feature feature(featureName);
++    nsAutoCString value;
++    bool validMember = false;
++
++    if (NS_SUCCEEDED(dictionary.GetItem<net::SFV::Token>(key, value)) ||
++        NS_SUCCEEDED(dictionary.GetItem<net::SFV::SFVString>(key, value))) {
++      validMember =
++          AppendPermissionsPolicySource(feature, value, aDocument, aSelfOrigin);
++    } else {
++      auto innerList = dictionary.GetInnerList(key);
++      if (innerList.IsValid()) {
++        validMember = true;
++        if (innerList.Length() == 0) {
++          feature.SetAllowsNone();
++        } else {
++          for (size_t index = 0; index < innerList.Length(); ++index) {
++            auto item = innerList.GetItemAt(index);
++            if (!item.IsValid()) {
++              continue;
++            }
++            ParsePermissionsPolicyItem(item, feature, aDocument, aSelfOrigin);
++            if (feature.AllowsAll()) {
++              break;
++            }
++          }
++        }
++      }
++    }
++
++    // Unsupported member types and invalid direct values are ignored. An
++    // inner list whose individual members are invalid remains an empty
++    // allowlist, as required by the Permissions Policy processing model.
++    if (validMember) {
++      parsedFeatures.AppendElement(std::move(feature));
++    }
++  }
++
++  aParsedFeatures = std::move(parsedFeatures);
++  return true;
++}
++
+ }  // namespace mozilla::dom
+diff --git a/dom/security/featurepolicy/FeaturePolicyParser.h b/dom/security/featurepolicy/FeaturePolicyParser.h
+index 6e90e0a48b347cfe368170fa08f61b7760639539..96f63cdfefb754a30a7cd275296a6592009e82cc 100644
+--- a/dom/security/featurepolicy/FeaturePolicyParser.h
++++ b/dom/security/featurepolicy/FeaturePolicyParser.h
+@@ -21,6 +21,13 @@ class FeaturePolicyParser final {
+   static bool ParseString(const nsAString& aPolicy, Document* aDocument,
+                           nsIPrincipal* aSelfOrigin, nsIPrincipal* aSrcOrigin,
+                           nsTArray<Feature>& aParsedFeatures);
++
++  // Parses the RFC Structured Fields dictionary used by the modern
++  // Permissions-Policy response header.
++  static bool ParsePermissionsPolicyHeader(const nsACString& aPolicy,
++                                           Document* aDocument,
++                                           nsIPrincipal* aSelfOrigin,
++                                           nsTArray<Feature>& aParsedFeatures);
+ };
+ 
+ }  // namespace mozilla::dom
+diff --git a/dom/security/featurepolicy/FeaturePolicyUtils.cpp b/dom/security/featurepolicy/FeaturePolicyUtils.cpp
+index b40bf7f16ee6d564f94650d279b055e55927b2f6..910c5062fdb3727f39ef8a028a85cd4b7605262d 100644
+--- a/dom/security/featurepolicy/FeaturePolicyUtils.cpp
++++ b/dom/security/featurepolicy/FeaturePolicyUtils.cpp
+@@ -50,6 +50,7 @@ static FeatureMap sSupportedFeatures[] = {
+     {"local-network", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"aria-notify", FeaturePolicyUtils::FeaturePolicyValue::eAll},
+     {"picture-in-picture", FeaturePolicyUtils::FeaturePolicyValue::eAll},
++    {"sync-xhr", FeaturePolicyUtils::FeaturePolicyValue::eAll},
+ };
+ 
+ /*
+diff --git a/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp b/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp
+index ae1f7d84910d82d82571fc7964d1739ef7dbf0d4..7acd372c452a42c2adfe98766470b25ac7d464c8 100644
+--- a/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp
++++ b/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp
+@@ -15,6 +15,8 @@ using namespace mozilla::dom;
+ #define URL_SELF "https://example.com"_ns
+ #define URL_EXAMPLE_COM "http://example.com"_ns
+ #define URL_EXAMPLE_NET "http://example.net"_ns
++#define URL_EXAMPLE_COM_HTTPS "https://example.com"_ns
++#define URL_WWW_EXAMPLE_COM_HTTPS "https://www.example.com"_ns
+ 
+ void CheckParser(const nsAString& aInput, bool aExpectedResults,
+                  uint32_t aExpectedFeatures,
+@@ -30,6 +32,21 @@ void CheckParser(const nsAString& aInput, bool aExpectedResults,
+   aParsedFeatures = std::move(parsedFeatures);
+ }
+ 
++void CheckPermissionsPolicyParser(const nsACString& aInput,
++                                  bool aExpectedResult,
++                                  uint32_t aExpectedFeatures,
++                                  nsTArray<Feature>& aParsedFeatures) {
++  nsCOMPtr<nsIPrincipal> principal =
++      mozilla::BasePrincipal::CreateContentPrincipal(URL_SELF);
++  nsTArray<Feature> parsedFeatures;
++  ASSERT_EQ(FeaturePolicyParser::ParsePermissionsPolicyHeader(
++                aInput, nullptr, principal, parsedFeatures),
++            aExpectedResult);
++  ASSERT_EQ(parsedFeatures.Length(), aExpectedFeatures);
++
++  aParsedFeatures = std::move(parsedFeatures);
++}
++
+ TEST(FeaturePolicyParser, Basic)
+ {
+   nsCOMPtr<nsIPrincipal> selfPrincipal =
+@@ -158,3 +175,66 @@ TEST(FeaturePolicyParser, Basic)
+   ASSERT_TRUE(parsedFeatures[0].Name().Equals(u"camera"_ns));
+   ASSERT_TRUE(parsedFeatures[0].AllowsAll());
+ }
++
++TEST(FeaturePolicyParser, PermissionsPolicyStructuredHeader)
++{
++  nsCOMPtr<nsIPrincipal> selfPrincipal =
++      mozilla::BasePrincipal::CreateContentPrincipal(URL_SELF);
++  nsCOMPtr<nsIPrincipal> exampleComPrincipal =
++      mozilla::BasePrincipal::CreateContentPrincipal(URL_EXAMPLE_COM_HTTPS);
++  nsCOMPtr<nsIPrincipal> wwwExampleComPrincipal =
++      mozilla::BasePrincipal::CreateContentPrincipal(URL_WWW_EXAMPLE_COM_HTTPS);
++  nsCOMPtr<nsIPrincipal> exampleNetPrincipal =
++      mozilla::BasePrincipal::CreateContentPrincipal(URL_EXAMPLE_NET);
++
++  nsTArray<Feature> parsedFeatures;
++
++  CheckPermissionsPolicyParser("fullscreen=()"_ns, true, 1, parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowsNone());
++
++  CheckPermissionsPolicyParser("fullscreen=self"_ns, true, 1, parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(selfPrincipal));
++
++  CheckPermissionsPolicyParser("fullscreen=*"_ns, true, 1, parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowsAll());
++
++  CheckPermissionsPolicyParser("camera=(), microphone=self"_ns, true, 2,
++                               parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowsNone());
++  EXPECT_TRUE(parsedFeatures[1].AllowListContains(selfPrincipal));
++
++  CheckPermissionsPolicyParser("fullscreen=(self \"https://example.com\")"_ns,
++                               true, 1, parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(selfPrincipal));
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(exampleComPrincipal));
++  EXPECT_FALSE(parsedFeatures[0].AllowListContains(exampleNetPrincipal));
++
++  // Items of unsupported Structured Fields types are ignored while valid
++  // members in the same inner list continue to apply.
++  CheckPermissionsPolicyParser("fullscreen=(42 self)"_ns, true, 1,
++                               parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(selfPrincipal));
++  CheckPermissionsPolicyParser("fullscreen=?1"_ns, true, 0, parsedFeatures);
++
++  CheckPermissionsPolicyParser("fullscreen=(\"https://*.example.com\")"_ns,
++                               true, 1, parsedFeatures);
++  EXPECT_FALSE(parsedFeatures[0].AllowListContains(exampleComPrincipal));
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(wwwExampleComPrincipal));
++  EXPECT_FALSE(parsedFeatures[0].AllowListContains(exampleNetPrincipal));
++  nsTArray<nsString> wildcardExpressions;
++  parsedFeatures[0].GetAllowListExpressions(wildcardExpressions);
++  EXPECT_EQ(wildcardExpressions.Length(), 1U);
++  EXPECT_TRUE(wildcardExpressions.Contains(u"https://*.example.com"_ns));
++
++  CheckPermissionsPolicyParser("fullscreen=(\"https:\")"_ns, true, 1,
++                               parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(exampleComPrincipal));
++  EXPECT_FALSE(parsedFeatures[0].AllowListContains(exampleNetPrincipal));
++
++  CheckPermissionsPolicyParser("fullscreen=(\"*://example.net\" self)"_ns, true,
++                               1, parsedFeatures);
++  EXPECT_TRUE(parsedFeatures[0].AllowListContains(selfPrincipal));
++  EXPECT_FALSE(parsedFeatures[0].AllowListContains(exampleNetPrincipal));
++
++  CheckPermissionsPolicyParser("fullscreen=("_ns, false, 0, parsedFeatures);
++}
+diff --git a/dom/security/featurepolicy/test/mochitest/file_xslt.html^headers^ b/dom/security/featurepolicy/test/mochitest/file_xslt.html^headers^
+index fc8f20a65b279426b3d6324c4d5783bd54383b10..78a1138946ec87900cf63f019304994a401eef95 100644
+--- a/dom/security/featurepolicy/test/mochitest/file_xslt.html^headers^
++++ b/dom/security/featurepolicy/test/mochitest/file_xslt.html^headers^
+@@ -1 +1 @@
+-Feature-Policy: camera *; fullscreen 'none'; storage-access 'self'
++Permissions-Policy: camera=*, fullscreen=(), storage-access=self
+diff --git a/dom/security/featurepolicy/test/mochitest/file_xslt.js b/dom/security/featurepolicy/test/mochitest/file_xslt.js
+index 34bbaa6b6e0daf1ea6286afbafa48543a4023836..adbe15edff2ddd3db249385ec80bd2e80a41b678 100644
+--- a/dom/security/featurepolicy/test/mochitest/file_xslt.js
++++ b/dom/security/featurepolicy/test/mochitest/file_xslt.js
+@@ -5,7 +5,7 @@ let features = [
+   "geolocation",
+   "microphone",
+   "storage-access",
+-].map(f => [f, document.featurePolicy.getAllowlistForFeature(f)]);
++].map(f => [f, document.permissionsPolicy.getAllowlistForFeature(f)]);
+ 
+ document.documentElement.requestFullscreen().finally(() => {
+   let fullscreen = document.fullscreenElement == document.documentElement;
+diff --git a/dom/security/featurepolicy/test/mochitest/file_xslt.xml^headers^ b/dom/security/featurepolicy/test/mochitest/file_xslt.xml^headers^
+index fc8f20a65b279426b3d6324c4d5783bd54383b10..78a1138946ec87900cf63f019304994a401eef95 100644
+--- a/dom/security/featurepolicy/test/mochitest/file_xslt.xml^headers^
++++ b/dom/security/featurepolicy/test/mochitest/file_xslt.xml^headers^
+@@ -1 +1 @@
+-Feature-Policy: camera *; fullscreen 'none'; storage-access 'self'
++Permissions-Policy: camera=*, fullscreen=(), storage-access=self
+diff --git a/dom/security/featurepolicy/test/mochitest/file_xslt.xsl^headers^ b/dom/security/featurepolicy/test/mochitest/file_xslt.xsl^headers^
+index d800acc07267a83d535b81dd42d708cde216e160..bb48c4fe1da16de845a514324df2d47b4dd7d012 100644
+--- a/dom/security/featurepolicy/test/mochitest/file_xslt.xsl^headers^
++++ b/dom/security/featurepolicy/test/mochitest/file_xslt.xsl^headers^
+@@ -1 +1 @@
+-Feature-Policy: storage-access 'none'
++Permissions-Policy: storage-access=()
+diff --git a/dom/security/featurepolicy/test/mochitest/file_xslt_outer.html^headers^ b/dom/security/featurepolicy/test/mochitest/file_xslt_outer.html^headers^
+index f943b3570d702435706ad88e48a15138c72ea0ec..fdf2860e68be968ba3206c9f2f70a3c2b7a85519 100644
+--- a/dom/security/featurepolicy/test/mochitest/file_xslt_outer.html^headers^
++++ b/dom/security/featurepolicy/test/mochitest/file_xslt_outer.html^headers^
+@@ -1 +1 @@
+-Feature-Policy: camera 'self'; fullscreen *; geolocation *; microphone *; storage-access 'none'
++Permissions-Policy: camera=self, fullscreen=*, geolocation=*, microphone=*, storage-access=()
+diff --git a/dom/security/featurepolicy/test/mochitest/test_featureList.html b/dom/security/featurepolicy/test/mochitest/test_featureList.html
+index 3a8aadb53514065160c30cbeb321900147f28a85..af12f743847123a1e0c1bce1aba4af2dfd9b26f1 100644
+--- a/dom/security/featurepolicy/test/mochitest/test_featureList.html
++++ b/dom/security/featurepolicy/test/mochitest/test_featureList.html
+@@ -43,12 +43,12 @@ function checkFeatures(features) {
+   });
+ }
+ 
+-ok("featurePolicy" in document, "We have document.featurePolicy");
+-checkFeatures(document.featurePolicy.features());
++ok("permissionsPolicy" in document, "We have document.permissionsPolicy");
++checkFeatures(document.permissionsPolicy.features());
+ 
+ let ifr = document.getElementById("ifr");
+-ok("featurePolicy" in ifr, "We have HTMLIFrameElement.featurePolicy");
+-checkFeatures(ifr.featurePolicy.features());
++ok("permissionsPolicy" in ifr, "We have HTMLIFrameElement.permissionsPolicy");
++checkFeatures(ifr.permissionsPolicy.features());
+ 
+ </script>
+ </body>
+diff --git a/dom/security/featurepolicy/test/mochitest/test_initial_aboutblank.html b/dom/security/featurepolicy/test/mochitest/test_initial_aboutblank.html
+index 79d1bfd4c45f2805f017920b1e2450e507524819..a8ba181cbc0ea1a8397c80b921341a561ae5f120 100644
+--- a/dom/security/featurepolicy/test/mochitest/test_initial_aboutblank.html
++++ b/dom/security/featurepolicy/test/mochitest/test_initial_aboutblank.html
+@@ -14,11 +14,11 @@
+ 
+ <script type="text/javascript">
+ add_task(function testAboutBlank() {
+-  isDeeply(frames[0].transient.document.featurePolicy.allowedFeatures(),
+-           frames[0].document.featurePolicy.allowedFeatures(),
++  isDeeply(frames[0].transient.document.permissionsPolicy.allowedFeatures(),
++           frames[0].document.permissionsPolicy.allowedFeatures(),
+            "check allowed feature list for initial about:blank");
+-  isDeeply(frames[0].regular.document.featurePolicy.allowedFeatures(),
+-           frames[0].document.featurePolicy.allowedFeatures(),
++  isDeeply(frames[0].regular.document.permissionsPolicy.allowedFeatures(),
++           frames[0].document.permissionsPolicy.allowedFeatures(),
+            "check allowed feature list for real load about:blank");
+ });
+ </script>
+diff --git a/dom/security/featurepolicy/test/mochitest/test_nested.html b/dom/security/featurepolicy/test/mochitest/test_nested.html
+index 94b41a9de7c97205d7bf2201a1cad7230992ed91..56b3e2f5c5551c339ca4e7da06760ac2a6ef4dff 100644
+--- a/dom/security/featurepolicy/test/mochitest/test_nested.html
++++ b/dom/security/featurepolicy/test/mochitest/test_nested.html
+@@ -24,7 +24,7 @@ async function makeChild(target, testParams) {
+     return new Promise(resolve => {
+       ifr.onload = async function() {
+         const isAllowed = await SpecialPowers.spawn(ifr, [], () =>
+-          this.content.document.featurePolicy.allowsFeature("microphone")
++          this.content.document.permissionsPolicy.allowsFeature("microphone")
+         );
+         Assert.equal(
+           isAllowed,
+diff --git a/dom/security/featurepolicy/test/mochitest/test_parser.html b/dom/security/featurepolicy/test/mochitest/test_parser.html
+index a8322f6e7d0cb39eb69f9ba70834e960e2b2aae3..b005ee5f3f5ca0c416363bc2c255ecbbae3fe35c 100644
+--- a/dom/security/featurepolicy/test/mochitest/test_parser.html
++++ b/dom/security/featurepolicy/test/mochitest/test_parser.html
+@@ -15,40 +15,40 @@ SimpleTest.waitForExplicitFinish();
+ const CROSS_ORIGIN = "https://example.org";
+ 
+ function test_document() {
+-  info("Checking document.featurePolicy");
+-  ok("featurePolicy" in document, "We have document.featurePolicy");
++  info("Checking document.permissionsPolicy");
++  ok("permissionsPolicy" in document, "We have document.permissionsPolicy");
+ 
+-  ok(!document.featurePolicy.allowsFeature("foobar"), "Random feature");
+-  ok(!document.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++  ok(!document.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++  ok(!document.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-  ok(document.featurePolicy.allowsFeature("camera"), "Camera is allowed for self");
+-  ok(document.featurePolicy.allowsFeature("camera", "https://foo.bar"), "Camera is always allowed");
+-  let allowed = document.featurePolicy.getAllowlistForFeature("camera");
++  ok(document.permissionsPolicy.allowsFeature("camera"), "Camera is allowed for self");
++  ok(document.permissionsPolicy.allowsFeature("camera", "https://foo.bar"), "Camera is always allowed");
++  let allowed = document.permissionsPolicy.getAllowlistForFeature("camera");
+   is(allowed.length, 1, "Only 1 entry in allowlist for camera");
+   is(allowed[0], "*", "allowlist is *");
+ 
+-  ok(document.featurePolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
+-  ok(document.featurePolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
+-  ok(!document.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-  allowed = document.featurePolicy.getAllowlistForFeature("geolocation");
++  ok(document.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
++  ok(document.permissionsPolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
++  ok(!document.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++  allowed = document.permissionsPolicy.getAllowlistForFeature("geolocation");
+   is(allowed.length, 1, "Only 1 entry in allowlist for geolocation");
+   is(allowed[0], location.origin, "allowlist is self");
+ 
+-  ok(!document.featurePolicy.allowsFeature("microphone"), "Microphone is disabled for self");
+-  ok(!document.featurePolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
+-  ok(!document.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-  ok(document.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is allowed for example.com");
+-  ok(document.featurePolicy.allowsFeature("microphone", "https://example.org"), "Microphone is allowed for example.org");
+-  allowed = document.featurePolicy.getAllowlistForFeature("microphone");
++  ok(!document.permissionsPolicy.allowsFeature("microphone"), "Microphone is disabled for self");
++  ok(!document.permissionsPolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
++  ok(!document.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++  ok(document.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is allowed for example.com");
++  ok(document.permissionsPolicy.allowsFeature("microphone", "https://example.org"), "Microphone is allowed for example.org");
++  allowed = document.permissionsPolicy.getAllowlistForFeature("microphone");
+   is(allowed.length, 0, "No allowlist for microphone");
+ 
+-  ok(!document.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-  ok(!document.featurePolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
+-  ok(!document.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-  allowed = document.featurePolicy.getAllowlistForFeature("vr");
++  ok(!document.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++  ok(!document.permissionsPolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
++  ok(!document.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++  allowed = document.permissionsPolicy.getAllowlistForFeature("vr");
+   is(allowed.length, 0, "No allowlist for vr");
+ 
+-  allowed = document.featurePolicy.allowedFeatures();
++  allowed = document.permissionsPolicy.allowedFeatures();
+   // microphone is disabled for this origin, vr is disabled everywhere.
+   let camera = false;
+   let geolocation = false;
+@@ -64,136 +64,136 @@ function test_document() {
+ }
+ 
+ function test_iframe_without_allow() {
+-  info("Checking HTMLIFrameElement.featurePolicy");
++  info("Checking HTMLIFrameElement.permissionsPolicy");
+   let ifr = document.getElementById("ifr");
+-  ok("featurePolicy" in ifr, "HTMLIFrameElement.featurePolicy exists");
++  ok("permissionsPolicy" in ifr, "HTMLIFrameElement.permissionsPolicy exists");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("foobar"), "Random feature");
+-  ok(!ifr.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("camera"), "Camera is allowed for self");
+-  ok(ifr.featurePolicy.allowsFeature("camera", location.origin), "Camera is allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("camera", "https://foo.bar"), "Camera is not allowed for a random URL");
+-  let allowed = ifr.featurePolicy.getAllowlistForFeature("camera");
++  ok(ifr.permissionsPolicy.allowsFeature("camera"), "Camera is allowed for self");
++  ok(ifr.permissionsPolicy.allowsFeature("camera", location.origin), "Camera is allowed for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("camera", "https://foo.bar"), "Camera is not allowed for a random URL");
++  let allowed = ifr.permissionsPolicy.getAllowlistForFeature("camera");
+   is(allowed.length, 1, "Only 1 entry in allowlist for camera");
+   is(allowed[0], location.origin, "allowlist is 'self'");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
+-  ok(ifr.featurePolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("geolocation");
++  ok(ifr.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
++  ok(ifr.permissionsPolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("geolocation");
+   is(allowed.length, 1, "Only 1 entry in allowlist for geolocation");
+   is(allowed[0], location.origin, "allowlist is '*'");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("microphone"), "Microphone is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://example.org"), "Microphone is disabled for example.org");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("microphone");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone"), "Microphone is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://example.org"), "Microphone is disabled for example.org");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("microphone");
+   is(allowed.length, 0, "No allowlist for microphone");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("vr");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("vr");
+   is(allowed.length, 0, "No allowlist for vr");
+ 
+-  ok(ifr.featurePolicy.allowedFeatures().includes("camera"), "Camera is allowed");
+-  ok(ifr.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("camera"), "Camera is allowed");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed");
+   // microphone is disabled for this origin
+-  ok(!ifr.featurePolicy.allowedFeatures().includes("microphone"), "microphone is not allowed");
++  ok(!ifr.permissionsPolicy.allowedFeatures().includes("microphone"), "microphone is not allowed");
+   // vr is disabled everywhere.
+-  ok(!ifr.featurePolicy.allowedFeatures().includes("vr"), "VR is not allowed");
++  ok(!ifr.permissionsPolicy.allowedFeatures().includes("vr"), "VR is not allowed");
+ 
+   next();
+ }
+ 
+ function test_iframe_with_allow() {
+-  info("Checking HTMLIFrameElement.featurePolicy");
++  info("Checking HTMLIFrameElement.permissionsPolicy");
+   let ifr = document.getElementById("ifr");
+-  ok("featurePolicy" in ifr, "HTMLIFrameElement.featurePolicy exists");
++  ok("permissionsPolicy" in ifr, "HTMLIFrameElement.permissionsPolicy exists");
+ 
+   ifr.setAttribute("allow", "camera 'none'");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("foobar"), "Random feature");
+-  ok(!ifr.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("camera"), "Camera is not allowed");
+-  let allowed = ifr.featurePolicy.getAllowlistForFeature("camera");
++  ok(!ifr.permissionsPolicy.allowsFeature("camera"), "Camera is not allowed");
++  let allowed = ifr.permissionsPolicy.getAllowlistForFeature("camera");
+   is(allowed.length, 0, "Camera has an empty allowlist");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
+-  ok(ifr.featurePolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("geolocation");
++  ok(ifr.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
++  ok(ifr.permissionsPolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("geolocation");
+   is(allowed.length, 1, "Only 1 entry in allowlist for geolocation");
+   is(allowed[0], location.origin, "allowlist is '*'");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("microphone"), "Microphone is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://example.org"), "Microphone is disabled for example.org");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("microphone");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone"), "Microphone is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://example.org"), "Microphone is disabled for example.org");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("microphone");
+   is(allowed.length, 0, "No allowlist for microphone");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("vr");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("vr");
+   is(allowed.length, 0, "No allowlist for vr");
+ 
+-  ok(ifr.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed only for self");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed only for self");
+ 
+   next();
+ }
+ 
+ function test_iframe_contentDocument() {
+-  info("Checking iframe document.featurePolicy");
++  info("Checking iframe document.permissionsPolicy");
+ 
+   let ifr = document.createElement("iframe");
+   ifr.setAttribute("src", "empty.html");
+   ifr.onload = function() {
+-    ok("featurePolicy" in ifr.contentDocument, "We have ifr.contentDocument.featurePolicy");
++    ok("permissionsPolicy" in ifr.contentDocument, "We have ifr.contentDocument.permissionsPolicy");
+ 
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("foobar"), "Random feature");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-    ok(ifr.contentDocument.featurePolicy.allowsFeature("camera"), "Camera is allowed for self");
+-    ok(ifr.contentDocument.featurePolicy.allowsFeature("camera", location.origin), "Camera is allowed for self");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("camera", "https://foo.bar"), "Camera is allowed for self");
+-    let allowed = ifr.contentDocument.featurePolicy.getAllowlistForFeature("camera");
++    ok(ifr.contentDocument.permissionsPolicy.allowsFeature("camera"), "Camera is allowed for self");
++    ok(ifr.contentDocument.permissionsPolicy.allowsFeature("camera", location.origin), "Camera is allowed for self");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("camera", "https://foo.bar"), "Camera is allowed for self");
++    let allowed = ifr.contentDocument.permissionsPolicy.getAllowlistForFeature("camera");
+     is(allowed.length, 1, "Only 1 entry in allowlist for camera");
+     is(allowed[0], location.origin, "allowlist is 'self'");
+ 
+-    ok(ifr.featurePolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
+-    ok(ifr.featurePolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
+-    ok(!ifr.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-    allowed = ifr.featurePolicy.getAllowlistForFeature("geolocation");
++    ok(ifr.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
++    ok(ifr.permissionsPolicy.allowsFeature("geolocation", location.origin), "Geolocation is allowed for self");
++    ok(!ifr.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++    allowed = ifr.permissionsPolicy.getAllowlistForFeature("geolocation");
+     is(allowed.length, 1, "Only 1 entry in allowlist for geolocation");
+     is(allowed[0], location.origin, "allowlist is '*'");
+ 
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("microphone"), "Microphone is disabled for self");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is allowed for example.com");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("microphone", "https://example.org"), "Microphone is allowed for example.org");
+-    allowed = ifr.contentDocument.featurePolicy.getAllowlistForFeature("microphone");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("microphone"), "Microphone is disabled for self");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("microphone", location.origin), "Microphone is disabled for self");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is allowed for example.com");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("microphone", "https://example.org"), "Microphone is allowed for example.org");
++    allowed = ifr.contentDocument.permissionsPolicy.getAllowlistForFeature("microphone");
+     is(allowed.length, 0, "No allowlist for microphone");
+ 
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
+-    ok(!ifr.contentDocument.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-    allowed = ifr.contentDocument.featurePolicy.getAllowlistForFeature("vr");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("vr", location.origin), "Vibrate is disabled for self");
++    ok(!ifr.contentDocument.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++    allowed = ifr.contentDocument.permissionsPolicy.getAllowlistForFeature("vr");
+     is(allowed.length, 0, "No allowlist for vr");
+ 
+-    ok(ifr.contentDocument.featurePolicy.allowedFeatures().includes("camera"), "Camera is allowed");
+-    ok(ifr.contentDocument.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed");
++    ok(ifr.contentDocument.permissionsPolicy.allowedFeatures().includes("camera"), "Camera is allowed");
++    ok(ifr.contentDocument.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed");
+     // microphone is disabled for this origin
+-    ok(!ifr.contentDocument.featurePolicy.allowedFeatures().includes("microphone"), "Microphone is not allowed");
++    ok(!ifr.contentDocument.permissionsPolicy.allowedFeatures().includes("microphone"), "Microphone is not allowed");
+     // vr is disabled everywhere.
+-    ok(!ifr.contentDocument.featurePolicy.allowedFeatures().includes("vr"), "VR is not allowed");
++    ok(!ifr.contentDocument.permissionsPolicy.allowedFeatures().includes("vr"), "VR is not allowed");
+ 
+     next();
+   };
+@@ -201,139 +201,139 @@ function test_iframe_contentDocument() {
+ }
+ 
+ function test_cross_iframe_without_allow() {
+-  info("Checking cross HTMLIFrameElement.featurePolicy no allow");
++  info("Checking cross HTMLIFrameElement.permissionsPolicy no allow");
+   let ifr = document.getElementById("cross_ifr");
+-  ok("featurePolicy" in ifr, "HTMLIFrameElement.featurePolicy exists");
++  ok("permissionsPolicy" in ifr, "HTMLIFrameElement.permissionsPolicy exists");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("foobar"), "Random feature");
+-  ok(!ifr.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("camera"), "Camera is allowed for self");
+-  ok(ifr.featurePolicy.allowsFeature("camera", CROSS_ORIGIN), "Camera is allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("camera", "https://foo.bar"), "Camera is not allowed for a random URL");
+-  let allowed = ifr.featurePolicy.getAllowlistForFeature("camera");
++  ok(ifr.permissionsPolicy.allowsFeature("camera"), "Camera is allowed for self");
++  ok(ifr.permissionsPolicy.allowsFeature("camera", CROSS_ORIGIN), "Camera is allowed for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("camera", "https://foo.bar"), "Camera is not allowed for a random URL");
++  let allowed = ifr.permissionsPolicy.getAllowlistForFeature("camera");
+   is(allowed.length, 1, "Only 1 entry in allowlist for camera");
+   is(allowed[0], CROSS_ORIGIN, "allowlist is 'self'");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("geolocation"), "Geolocation is not allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("geolocation", CROSS_ORIGIN),
++  ok(!ifr.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is not allowed for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("geolocation", CROSS_ORIGIN),
+     "Geolocation is not allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("geolocation");
++  ok(!ifr.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("geolocation");
+   is(allowed.length, 0, "No allowlist for geolocation");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("microphone"), "Microphone is enabled for self");
+-  ok(ifr.featurePolicy.allowsFeature("microphone", CROSS_ORIGIN), "Microphone is enabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("microphone");
++  ok(ifr.permissionsPolicy.allowsFeature("microphone"), "Microphone is enabled for self");
++  ok(ifr.permissionsPolicy.allowsFeature("microphone", CROSS_ORIGIN), "Microphone is enabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("microphone");
+   is(allowed.length, 1, "Only 1 entry in allowlist for microphone");
+   is(allowed[0], CROSS_ORIGIN, "allowlist is self");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", CROSS_ORIGIN), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("vr");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", CROSS_ORIGIN), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("vr");
+   is(allowed.length, 0, "No allowlist for vr");
+ 
+-  ok(ifr.featurePolicy.allowedFeatures().includes("camera"), "Camera is allowed");
+-  ok(!ifr.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is not allowed");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("camera"), "Camera is allowed");
++  ok(!ifr.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is not allowed");
+   // microphone is enabled for this origin
+-  ok(ifr.featurePolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
+   // vr is disabled everywhere.
+-  ok(!ifr.featurePolicy.allowedFeatures().includes("vr"), "VR is not allowed");
++  ok(!ifr.permissionsPolicy.allowedFeatures().includes("vr"), "VR is not allowed");
+ 
+   next();
+ }
+ 
+ function test_cross_iframe_with_allow() {
+-  info("Checking cross HTMLIFrameElement.featurePolicy with allow");
++  info("Checking cross HTMLIFrameElement.permissionsPolicy with allow");
+   let ifr = document.getElementById("cross_ifr");
+-  ok("featurePolicy" in ifr, "HTMLIFrameElement.featurePolicy exists");
++  ok("permissionsPolicy" in ifr, "HTMLIFrameElement.permissionsPolicy exists");
+ 
+   ifr.setAttribute("allow", "geolocation; camera 'none'");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("foobar"), "Random feature");
+-  ok(!ifr.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++  ok(!ifr.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("camera"), "Camera is not allowed");
+-  let allowed = ifr.featurePolicy.getAllowlistForFeature("camera");
++  ok(!ifr.permissionsPolicy.allowsFeature("camera"), "Camera is not allowed");
++  let allowed = ifr.permissionsPolicy.getAllowlistForFeature("camera");
+   is(allowed.length, 0, "Camera has an empty allowlist");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
+-  ok(ifr.featurePolicy.allowsFeature("geolocation", CROSS_ORIGIN), "Geolocation is allowed for self");
+-  ok(!ifr.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("geolocation");
++  ok(ifr.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
++  ok(ifr.permissionsPolicy.allowsFeature("geolocation", CROSS_ORIGIN), "Geolocation is allowed for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("geolocation");
+   is(allowed.length, 1, "Only 1 entry in allowlist for geolocation");
+   is(allowed[0], CROSS_ORIGIN, "allowlist is '*'");
+ 
+-  ok(ifr.featurePolicy.allowsFeature("microphone"), "Microphone is enabled for self");
+-  ok(ifr.featurePolicy.allowsFeature("microphone", CROSS_ORIGIN), "Microphone is enabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-  ok(!ifr.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("microphone");
++  ok(ifr.permissionsPolicy.allowsFeature("microphone"), "Microphone is enabled for self");
++  ok(ifr.permissionsPolicy.allowsFeature("microphone", CROSS_ORIGIN), "Microphone is enabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++  ok(!ifr.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("microphone");
+   is(allowed.length, 1, "Only 1 entry in allowlist for microphone");
+   is(allowed[0], CROSS_ORIGIN, "allowlist is self");
+ 
+-  ok(!ifr.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", CROSS_ORIGIN), "Vibrate is disabled for self");
+-  ok(!ifr.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-  allowed = ifr.featurePolicy.getAllowlistForFeature("vr");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", CROSS_ORIGIN), "Vibrate is disabled for self");
++  ok(!ifr.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++  allowed = ifr.permissionsPolicy.getAllowlistForFeature("vr");
+   is(allowed.length, 0, "No allowlist for vr");
+ 
+-  ok(ifr.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed only for self");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed only for self");
+   // microphone is enabled for this origin
+-  ok(ifr.featurePolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
++  ok(ifr.permissionsPolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
+ 
+   next();
+ }
+ 
+ function test_cross_iframe_contentDocument_no_allow() {
+-  info("Checking cross iframe document.featurePolicy no allow");
++  info("Checking cross iframe document.permissionsPolicy no allow");
+ 
+   let ifr = document.createElement("iframe");
+   ifr.setAttribute("src", "https://example.org/tests/dom/security/featurePolicy/test/mochitest/empty.html");
+   ifr.onload = async function() {
+     await SpecialPowers.spawn(ifr, [], () => {
+-      Assert.ok("featurePolicy" in this.content.document, "We have this.content.document.featurePolicy");
++      Assert.ok("permissionsPolicy" in this.content.document, "We have this.content.document.permissionsPolicy");
+ 
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("foobar"), "Random feature");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("camera"), "Camera is allowed for self");
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("camera", "https://example.org"), "Camera is allowed for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("camera", "https://foo.bar"), "Camera is not allowed for a random URL");
+-      let allowed = this.content.document.featurePolicy.getAllowlistForFeature("camera");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("camera"), "Camera is allowed for self");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("camera", "https://example.org"), "Camera is allowed for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("camera", "https://foo.bar"), "Camera is not allowed for a random URL");
++      let allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("camera");
+       Assert.equal(allowed.length, 1, "Only 1 entry in allowlist for camera");
+       Assert.equal(allowed[0], "https://example.org", "allowlist is 'self'");
+ 
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("geolocation"), "Geolocation is not allowed for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("geolocation", "https://example.org"),
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is not allowed for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("geolocation", "https://example.org"),
+         "Geolocation is not allowed for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-      allowed = this.content.document.featurePolicy.getAllowlistForFeature("geolocation");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++      allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("geolocation");
+       Assert.equal(allowed.length, 0, "No allowlist for geolocation");
+ 
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("microphone"), "Microphone is enabled for self");
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("microphone", "https://example.org"), "Microphone is enabled for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
+-      allowed = this.content.document.featurePolicy.getAllowlistForFeature("microphone");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("microphone"), "Microphone is enabled for self");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("microphone", "https://example.org"), "Microphone is enabled for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
++      allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("microphone");
+       Assert.equal(allowed.length, 1, "Only 1 entry in allowlist for microphone");
+       Assert.equal(allowed[0], "https://example.org", "allowlist is self");
+ 
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("vr", "https://example.org"), "Vibrate is disabled for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-      allowed = this.content.document.featurePolicy.getAllowlistForFeature("vr");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("vr", "https://example.org"), "Vibrate is disabled for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++      allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("vr");
+       Assert.equal(allowed.length, 0, "No allowlist for vr");
+ 
+-      Assert.ok(this.content.document.featurePolicy.allowedFeatures().includes("camera"), "Camera is allowed");
+-      Assert.ok(!this.content.document.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is not allowed");
++      Assert.ok(this.content.document.permissionsPolicy.allowedFeatures().includes("camera"), "Camera is allowed");
++      Assert.ok(!this.content.document.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is not allowed");
+       // microphone is enabled for this origin
+-      Assert.ok(this.content.document.featurePolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
++      Assert.ok(this.content.document.permissionsPolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
+       // vr is disabled everywhere.
+-      Assert.ok(!this.content.document.featurePolicy.allowedFeatures().includes("vr"), "VR is not allowed");
++      Assert.ok(!this.content.document.permissionsPolicy.allowedFeatures().includes("vr"), "VR is not allowed");
+     });
+ 
+     next();
+@@ -342,46 +342,46 @@ function test_cross_iframe_contentDocument_no_allow() {
+ }
+ 
+ function test_cross_iframe_contentDocument_allow() {
+-  info("Checking cross iframe document.featurePolicy with allow");
++  info("Checking cross iframe document.permissionsPolicy with allow");
+ 
+   let ifr = document.createElement("iframe");
+   ifr.setAttribute("src", "https://example.org/tests/dom/security/featurePolicy/test/mochitest/empty.html");
+   ifr.setAttribute("allow", "geolocation; camera 'none'");
+   ifr.onload = async function() {
+     await SpecialPowers.spawn(ifr, [], () => {
+-      Assert.ok("featurePolicy" in this.content.document, "We have this.content.document.featurePolicy");
++      Assert.ok("permissionsPolicy" in this.content.document, "We have this.content.document.permissionsPolicy");
+ 
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("foobar"), "Random feature");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("foobar"), "Random feature");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("foobar", "https://www.something.net"), "Random feature");
+ 
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("camera"), "Camera is not allowed");
+-      let allowed = this.content.document.featurePolicy.getAllowlistForFeature("camera");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("camera"), "Camera is not allowed");
++      let allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("camera");
+       Assert.equal(allowed.length, 0, "Camera has an empty allowlist");
+ 
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("geolocation", "https://example.org"), "Geolocation is allowed for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
+-      allowed = this.content.document.featurePolicy.getAllowlistForFeature("geolocation");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("geolocation"), "Geolocation is allowed for self");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("geolocation", "https://example.org"), "Geolocation is allowed for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("geolocation", "https://foo.bar"), "Geolocation is not allowed for any random URL");
++      allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("geolocation");
+       Assert.equal(allowed.length, 1, "Only 1 entry in allowlist for geolocation");
+       Assert.equal(allowed[0], "https://example.org", "allowlist is '*'");
+ 
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("microphone"), "Microphone is enabled for self");
+-      Assert.ok(this.content.document.featurePolicy.allowsFeature("microphone", "https://example.org"), "Microphone is enabled for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
+-      allowed = this.content.document.featurePolicy.getAllowlistForFeature("microphone");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("microphone"), "Microphone is enabled for self");
++      Assert.ok(this.content.document.permissionsPolicy.allowsFeature("microphone", "https://example.org"), "Microphone is enabled for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("microphone", "https://foo.bar"), "Microphone is disabled for foo.bar");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("microphone", "https://example.com"), "Microphone is disabled for example.com");
++      allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("microphone");
+       Assert.equal(allowed.length, 1, "Only 1 entry in allowlist for microphone");
+       Assert.equal(allowed[0], "https://example.org", "allowlist is self");
+ 
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("vr"), "Vibrate is disabled for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("vr", "https://example.org"), "Vibrate is disabled for self");
+-      Assert.ok(!this.content.document.featurePolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
+-      allowed = this.content.document.featurePolicy.getAllowlistForFeature("vr");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("vr"), "Vibrate is disabled for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("vr", "https://example.org"), "Vibrate is disabled for self");
++      Assert.ok(!this.content.document.permissionsPolicy.allowsFeature("vr", "https://foo.bar"), "Vibrate is disabled for foo.bar");
++      allowed = this.content.document.permissionsPolicy.getAllowlistForFeature("vr");
+       Assert.equal(allowed.length, 0, "No allowlist for vr");
+ 
+-      Assert.ok(this.content.document.featurePolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed only for self");
++      Assert.ok(this.content.document.permissionsPolicy.allowedFeatures().includes("geolocation"), "Geolocation is allowed only for self");
+       // microphone is enabled for this origin
+-      Assert.ok(this.content.document.featurePolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
++      Assert.ok(this.content.document.permissionsPolicy.allowedFeatures().includes("microphone"), "microphone is allowed");
+     });
+ 
+     next();
+diff --git a/dom/security/featurepolicy/test/mochitest/test_parser.html^headers^ b/dom/security/featurepolicy/test/mochitest/test_parser.html^headers^
+index 949de013d3600f4483786cf63ac3bf6519617c61..982fa6f596cad1b9b95dc3c9b8844cf146d1671d 100644
+--- a/dom/security/featurepolicy/test/mochitest/test_parser.html^headers^
++++ b/dom/security/featurepolicy/test/mochitest/test_parser.html^headers^
+@@ -1 +1 @@
+-Feature-Policy: camera *; geolocation 'self'; microphone https://example.com https://example.org; vr 'none'
++Permissions-Policy: camera=*, geolocation=self, microphone=("https://example.com" "https://example.org"), vr=()
+diff --git a/dom/webauthn/tests/test_webauthn_crossorigin_featurepolicy.html b/dom/webauthn/tests/test_webauthn_crossorigin_featurepolicy.html
+index 6f7e11fb628af1349b49cc0bb7d9dcfa6811a60c..bcc1e68141188cc0bbc9207209324db98836ee4c 100644
+--- a/dom/webauthn/tests/test_webauthn_crossorigin_featurepolicy.html
++++ b/dom/webauthn/tests/test_webauthn_crossorigin_featurepolicy.html
+@@ -121,9 +121,9 @@
+       document.body.appendChild(iframe);
+       await new Promise(resolve => iframe.addEventListener("load", resolve, {once: true}));
+ 
+-      ok("featurePolicy" in iframe, "we have iframe.featurePolicy");
+-      ok(iframe.featurePolicy.allowsFeature("publickey-credentials-create"), "iframe allows publickey-credentials-create");
+-      ok(iframe.featurePolicy.allowsFeature("publickey-credentials-get"), "iframe allows publickey-credentials-get");
++      ok("permissionsPolicy" in iframe, "we have iframe.permissionsPolicy");
++      ok(iframe.permissionsPolicy.allowsFeature("publickey-credentials-create"), "iframe allows publickey-credentials-create");
++      ok(iframe.permissionsPolicy.allowsFeature("publickey-credentials-get"), "iframe allows publickey-credentials-get");
+ 
+       // We should be able to create a credential in a same-origin iframe by default.
+       is(gSameCredId, undefined);
+@@ -153,9 +153,9 @@
+       document.body.appendChild(iframe);
+       await new Promise(resolve => iframe.addEventListener("load", resolve, {once: true}));
+ 
+-      ok("featurePolicy" in iframe, "we have iframe.featurePolicy");
+-      ok(!iframe.featurePolicy.allowsFeature("publickey-credentials-create"), "iframe does not allow publickey-credentials-create");
+-      ok(!iframe.featurePolicy.allowsFeature("publickey-credentials-get"), "iframe does not allow publickey-credentials-get");
++      ok("permissionsPolicy" in iframe, "we have iframe.permissionsPolicy");
++      ok(!iframe.permissionsPolicy.allowsFeature("publickey-credentials-create"), "iframe does not allow publickey-credentials-create");
++      ok(!iframe.permissionsPolicy.allowsFeature("publickey-credentials-get"), "iframe does not allow publickey-credentials-get");
+ 
+       // We should not be able to create a credential in a same-origin iframe if
+       // the iframe does not allow publickey-credentials-create.
+@@ -180,9 +180,9 @@
+       document.body.appendChild(iframe);
+       await new Promise(resolve => iframe.addEventListener("load", resolve, {once: true}));
+ 
+-      ok("featurePolicy" in iframe, "we have iframe.featurePolicy");
+-      ok(iframe.featurePolicy.allowsFeature("publickey-credentials-create"), "iframe allows publickey-credentials-create");
+-      ok(iframe.featurePolicy.allowsFeature("publickey-credentials-get"), "iframe allows publickey-credentials-get");
++      ok("permissionsPolicy" in iframe, "we have iframe.permissionsPolicy");
++      ok(iframe.permissionsPolicy.allowsFeature("publickey-credentials-create"), "iframe allows publickey-credentials-create");
++      ok(iframe.permissionsPolicy.allowsFeature("publickey-credentials-get"), "iframe allows publickey-credentials-get");
+ 
+       // We should be able to create a credential in a same-origin iframe if
+       // the iframe allows publickey-credentials-create.
+@@ -213,9 +213,9 @@
+       document.body.appendChild(iframe);
+       await new Promise(resolve => iframe.addEventListener("load", resolve, {once: true}));
+ 
+-      ok("featurePolicy" in iframe, "we have iframe.featurePolicy");
+-      ok(!iframe.featurePolicy.allowsFeature("publickey-credentials-create"), "iframe does not allow publickey-credentials-create");
+-      ok(!iframe.featurePolicy.allowsFeature("publickey-credentials-get"), "iframe does not allow publickey-credentials-get");
++      ok("permissionsPolicy" in iframe, "we have iframe.permissionsPolicy");
++      ok(!iframe.permissionsPolicy.allowsFeature("publickey-credentials-create"), "iframe does not allow publickey-credentials-create");
++      ok(!iframe.permissionsPolicy.allowsFeature("publickey-credentials-get"), "iframe does not allow publickey-credentials-get");
+ 
+       // We should not be able to create a credential in a cross-origin iframe if
+       // the iframe does not allow publickey-credentials-create.
+@@ -240,9 +240,9 @@
+       document.body.appendChild(iframe);
+       await new Promise(resolve => iframe.addEventListener("load", resolve, {once: true}));
+ 
+-      ok("featurePolicy" in iframe, "we have iframe.featurePolicy");
+-      ok(iframe.featurePolicy.allowsFeature("publickey-credentials-create"), "iframe allows publickey-credentials-create");
+-      ok(!iframe.featurePolicy.allowsFeature("publickey-credentials-get"), "iframe does not allow publickey-credentials-get");
++      ok("permissionsPolicy" in iframe, "we have iframe.permissionsPolicy");
++      ok(iframe.permissionsPolicy.allowsFeature("publickey-credentials-create"), "iframe allows publickey-credentials-create");
++      ok(!iframe.permissionsPolicy.allowsFeature("publickey-credentials-get"), "iframe does not allow publickey-credentials-get");
+ 
+       // We should be able to create a credential in a cross-origin iframe if
+       // the iframe allows publickey-credentials-create.
+@@ -266,9 +266,9 @@
+       document.body.appendChild(iframe);
+       await new Promise(resolve => iframe.addEventListener("load", resolve, {once: true}));
+ 
+-      ok("featurePolicy" in iframe, "we have iframe.featurePolicy");
+-      ok(!iframe.featurePolicy.allowsFeature("publickey-credentials-create"), "iframe does not publickey-credentials-create");
+-      ok(iframe.featurePolicy.allowsFeature("publickey-credentials-get"), "iframe allows publickey-credentials-get");
++      ok("permissionsPolicy" in iframe, "we have iframe.permissionsPolicy");
++      ok(!iframe.permissionsPolicy.allowsFeature("publickey-credentials-create"), "iframe does not publickey-credentials-create");
++      ok(iframe.permissionsPolicy.allowsFeature("publickey-credentials-get"), "iframe allows publickey-credentials-get");
+ 
+       // We should not be able to create a credential in a cross-origin iframe if
+       // the iframe does not allow publickey-credentials-create.
+diff --git a/dom/webidl/Document.webidl b/dom/webidl/Document.webidl
+index 944864e0b28ac2dffa3a334d317d3b1266d9a05c..1132a2186111903dfb2d6bc9435d609f88308085 100644
+--- a/dom/webidl/Document.webidl
++++ b/dom/webidl/Document.webidl
+@@ -619,10 +619,10 @@ Document includes GeometryUtils;
+ Document includes FontFaceSource;
+ Document includes DocumentOrShadowRoot;
+ 
+-// https://w3c.github.io/webappsec-feature-policy/#idl-index
++// https://w3c.github.io/webappsec-permissions-policy/#policy-introspection-from-scripts
+ partial interface Document {
+-    [SameObject, Pref="dom.security.featurePolicy.webidl.enabled"]
+-    readonly attribute FeaturePolicy featurePolicy;
++    [SameObject, Pref="dom.security.featurePolicy.webidl.enabled", BinaryName="FeaturePolicy"]
++    readonly attribute PermissionsPolicy permissionsPolicy;
+ };
+ 
+ // Extension to give chrome JS the ability to specify a non-default keypress
+diff --git a/dom/webidl/FeaturePolicy.webidl b/dom/webidl/FeaturePolicy.webidl
+index cc5f67f230f80f004f7dcb0fc14ad5246070b527..0f7a0494567ae3dc5ffc6af7b8d3342555ef4457 100644
+--- a/dom/webidl/FeaturePolicy.webidl
++++ b/dom/webidl/FeaturePolicy.webidl
+@@ -3,12 +3,11 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+  *
+  * For more information on this interface, please see
+- * https://w3c.github.io/webappsec-feature-policy/#idl-index
++ * https://w3c.github.io/webappsec-permissions-policy/#policy-introspection-from-scripts
+  */
+ 
+-[LegacyNoInterfaceObject,
+- Exposed=Window]
+-interface FeaturePolicy {
++[Exposed=Window]
++interface PermissionsPolicy {
+   boolean allowsFeature(DOMString feature, optional DOMString origin);
+   sequence<DOMString> features();
+   sequence<DOMString> allowedFeatures();
+diff --git a/dom/webidl/HTMLIFrameElement.webidl b/dom/webidl/HTMLIFrameElement.webidl
+index 1b540b3d3c8cefe057560ee7e16969fc11949b2d..53822f1c03cad6d51aeaf409c19ccfe0403520d4 100644
+--- a/dom/webidl/HTMLIFrameElement.webidl
++++ b/dom/webidl/HTMLIFrameElement.webidl
+@@ -64,10 +64,10 @@ partial interface HTMLIFrameElement {
+ 
+ HTMLIFrameElement includes MozFrameLoaderOwner;
+ 
+-// https://w3c.github.io/webappsec-feature-policy/#idl-index
++// https://w3c.github.io/webappsec-permissions-policy/#policy-introspection-from-scripts
+ partial interface HTMLIFrameElement {
+-  [SameObject, Pref="dom.security.featurePolicy.webidl.enabled"]
+-  readonly attribute FeaturePolicy featurePolicy;
++  [SameObject, Pref="dom.security.featurePolicy.webidl.enabled", BinaryName="FeaturePolicy"]
++  readonly attribute PermissionsPolicy permissionsPolicy;
+ 
+   [CEReactions, SetterThrows, Pure]
+            attribute DOMString allow;
+diff --git a/dom/xhr/XMLHttpRequestMainThread.cpp b/dom/xhr/XMLHttpRequestMainThread.cpp
+index d9e123e3e191783356af91805910d260ae909e77..465b5681be4dc98c6efa6b79af8493901ff8bee2 100644
+--- a/dom/xhr/XMLHttpRequestMainThread.cpp
++++ b/dom/xhr/XMLHttpRequestMainThread.cpp
+@@ -42,6 +42,7 @@
+ #include "mozilla/dom/DOMString.h"
+ #include "mozilla/dom/DocGroup.h"
+ #include "mozilla/dom/FetchUtil.h"
++#include "mozilla/dom/FeaturePolicyUtils.h"
+ #include "mozilla/dom/File.h"
+ #include "mozilla/dom/FileBinding.h"
+ #include "mozilla/dom/FileCreatorHelper.h"
+@@ -3090,6 +3091,18 @@ bool XMLHttpRequestMainThread::CanSend(ErrorResult& aRv) {
+     return false;
+   }
+ 
++  // Synchronous XHR is a policy-controlled feature in Window contexts.  Fail
++  // send(), matching the API's normal synchronous network-error surface.
++  if (mFlagSynchronous) {
++    RefPtr<Document> responsibleDocument = GetDocumentIfCurrent();
++    if (responsibleDocument &&
++        !FeaturePolicyUtils::IsFeatureAllowed(responsibleDocument,
++                                              u"sync-xhr"_ns)) {
++      aRv.Throw(NS_ERROR_DOM_NETWORK_ERR);
++      return false;
++    }
++  }
++
+   // Backstop against late workers.
+   if (AppShutdown::IsInOrBeyond(ShutdownPhase::XPCOMShutdownThreads)) {
+     aRv.Throw(NS_ERROR_ILLEGAL_DURING_SHUTDOWN);
+diff --git a/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-host-wildcard.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-host-wildcard.https.sub.html.ini
+deleted file mode 100644
+index a4ac4be965ea62d238f04d99c41d6f250d8e6245..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-host-wildcard.https.sub.html.ini
++++ /dev/null
+@@ -1,3 +0,0 @@
+-[permissions-policy-header-host-wildcard.https.sub.html]
+-  [Test wildcard host policy works as expected]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-port-wildcard.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-port-wildcard.https.sub.html.ini
+deleted file mode 100644
+index a4fd27d1e90fcfdb397cb1f9e7fb5263f5dd5abf..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-port-wildcard.https.sub.html.ini
++++ /dev/null
+@@ -1,3 +0,0 @@
+-[permissions-policy-header-port-wildcard.https.sub.html]
+-  [Test wildcard port policy works as expected]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-scheme-only.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-scheme-only.https.sub.html.ini
+deleted file mode 100644
+index bc29f82d254dede045308a5ad969aa7c34a7e189..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/experimental-features/permissions-policy-header-scheme-only.https.sub.html.ini
++++ /dev/null
+@@ -1,3 +0,0 @@
+-[permissions-policy-header-scheme-only.https.sub.html]
+-  [Test scheme only policy works as expected]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/historical.html.ini b/testing/web-platform/meta/permissions-policy/historical.html.ini
+deleted file mode 100644
+index ac41b3df515c83528b2560ced9c73ea5d86b814d..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/historical.html.ini
++++ /dev/null
+@@ -1,3 +0,0 @@
+-[historical.html]
+-  [iframe allow attribute blocks features using Permissions Policy syntax]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/idlharness.window.js.ini b/testing/web-platform/meta/permissions-policy/idlharness.window.js.ini
+deleted file mode 100644
+index af7a6da15a7c8f32802643f909d7160e11703047..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/idlharness.window.js.ini
++++ /dev/null
+@@ -1,66 +0,0 @@
+-[idlharness.window.html]
+-  [PermissionsPolicy must be primary interface of document.permissionsPolicy]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface object name]
+-    expected: FAIL
+-
+-  [Document interface: document must inherit property "permissionsPolicy" with the proper type]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: operation allowedFeatures()]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: document.permissionsPolicy must inherit property "getAllowlistForFeature(DOMString)" with the proper type]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: operation features()]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: operation allowsFeature(DOMString, optional DOMString)]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: document.permissionsPolicy must inherit property "allowsFeature(DOMString, optional DOMString)" with the proper type]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: existence and properties of interface object]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: operation getAllowlistForFeature(DOMString)]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: calling getAllowlistForFeature(DOMString) on document.permissionsPolicy with too few arguments must throw TypeError]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: existence and properties of interface prototype object's "constructor" property]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: document.permissionsPolicy must inherit property "allowedFeatures()" with the proper type]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: existence and properties of interface prototype object's @@unscopables property]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: existence and properties of interface prototype object]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface object length]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: calling allowsFeature(DOMString, optional DOMString) on document.permissionsPolicy with too few arguments must throw TypeError]
+-    expected: FAIL
+-
+-  [HTMLIFrameElement interface: attribute permissionsPolicy]
+-    expected: FAIL
+-
+-  [PermissionsPolicy interface: document.permissionsPolicy must inherit property "features()" with the proper type]
+-    expected: FAIL
+-
+-  [Stringification of document.permissionsPolicy]
+-    expected: FAIL
+-
+-  [Document interface: attribute permissionsPolicy]
+-    expected: FAIL
+-
+-  [HTMLIFrameElement interface: document.createElement("iframe") must inherit property "permissionsPolicy" with the proper type]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-all.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-all.https.sub.html.ini
+deleted file mode 100644
+index a71934159141a49a5bec58373b2521ffc491b794..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-all.https.sub.html.ini
++++ /dev/null
+@@ -1,234 +0,0 @@
+-[permissions-policy-frame-policy-allowed-for-all.https.sub.html]
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc+ same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc+ cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe does not inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe does not inherit from header policy.]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-self.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-self.https.sub.html.ini
+deleted file mode 100644
+index 168a3bb520d156c3653d1420e9d72fc9bd00a73c..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-self.https.sub.html.ini
++++ /dev/null
+@@ -1,260 +0,0 @@
+-[permissions-policy-frame-policy-allowed-for-self.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin sandboxed iframe with allow="fullscreen".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on sandboxed iframe with no allow attribute.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on sandboxed srcdoc iframe with allow="fullscreen https://www.web-platform.test:8443".]
+-    expected: FAIL
+-
+-  [Test frame policy on sandboxed iframe with allow="fullscreen".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on sandboxed iframe with allow="fullscreen 'src'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on sandboxed iframe with allow="fullscreen https://www.web-platform.test:8443".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc sandboxed iframe with allow="fullscreen".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin sandboxed iframe with allow="fullscreen".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-some-override.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-some-override.https.sub.html.ini
+deleted file mode 100644
+index 86702136f8b08bccbe2477598337506316dd8bdd..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-some-override.https.sub.html.ini
++++ /dev/null
+@@ -1,97 +0,0 @@
+-[permissions-policy-frame-policy-allowed-for-some-override.https.sub.html]
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-some.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-some.https.sub.html.ini
+deleted file mode 100644
+index 08915a24b4be4ecd0e591cda8e5fe6ce28bd183e..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-allowed-for-some.https.sub.html.ini
++++ /dev/null
+@@ -1,230 +0,0 @@
+-[permissions-policy-frame-policy-allowed-for-some.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-  [Test frame policy on another cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + another cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on another cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-disallowed-for-all.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-disallowed-for-all.https.sub.html.ini
+deleted file mode 100644
+index bb2a2465af52a5d99b9e9913a2668011444270d4..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-frame-policy-disallowed-for-all.https.sub.html.ini
++++ /dev/null
+@@ -1,235 +0,0 @@
+-[permissions-policy-frame-policy-disallowed-for-all.https.sub.html]
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "*" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=self;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'none'".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'none'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=();".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com".]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe with allow = "*" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + cross origin iframe inherit from header policy.]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self' https://www.web-platform.test:8443 https://www.example.com" and allowfullscreen.]
+-    expected: FAIL
+-
+-  [Test frame policy on srcdoc + same origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+-  [Test frame policy on data: URL cross origin iframe with allow = "*".]
+-    expected: FAIL
+-
+-  [Test frame policy on same origin iframe with allow = "'self'" and header policy = "Permissions-Policy: fullscreen=*;".]
+-    expected: FAIL
+-
+-  [Test frame policy on cross origin iframe with allow = "'self'".]
+-    expected: FAIL
+-
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-all.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-all.https.sub.html.ini
+deleted file mode 100644
+index 568a5c53fbf20c4fc0b7c66730b4af89ac2dca4d..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-all.https.sub.html.ini
++++ /dev/null
+@@ -1,24 +0,0 @@
+-[permissions-policy-header-policy-allowed-for-all.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Permissions-Policy: fullscreen=*, iframe.allow = fullscreen 'self'; -- test fullscreen is allowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=*, iframe.allow = fullscreen 'self'; -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=*NaN]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=* -- test fullscreen is allowed on same-origin subframe]
+-    expected: TIMEOUT
+-
+-  [Permissions-Policy: fullscreen=* -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=*, iframe.allow = fullscreen 'src'; -- test fullscreen is allowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=*, iframe.allow = fullscreen 'src'; -- test fullscreen is allowed on cross-origin subframe]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-malformed-wildcard.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-malformed-wildcard.https.sub.html.ini
+deleted file mode 100644
+index d9ec19fe7090463e87337f480d712ff08c35e15b..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-malformed-wildcard.https.sub.html.ini
++++ /dev/null
+@@ -1,22 +0,0 @@
+-[permissions-policy-header-policy-allowed-for-malformed-wildcard.https.sub.html]
+-  expected: TIMEOUT
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test allowlist lists all the malformed wildcards and self.]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test fullscreen is allowed on same-origin subframe]
+-    expected: TIMEOUT
+-
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test fullscreen is allowed on same-origin subframe with allow attribute]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test fullscreen is disallowed on cross-origin subframe allow attribute]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test fullscreen is disallowed on another cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("$MALFORMED_WILDCARD_ORIGINS self") -- test fullscreen is disallowed on another cross-origin subframe allow attribute]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-self.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-self.https.sub.html.ini
+deleted file mode 100644
+index 4146209bf34a385236fcfd6ba0eaec3fe41bd270..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-self.https.sub.html.ini
++++ /dev/null
+@@ -1,16 +0,0 @@
+-[permissions-policy-header-policy-allowed-for-self.https.sub.html]
+-  expected: TIMEOUT
+-  [Permissions-Policy: fullscreen=self, iframe.allow = fullscreen 'src'; -- test fullscreen is allowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=self -- test fullscreen is allowed on same-origin subframe]
+-    expected: TIMEOUT
+-
+-  [Permissions-Policy: fullscreen=self -- test allowlist is [same_origin\]]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=self -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=self, iframe.allow = fullscreen 'src'; -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-some.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-some.https.sub.html.ini
+deleted file mode 100644
+index 560c1fd5fa779ba4544b79e2029202d628c721bf..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-some.https.sub.html.ini
++++ /dev/null
+@@ -1,31 +0,0 @@
+-[permissions-policy-header-policy-allowed-for-some.https.sub.html]
+-  expected: TIMEOUT
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com") -- test fullscreen is allowed on same-origin subframe]
+-    expected: TIMEOUT
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com")iframe.allow = fullscreen 'none'; -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com") -- test fullscreen is disallowed on cross-origin https://www1.web-platform.test:8443/permissions-policy/resources/permissions-policy-allowedfeatures.html subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"), iframe.allow = fullscreen 'none'; -- test fullscreen is disallowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com") -- test allowlist is [same_origin, cross_origin, https://www.example.com\]]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com") -- test fullscreen is disallowed on cross-origin https://www.web-platform.test:8443/permissions-policy/resources/permissions-policy-allowedfeatures.html subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com")iframe.allow = fullscreen 'none'; -- test fullscreen is disallowed on another cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"), iframe.allow = fullscreen 'src'; -- test fullscreen is allowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com")iframe.allow = fullscreen 'src'; -- test fullscreen is allowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"), iframe.allow = fullscreen 'src'; -- test fullscreen is disallowed on another cross-origin subframe]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-wildcard.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-wildcard.https.sub.html.ini
+deleted file mode 100644
+index 36b4a68c762ecfdba9ee1ce80d57ef4e567e021a..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-allowed-for-wildcard.https.sub.html.ini
++++ /dev/null
+@@ -1,30 +0,0 @@
+-[permissions-policy-header-policy-allowed-for-wildcard.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test allowlist is [self wildcard_origin\].]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is allowed on same-origin subframe]
+-    expected: TIMEOUT
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is allowed on same-origin subframe even with allow attribute]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is allowed on cross-origin subframe allow attribute]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is disallowed on another cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is allowed on another cross-origin subframe allow attribute]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is disallowed on cross-origin subframe with wildcard allow attribute]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=("https://*.web-platform.test:8443") -- test fullscreen is disallowed on another cross-origin subframe with wildcard allow attribute]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-declined.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-declined.https.sub.html.ini
+deleted file mode 100644
+index ef8c69da932046c0889b43810c032342067b146d..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-declined.https.sub.html.ini
++++ /dev/null
+@@ -1,33 +0,0 @@
+-[permissions-policy-header-policy-declined.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com" -- test allowlist is [cross_origin, https://www.example.com\]]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com" -- test fullscreen is disallowed on cross-origin https://www1.web-platform.test:8443/permissions-policy/resources/permissions-policy-allowedfeatures.html subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com", iframe.allow = fullscreen https://www.web-platform.test:8443 -- test fullscreen is disallowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com", iframe.allow = fullscreen 'none'; -- test fullscreen is disallowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com" -- test fullscreen is disallowed on same-origin subframe]
+-    expected: TIMEOUT
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com" -- test fullscreen is disallowed on cross-origin https://www.web-platform.test:8443/permissions-policy/resources/permissions-policy-allowedfeatures.html subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"iframe.allow = fullscreen 'none'; -- test fullscreen is disallowed on specific cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"iframe.allow = fullscreen 'none'; -- test fullscreen is disallowed on another cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"iframe.allow = fullscreen https://www.web-platform.test:8443 -- test fullscreen is disallowed on specific cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(self "https://www.web-platform.test:8443" "https://www.example.com"iframe.allow = fullscreen https://www.web-platform.test:8443 -- test fullscreen is disallowed on another cross-origin subframe]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-disallowed-for-all.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-disallowed-for-all.https.sub.html.ini
+deleted file mode 100644
+index f0112ad284a4f874fe8dc8b40d3b5f62afa85dee..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-header-policy-disallowed-for-all.https.sub.html.ini
++++ /dev/null
+@@ -1,18 +0,0 @@
+-[permissions-policy-header-policy-disallowed-for-all.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Permissions-Policy: fullscreen=(), iframe.allow = fullscreen 'src'; -- test fullscreen is disallowed on same-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=(), iframe.allow = fullscreen 'src'; -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=() -- test allowlist is [\]]
+-    expected: FAIL
+-
+-  [Permissions-Policy: fullscreen=() -- test fullscreen is disallowed on cross-origin subframe]
+-    expected: NOTRUN
+-
+-  [Permissions-Policy: fullscreen=() -- test fullscreen is disallowed on same-origin subframe]
+-    expected: TIMEOUT
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-allowed-for-all.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-allowed-for-all.https.sub.html.ini
+deleted file mode 100644
+index 9cb63eff5991e27f229b5634eabd550dad275516..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-allowed-for-all.https.sub.html.ini
++++ /dev/null
+@@ -1,21 +0,0 @@
+-[permissions-policy-nested-header-policy-allowed-for-all.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Test nested header policy with remote iframe on policy "fullscreen=*"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with remote iframe on policy "fullscreen=self"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with remote iframe on policy "fullscreen=()"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=()"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=self]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=*"]
+-    expected: TIMEOUT
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-allowed-for-self.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-allowed-for-self.https.sub.html.ini
+deleted file mode 100644
+index 309e935422f32e25f78bf37aa9b36c81ae0df5c1..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-allowed-for-self.https.sub.html.ini
++++ /dev/null
+@@ -1,21 +0,0 @@
+-[permissions-policy-nested-header-policy-allowed-for-self.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Test nested header policy with remote iframe on policy "fullscreen=*"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with remote iframe on policy "fullscreen=self"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with remote iframe on policy "fullscreen=()"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=()"]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=*"]
+-    expected: TIMEOUT
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=self"]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-disallowed-for-all.https.sub.html.ini b/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-disallowed-for-all.https.sub.html.ini
+deleted file mode 100644
+index 57bf6607fceefb17559364126f650ea78cdf47a9..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/permissions-policy/permissions-policy-nested-header-policy-disallowed-for-all.https.sub.html.ini
++++ /dev/null
+@@ -1,21 +0,0 @@
+-[permissions-policy-nested-header-policy-disallowed-for-all.https.sub.html]
+-  expected:
+-    if (os == "android") and fission: [OK, TIMEOUT]
+-    TIMEOUT
+-  [Test nested header policy with remote iframe on policy "fullscreen=self".]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with remote iframe on policy "fullscreen=\\(\\)".]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=\\(\\)".]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=self".]
+-    expected: NOTRUN
+-
+-  [Test nested header policy with local iframe on policy "fullscreen=*".]
+-    expected: TIMEOUT
+-
+-  [Test nested header policy with remote iframe on policy "fullscreen=*".]
+-    expected: NOTRUN
+diff --git a/testing/web-platform/meta/xhr/sync-xhr-supported-by-permissions-policy.tentative.html.ini b/testing/web-platform/meta/xhr/sync-xhr-supported-by-permissions-policy.tentative.html.ini
+deleted file mode 100644
+index 0a17458531a1c0797f82e4c89337c95e98cdfe20..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/xhr/sync-xhr-supported-by-permissions-policy.tentative.html.ini
++++ /dev/null
+@@ -1,3 +0,0 @@
+-[sync-xhr-supported-by-permissions-policy.tentative.html]
+-  [document.permissionsPolicy.features should advertise sync-xhr.]
+-    expected: FAIL
+diff --git a/testing/web-platform/meta/xhr/xmlhttprequest-sync-default-permissions-policy.tentative.sub.html.ini b/testing/web-platform/meta/xhr/xmlhttprequest-sync-default-permissions-policy.tentative.sub.html.ini
+deleted file mode 100644
+index 18003d4fb049573b9cd5e46373859bfd4e5cccdc..0000000000000000000000000000000000000000
+--- a/testing/web-platform/meta/xhr/xmlhttprequest-sync-default-permissions-policy.tentative.sub.html.ini
++++ /dev/null
+@@ -1,6 +0,0 @@
+-[xmlhttprequest-sync-default-permissions-policy.tentative.sub.html]
+-  [permissions policy "sync-xhr" can be disabled in cross-origin iframes using "allow" attribute.]
+-    expected: FAIL
+-
+-  [permissions policy "sync-xhr" can be disabled in same-origin iframes using "allow" attribute.]
+-    expected: FAIL

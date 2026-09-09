@@ -1,0 +1,35 @@
+diff --git a/toolkit/library/rust/shared/Cargo.toml b/toolkit/library/rust/shared/Cargo.toml
+index 7641698a75998c96138874aac47cce18370cb583..173efa2d97d6540de3ccc17a9aacb5df5d9535e3 100644
+--- a/toolkit/library/rust/shared/Cargo.toml
++++ b/toolkit/library/rust/shared/Cargo.toml
+@@ -35,7 +35,8 @@ authrs_bridge = { path = "../../../../dom/webauthn/authrs_bridge" }
+ gkrust_utils = { path = "../../../../xpcom/rust/gkrust_utils" }
+ gecko_logger = { path = "../../../../xpcom/rust/gecko_logger" }
+ gecko_tracing = { path = "../../../../xpcom/rust/gecko_tracing" }
+-rsdparsa_capi = { path = "../../../../dom/media/webrtc/sdp/rsdparsa_capi" }
++navis-core-ffi = { path = "../../../../navis-core/rust/ffi", optional = true }
++rsdparsa_capi = { path = "../../../../dom/media/webrtc/sdp/rsdparsa_capi", optional = true }
+ # We have these to enforce common feature sets for said crates.
+ log = {version = "0.4", features = ["release_max_level_info"]}
+ cose-c = { version = "0.1.5" }
+@@ -163,7 +164,7 @@ moz_places = ["bookmark_sync"]
+ spidermonkey_rust = []
+ gecko_profiler_parse_elf = ["profiler_helper/parse_elf"]
+ libfuzzer = ["authrs_bridge/fuzzing"]
+-webrtc = ["mdns_service"]
++webrtc = ["mdns_service", "rsdparsa_capi"]
+ glean_disable_upload = ["fog_control/disable_upload"]
+ glean_with_gecko = ["fog_control/with_gecko", "jog/with_gecko"]
+ oxidized_breakpad = ["rust_minidump_writer_linux"]
+diff --git a/toolkit/library/rust/shared/lib.rs b/toolkit/library/rust/shared/lib.rs
+index 51afae845faf059fdcd4fd0c1a1811da40543781..178f56d1274f1ace583dffeeac525e2b02b31461 100644
+--- a/toolkit/library/rust/shared/lib.rs
++++ b/toolkit/library/rust/shared/lib.rs
+@@ -49,6 +49,7 @@ extern crate nsstring;
+ extern crate prefs_parser;
+ extern crate processtools;
+ extern crate profiler_helper;
++#[cfg(feature = "webrtc")]
+ extern crate rsdparsa_capi;
+ extern crate signature_cache;
+ extern crate static_prefs;

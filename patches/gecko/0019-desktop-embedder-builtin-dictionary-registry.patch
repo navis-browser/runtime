@@ -1,0 +1,41 @@
+diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+index 30a562c6237d733ced52e4379ae315afb6a6c4e6..5b4b2d5e5f96a7d8d1074c35096f36921ace2a2e 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+@@ -85,7 +85,9 @@ const PREF_APPLICATION_BUILTIN_IDS =
+   "extensions.applicationBuiltins.allowedIds";
+ 
+ // Specify a list of valid built-in add-ons to load.
+-const BUILT_IN_ADDONS_URI = "chrome://browser/content/built_in_addons.json";
++const BUILT_IN_ADDONS_URI = AppConstants.MOZ_DESKTOP_EMBEDDER
++  ? "resource://gre/modules/built_in_addons.json"
++  : "chrome://browser/content/built_in_addons.json";
+ 
+ const DIR_EXTENSIONS = "extensions";
+ const DIR_SYSTEM_ADDONS = "features";
+diff --git a/toolkit/mozapps/extensions/moz.build b/toolkit/mozapps/extensions/moz.build
+index 2d7103499c5d26578ad774da1725a3e801b1cd04..054110775bb2d62f51e7fb558fd759b463ff268f 100644
+--- a/toolkit/mozapps/extensions/moz.build
++++ b/toolkit/mozapps/extensions/moz.build
+@@ -47,10 +47,17 @@ if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
+             "--builtin-addons=chrome/messenger/builtin-addons",
+         ]
+ 
+-    # NOTE: used by Thunderbird to auto-install the default en-US dictionary.
+-    FINAL_TARGET_FILES.chrome.browser.content += [
+-        "!%s" % built_in_addons,
+-    ]
++        FINAL_TARGET_FILES.chrome.browser.content += [
++            "!%s" % built_in_addons,
++        ]
++    elif CONFIG["MOZ_DESKTOP_EMBEDDER"]:
++        # Desktop embedders do not own Firefox's chrome://browser package.
++        # Keep the generated dictionary registry in the resource-visible
++        # modules directory so both unpacked builds and packaged OmniJars can
++        # resolve it through resource://gre.
++        FINAL_TARGET_FILES.modules += [
++            "!%s" % built_in_addons,
++        ]
+ 
+ EXTRA_PP_COMPONENTS += [
+     "extensions.manifest",
