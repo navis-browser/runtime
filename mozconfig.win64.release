@@ -27,6 +27,7 @@ ac_add_options --disable-cargo-incremental
 ac_add_options --with-ccache=sccache
 ac_add_options --target=x86_64-pc-windows-msvc
 ac_add_options --enable-bootstrap
+ac_add_options --with-redist
 
 mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-navis-win64-release
 # Candidate builds must fail for an explicit clobber decision instead of
