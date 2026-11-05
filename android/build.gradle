@@ -210,6 +210,7 @@ tasks.named('preBuild').configure {
 }
 
 dependencies {
+    testImplementation libs.junit4
     implementation libs.androidx.annotation
     implementation libs.androidx.annotation.experimental
     implementation libs.androidx.collection

@@ -18,7 +18,6 @@ org/mozilla/geckoview/CrashReport.java
 org/mozilla/geckoview/GeckoInputStream.java
 org/mozilla/geckoview/GeckoResult.java
 org/mozilla/geckoview/GeckoViewInputStream.java
-org/mozilla/geckoview/GeckoVRManager.java
 org/mozilla/geckoview/Image.java
 org/mozilla/geckoview/NavisAndroidAccessibility.java
 org/mozilla/geckoview/NavisAndroidWebExecutor.java

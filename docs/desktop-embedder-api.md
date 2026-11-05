@@ -1,6 +1,6 @@
 # Desktop embedder API
 
-Source API version: 2; native ABI remains out of scope Version scope: Firefox ESR 153.1 Module: `resource://gre/modules/DesktopEngine.sys.mjs`
+Source API version: 2; native ABI remains out of scope Version scope: Firefox ESR 153.6.0 Module: `resource://gre/modules/DesktopEngine.sys.mjs`
 
 The source API is privileged JavaScript compiled with a pinned Gecko source dependency. It is not a stable native ABI or a promise of source compatibility with another ESR.
 
@@ -27,7 +27,7 @@ Products use `ChromeUtils.importESModule` because this module belongs to Gecko's
 
 ## `EngineRuntime`
 
-Construction takes no arguments. Runtime is a process-level owner and captures neither a chrome window nor a product View factory. A window enters the Runtime only when a product explicitly supplies one of its Views to `createSession()`.
+Construction takes no arguments. Runtime is a process-level owner and captures neither a chrome window nor a product View factory. A window enters the Runtime only when a product explicitly supplies one of its Views to `createSession()` or `adoptInitialSession()`.
 
 Public state and operations:
 
@@ -37,6 +37,7 @@ Public state and operations:
 - `ready`, which resolves after the profile and application built-ins are ready;
 - `downloads`, an immutable array of projected download states;
 - `createSession({ view, delegates?, privateMode? })`;
+- `adoptInitialSession({ view, delegates? })`;
 - `activateSession(session)`;
 - `close()`;
 - `getWindowState(window)` and `openPlatformWindow({ ownerWindow, uri, privateMode? })`;
@@ -48,6 +49,7 @@ Public state and operations:
 - `listBookmarks()`, `createBookmark()`, `updateBookmark()`, `moveBookmark()`, and `removeBookmark()`;
 - `listCredentials()`, `saveCredential()`, `revealCredential()`, `removeCredential()`, and `clearCredentials()`;
 - `setCredentialReauthenticationPresentation({ reason, caption })`;
+- `configurePrinting({ ownerWindow, styleSheets? })` supplies bounded packaged presentation styles before a print dialog opens;
 - `loadSessionState()` and `saveSessionState()`;
 - `clearSiteData()`;
 - `measureSessionMemoryUsage(session)`;
@@ -57,6 +59,8 @@ Public state and operations:
 - `getExtensionInventory()` for the general extension-manager projection.
 
 `setSessionDelegateFactory()` must run before the first session is created. It is the normal way to ensure that sessions created by Gecko popup/new-window requests receive the same delegates as product-created sessions. A product can instead pass a `content`, `permission`, `prompt`, `media`, and/or `crash` delegate bag to one `createSession()` call. Delegate installation completes before the backing remote browser is created.
+
+`adoptInitialSession()` is the startup path for a native content-created window. It returns a normal Session for the exact initial document already selected by Gecko, or `null` when the host has no pending content. Call it before creating any other Session in that host and before the chrome document finishes loading: native creation checks for initial content at that point. A module bootstrap must retain startup in its static dependency graph instead of leaving a detached dynamic import to complete after `load`. Make the initial View visible and activate the returned Session before awaiting `runtime.ready`; profile-dependent presentation can follow readiness, and closing the host during that wait must close its Runtime. It uses the same delegate factory and View/Core ownership as `createSession()`, preserves the native opener and origin attributes, and does not load a replacement URL. The caller adopts the returned Session without calling `open()` or restoring saved tabs; ordinary startup can reuse the unbound View when the result is `null`. Native actor adoption is attempted once per host, including failures and reentrant callbacks. Failure closes the partially created Session and never permits actor reuse. The native open-window descriptor remains private to Runtime.
 
 Every Session initially requires an explicit, currently unbound `EngineView`. Reusing a View that is still owned by another Session is rejected. A live Session can later detach from that View and attach to another one. Active Session state is tracked per chrome window and follows a cross-window attachment, so two windows can each have an active remote browser without deactivating one another.
 
@@ -70,7 +74,7 @@ The runtime owns global browser-window integration and Toolkit download observat
 
 The general extension manager remains authoritative. Runtime exposes frozen inventory/action/page-action state and generic commands to Platform without placing extension state in the public Rust Core. Built-ins use the same action, popup, options and lifecycle APIs as user extensions; no per-extension private adapter is part of this API.
 
-`capabilities` is a frozen build-fact object. It currently exposes Boolean `builtInExtensions`, `developerTools`, `jpegXL`, `mediaCapture`, `peerConnection`, `passwordManager`, `persistentData`, and `privateBrowsing` fields. `passwordManager` reports the Navis-owned local credential contract; it does not mean that Firefox Login Manager is present. The ESR 153 default general-browsing profile reports all three as true. Upstream ESR 140 release builds compile JPEG XL out and therefore report `jpegXL: false` while retaining the two WebRTC facts. The experimental no-WebRTC profile on ESR 153 retains JPEG XL while reporting the latter two as false, omitting its capture/PeerConnection actors, and locking off Gecko's otherwise exposed but nonfunctional `mediaDevices` entry point. The controlled-content profile reports all three as false. `jpegXL` means that the decoder is compiled in; a product preference can still leave that compiled capability dormant. Products use these facts to install or present optional policy surfaces without probing Gecko implementation objects.
+`capabilities` is a frozen build-fact object. It currently exposes Boolean `builtInExtensions`, `developerTools`, `jpegXL`, `mediaCapture`, `peerConnection`, `passwordManager`, `persistentData`, and `privateBrowsing` fields. `passwordManager` reports the Navis-owned local credential contract; it does not mean that Firefox Login Manager is present. The maintained general-browsing profile retains WebRTC and camera/microphone capture and reports both graphs as true. Web Push is excluded from the Navis runtime graph. `jpegXL` means that the decoder is compiled in; a product preference can still leave that compiled capability dormant. Products use these facts to install or present optional policy surfaces without probing Gecko implementation objects.
 
 ### Page developer tools
 
@@ -249,7 +253,7 @@ session.setContentDelegate({
 });
 ```
 
-`onStateChanged()` receives the same frozen session projection returned by `session.state`: URL, title, loading, security, back/forward availability, crash/closed state, the current permission or prompt descriptor, and nested frozen media state. It is the primary product presentation input. Installing a delegate does not replay state synchronously; products should read `session.state` for an initial snapshot and install delegates before `open()`.
+`onStateChanged()` receives the same frozen session projection returned by `session.state`: URL, title, loading, security, back/forward availability, crash/closed state, current permission or prompt descriptor, and frozen `media` recording state. Camera/microphone indicators follow actual frame-owned capture, including acknowledged stop and teardown. It is the primary product presentation input. Installing a delegate does not replay state synchronously; products should read `session.state` for an initial snapshot and install delegates before `open()`.
 
 ## `ContextMenuDelegate`
 
@@ -269,6 +273,10 @@ session.setContextMenuDelegate({
 
 The content actor retains the target privately. The product chooses an offered and enabled item through `executeContextMenuCommand()` or closes the request through `dismissContextMenu()`. A newer menu, navigation, crash, browser/View replacement or Session close invalidates the old request; stale IDs and disabled/unoffered commands return `false`. `onDismissed()` is optional and contains only `id`, `sessionId` and a bounded reason. DOM targets, actors, browsing contexts, principals and clipboard services never cross this public contract. Spell replacement follows the same token and navigation checks and executes in the originating content process through Gecko's editor.
 
+Address commands use the URL captured when the menu opened and the originating document. Hiding, removing or adopting the original element does not invalidate an offered Open in New Tab or Copy Address command. Element mutations still require the live target in its original document. A browser-owned context menu retains the page's mouse/pointer hover for its entire open lifetime, including movement outside the popup back over content. Closing or cancelling releases deferred exits before restoring the latest real pointer target, including its precise cross-process subframe, and requesting native pointer hit testing. A later real exit discards an obsolete move; synthetic moves cannot replace the held physical position. Other chrome windows and ordinary page input remain unaffected.
+
+`formatAddressForDisplay(value)` returns a plain, readable URL string using Gecko's safe IDN display and lossless URL-bar decoding. Reserved escaped delimiters, literal percent sequences and dangerous invisible/control characters retain their encoding. It does not change `session.state.url` or navigation input. `copyAddressLink(value)` copies a canonical encoded HTTP(S) URL and applies the current Clean Links policy. Platform uses the original Session URL when copying or cutting the entire unmodified displayed address; partial selections and user-edited text retain ordinary text-copy behavior, with the existing full-URL Clean Links policy still applicable to edited HTTP(S) addresses.
+
 ## `PermissionDelegate`
 
 ```js
@@ -277,20 +285,35 @@ session.setPermissionDelegate({
     return showProductPermissionUI(request);
   },
 
+  onUpdated(request) {
+    updateProductPermissionUI(request);
+  },
+
   onCanceled(request) {
     dismissProductPermissionUI(request.id, request.reason);
   },
 });
 ```
 
-`onRequest()` receives a frozen descriptor with `id`, `category`, `kind`, `permissions`, `origin`, `frameOrigin`, and `userGesture`; media requests also carry frozen display-only camera and microphone names. It returns a decision or a Promise for one of:
+`onRequest()` receives a frozen descriptor with `id`, `category`, `kind`, `permissions`, `origin`, `frameOrigin`, and `userGesture`. Its frozen `decisions` list is authoritative: private requests omit persistent grants, and choosers may omit unsupported actions. The result is a decision or a Promise for one of the offered decisions:
 
 - `allow-session`;
 - `allow-always`;
 - `block`;
 - `dismiss`.
 
-An invalid value, missing/`undefined` decision, exception, or rejected Promise fails closed to `dismiss`. `onCanceled()` is optional and reports a pending request invalidated by `session-closed`, `navigation`, `crash`, or `native-canceled`. Principals, native permission requests, and device handles never cross the boundary.
+When a request contains `choices`, each key identifies a choice group containing frozen `{id, label}` options. Camera and microphone requests use independent groups. An allow response must be `{decision, choices: {camera: "1", microphone: "0"}}`, selecting exactly one offered ID for each group; an omitted, extra or forged selection fails closed. IDs are private to that request. Native device paths and handles are never projected. A stored media grant does not silently select among multiple candidate devices.
+
+`onUpdated()` is optional. A live device chooser can start empty and change its frozen choices while retaining the same request ID and original decision Promise. Only the active FIFO entry delivers updates; a queued request supplies its latest snapshot when first shown. Preserve an explicit selection if its ID remains offered, clear it when removed, and disable confirmation without a current selection. Never infer a selection from an option's position. Responses are checked against the latest choices, and cancellation stops further updates.
+
+An invalid value, missing/`undefined` decision, exception, or rejected Promise fails closed to `dismiss`. `onCanceled()` is optional and reports a pending request invalidated by Session close, navigation, crash, native cancellation, permission changes or Delegate replacement. Batch cancellation removes affected requests before the next prompt is dispatched. Principals, native permission requests, and device handles never cross the boundary.
+
+`runtime.getSitePermissionState(session)` returns `{available, origin, navigationId, permissions}` for the current authenticated HTTP(S) page and its attached Web frames. Each permission has `kind`, `label`, display `origin`, an opaque `originToken`, `embedded`, `state` (`ask`, `allow`, `block`), `temporary` and offered `decisions`. The native principal, origin attributes and window identities stay private. Unavailable capabilities are omitted. `await runtime.setSitePermission(session, {navigationId, originToken, kind, decision})` rejects foreign Sessions, stale navigation and tokens for removed or replaced documents. Tokens are not transferable between Sessions.
+
+Grants and blocks use the exact requesting principal, including private/container attributes; private decisions last only for the session. Permissions Policy limits whether an embedded document may request an API, but does not transfer the embedding site's grants. Native permission queries, prompts and revocation share this ownership. Reset or block reaches that principal in every live Session, including embedded documents. Media stop waits for actor delivery and reports failures; an individual origin reset leaves other origins' capture intact. `await runtime.stopSiteDevices(session, {navigationId, kind})` accepts `camera` or `microphone` and stops capture for every currently attached Web origin in that tab. Media consent authenticates both requesting and embedding documents. A late decision for a replaced frame cannot persist a grant. Media indicators follow actual recording state; stop waits for actor delivery and reports failures.
+
+External-device, XR, payment, federated-identity and digital-wallet requests are outside the product contract. There is no background-device activity projection. Ordinary WebAuthn, credential operations and camera/microphone selection use their retained delegates.
+
 
 ## `PromptDelegate`
 
@@ -379,3 +402,11 @@ JavaScript modal, HTTP authentication, and before-unload paths now use the publi
 - History persistence, bookmarks, and ranking remain product capabilities; Gecko's visited-link protocol remains an embedder responsibility.
 - Runtime-created popup sessions must receive the same delegate factory as product-created sessions.
 - API changes require both product-independent and Navis-consumer contract tests before the surface is called stable.
+
+## Local documents and printing
+
+Immutable capabilities `pdfViewer` and `printing` describe the built-in PDF.js reader and local printing host. `session.openFile()` presents the native open picker (PDF/all files) and navigates only the selected live Session. `session.print()` starts an owned Gecko print preview and returns whether a new preview was opened; repeated requests focus the existing preview. Both require an open, attached, non-crashed Session. Standard content `window.print()` uses Gecko's static-clone handoff under the same ownership checks. Closing, detaching or replacing a browser aborts its dialog and restores input/focus.
+
+PDF conversion retains the original response/channel, range fetching, origin attributes and scripting sandbox. The reader provides its own find UI. An application may register the optional `navis-pdf-style` resource directory containing `pdf-reader.css` and its packaged imports. The private child actor attaches it as an author sheet only for the exact PDF viewer content principal. Runtime includes no reader artwork or UI rules, adds no remote stylesheet preference and leaves the upstream reader unchanged when the resource is absent. A private authenticated PDF actor saves only the current viewer's original address or a permitted viewer blob; picker waits recheck document/host ownership before writing. Embedded download sandbox restrictions remain enforced. Original and edited bytes enter the ordinary public/private download lifecycle. Explicit existing MIME preferences and OS file associations are not overwritten. PDF.js forms and basic annotations remain local; ML, remote models, telemetry and signature storage have no host implementation.
+
+Desktop preview/settings reuse the pinned Toolkit print machinery and native printers, with Platform-supplied Material styles. Save as PDF uses an explicit native destination picker. Native principals, browsing contexts and preview clones never enter the public Core projection. Printing a webpage can use its existing network resources; Navis adds no document-processing endpoint.

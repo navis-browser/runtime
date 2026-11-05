@@ -1,6 +1,8 @@
 # Navis Android aarch64 development-candidate graph. This profile shares the
 # product capability boundary with desktop while selecting the Navis-owned
-# Android runtime over pinned Gecko engine primitives. It is intentionally
+# Android runtime over pinned Gecko engine primitives. WebRTC/media capture is
+# enabled here; Web Push is an explicit product cut because Navis has no
+# supported remote or local Push provider. It is intentionally
 # incremental and sccache-backed; the candidate wrapper binds it to the same
 # source freeze as desktop.
 
@@ -22,10 +24,12 @@ ac_add_options --disable-updater
 ac_add_options --disable-local-ml
 ac_add_options --disable-eme-api
 ac_add_options --disable-web-push
+ac_add_options --disable-web-device-apis
+ac_add_options --disable-web-identity
+ac_add_options --disable-web-payments
+ac_add_options --disable-webxr
 ac_add_options --disable-safe-browsing
 ac_add_options --disable-observability-runtime
-ac_add_options --disable-webrtc
-ac_add_options --enable-webextensions-runtime
 ac_add_options --disable-cargo-incremental
 ac_add_options --with-ccache=sccache
 

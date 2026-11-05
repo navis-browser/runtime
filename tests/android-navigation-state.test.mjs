@@ -27,7 +27,7 @@ function fixture() {
     browser: { browsingContext: { id: 7 } },
     dispatcher: { dispatch: (name, data) => events.push({ name, ...data }) },
     faviconBridge: { invalidate() {} },
-    reportNavigationDiagnostic() {}, dispatchHistoryState() {}, dispatchSessionState() {},
+    reportNavigationFailure() {}, dispatchHistoryState() {}, dispatchSessionState() {},
   };
   vm.runInNewContext(`${tracker}\n${progress}\nthis.progress = progressListener;`, sandbox);
   const remote = (uri = "https://example.com/") => ({
@@ -38,8 +38,8 @@ function fixture() {
     events,
     start(uri) { sandbox.progress.onStateChange({ isTopLevel: true }, remote(uri), START | NETWORK, 0); },
     stop(status, uri) { sandbox.progress.onStateChange({ isTopLevel: true }, remote(uri), STOP | NETWORK, status); },
-    location(flags, uri = "https://example.com/") {
-      sandbox.progress.onLocationChange({ isTopLevel: true }, remote(uri), { spec: uri }, flags);
+    location(flags, uri = "https://example.com/", isTopLevel = true) {
+      sandbox.progress.onLocationChange({ isTopLevel }, remote(uri), { spec: uri }, flags);
     },
   };
 }
@@ -104,5 +104,28 @@ test("URI projection is bounded; error diagnostics remain separate", () => {
   const f = fixture(); f.start(`https://example.com/${"a".repeat(70000)}`);
   assert.equal(f.events[0].uri.length, 65536);
   assert.doesNotMatch(source, /request\??\.status/);
-  assert.match(source, /reportNavigationDiagnostic\("stop", \{ request, status \}\)/);
+  assert.match(source, /reportNavigationFailure\("stop", \{ request, status \}\)/);
+});
+
+test("navigation failures retain bounded console facts without a profile-file diagnostic", () => {
+  const logs = [];
+  const helper = source.slice(source.indexOf("function reportNavigationFailure("), source.indexOf("const commandListener ="));
+  const sandbox = {
+    window: { name: "navis-android-session-42:" },
+    Services: { console: { logStringMessage: text => logs.push(text) } },
+    Components: { isSuccessCode: status => !(status & 0x80000000) },
+  };
+  vm.runInNewContext(helper, sandbox);
+  sandbox.reportNavigationFailure("stop", { status: 0 });
+  sandbox.reportNavigationFailure("stop", { status: undefined });
+  assert.equal(logs.length, 0);
+  sandbox.reportNavigationFailure("load-error", {
+    uri: "https://private.example/secret?token=sensitive",
+    error: { result: 0x80004005, name: "Error", message: "secret exception" },
+  });
+  assert.deepEqual(logs, ["NavisAndroid NavigationFailure phase=load-error session=42 scheme=https status=0x80004005 name=Error"]);
+  sandbox.reportNavigationFailure("restore-error", { error: { name: "secret exception" } });
+  assert.match(logs[1], /name=unknown$/);
+  assert.doesNotMatch(logs.join("\n"), /private|secret|sensitive/);
+  assert.doesNotMatch(source, /navis\.diagnostics\.navigation|navis-navigation-diagnostic\.json/);
 });

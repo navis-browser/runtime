@@ -108,6 +108,11 @@ export function ensureDesktopEmbedderActorsRegistered() {
     child: {
       esModuleURI: "resource://gre/modules/DesktopInternalPageChild.sys.mjs",
       events: {
+        // Content handlers (including the settings SPA) run first. System-group
+        // capture still precedes the link's native PostHandleEvent; bubbling
+        // here would be too late to cancel its dangerous-protocol load.
+        click: { capture: true, mozSystemGroup: true, wantUntrusted: true },
+        auxclick: { capture: true, mozSystemGroup: true, wantUntrusted: true },
         NavisAppearanceCommand: { wantUntrusted: true },
         NavisSettingsCommand: { wantUntrusted: true },
         NavisDiagnosticsCommand: { wantUntrusted: true },
@@ -115,11 +120,12 @@ export function ensureDesktopEmbedderActorsRegistered() {
       },
     },
     // Gecko's extension MatchPattern parser does not treat custom schemes as
-    // authority URLs. The actor is created only by this dedicated event and
-    // the child, parent and Session each authenticate the exact registered
+    // authority URLs. Link activations and dedicated page events create the
+    // actor; the child, parent and Session authenticate the exact registered
     // Navis page before any command crosses the process boundary.
     messageManagerGroups: ["browsers"],
   });
+
 
   if (AppConstants.MOZ_WEBRTC) {
     ChromeUtils.registerProcessActor("DesktopEmbedderBrowserProcess", {

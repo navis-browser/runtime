@@ -1,0 +1,20 @@
+diff --git a/dom/media/mediaelement/MediaError.h b/dom/media/mediaelement/MediaError.h
+index a5551c360c71d338225ec645f4c10afd41912b3e..7a111be36398995af8b6299985869de6b5d90af5 100644
+--- a/dom/media/mediaelement/MediaError.h
++++ b/dom/media/mediaelement/MediaError.h
+@@ -5,14 +5,13 @@
+ #ifndef mozilla_dom_MediaError_h
+ #define mozilla_dom_MediaError_h
+ 
++#include "mozilla/dom/HTMLMediaElement.h"
+ #include "nsISupports.h"
+ #include "nsString.h"
+ #include "nsWrapperCache.h"
+ 
+ namespace mozilla::dom {
+ 
+-class HTMLMediaElement;
+-
+ class MediaError final : public nsISupports, public nsWrapperCache {
+   ~MediaError() = default;
+ 

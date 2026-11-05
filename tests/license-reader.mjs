@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 const calls = [];
 let failed = null;
@@ -17,7 +18,12 @@ globalThis.ChromeUtils = { importESModule: () => ({ NetUtil: {
   readInputStreamToString: stream => stream.text,
 } }) };
 
-const load = suffix => import(`../embedder/modules/DesktopProductPages.sys.mjs?${suffix}`);
+const moduleSource = await readFile(new URL("../embedder/modules/DesktopProductPages.sys.mjs", import.meta.url), "utf8");
+const securityImport = 'import { certificateSecurityDiagnostics } from "resource://gre/modules/CertificateSecurity.sys.mjs";';
+assert.ok(moduleSource.includes(securityImport));
+const licenseSource = moduleSource.replace(securityImport,
+  'const certificateSecurityDiagnostics = () => { throw new Error("License reading must not request certificate diagnostics"); };');
+const load = suffix => import(`data:text/javascript;base64,${Buffer.from(licenseSource).toString("base64")}#${suffix}`);
 const source = "resource://gre/modules/navis-licenses/source-code.txt";
 const android = "resource://android/assets/navis-licenses/android-dependencies.txt";
 const desktop = await load("desktop");

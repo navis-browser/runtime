@@ -50,8 +50,18 @@
       ]
     },
     {
-      "id": "optional-capability-candidates",
-      "description": "Subsystems already identified as profile-dependent or requiring an explicit compatibility decision.",
+      "id": "excluded-browser-mediated-web-apis",
+      "description": "Review the disabled Web device, identity, payment and XR closures and their shared binding/IPC/native consumers without reintroducing product exposure.",
+      "patterns": [
+        "^dom/(?:midi|webserial|webusb|webhid|webbluetooth|vr|payments|interfaces/payments|credentialmanagement)(?:/|$)",
+        "^gfx/vr(?:/|$)",
+        "^toolkit/components/credentialmanagement(?:/|$)",
+        "^dom/(?:bindings|webidl)(?:/|$)"
+      ]
+    },
+    {
+      "id": "retained-and-excluded-capability-boundaries",
+      "description": "Review retained WebRTC, media capture, WebGPU and local extensions alongside the excluded ML, observability and XR closures; preserve the accepted product capability set.",
       "patterns": [
         "^(?:dom/(?:ai|media/(?:webrtc|webrtc-js)|ml|webgpu)|gfx/(?:vr|wgpu_bindings)|media/webrtc|toolkit/components/(?:extensions|glean|ml|telemetry)|toolkit/mozapps/extensions)(?:/|$)",
         "^third_party/(?:libwebrtc|onnxruntime|rust/(?:glean|wgpu)[^/]*)(?:/|$)"
@@ -70,6 +80,18 @@
       "patterns": [
         "^(?:third_party|toolkit/library/rust)(?:/|$)",
         "^Cargo\\.(?:toml|lock)$"
+      ]
+    },
+    {
+      "id": "local-documents-and-printing",
+      "description": "Review PDF.js conversion/principals/ranges/sandbox/forms/save and printing snapshots/settings/native host lifecycles without adding online services or AI.",
+      "patterns": [
+        "^toolkit/components/(?:pdfjs|printing|printingui)(?:/|$)",
+        "^layout/printing(?:/|$)",
+        "^toolkit/actors/Printing",
+        "^toolkit/locales/.*/(?:pdfviewer|printing)(?:/|$)",
+        "^mobile/(?:android|shared)/.*(?:[Pp]rint|[Dd]ocument)",
+        "^widget/.*(?:[Pp]rint|NavisAndroidSupport)"
       ]
     }
   ]

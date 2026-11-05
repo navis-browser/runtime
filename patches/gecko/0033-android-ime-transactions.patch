@@ -1,9 +1,9 @@
 diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..7e9123ec79ad62c7903d73f9c64b7ebac46ce4c2
+index 0000000000000000000000000000000000000000..f74ccb31e6efb88b612c5046b99964a4d3ef610b
 --- /dev/null
 +++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidTextInput.java
-@@ -0,0 +1,764 @@
+@@ -0,0 +1,783 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -249,8 +249,27 @@ index 0000000000000000000000000000000000000000..7e9123ec79ad62c7903d73f9c64b7eba
 +    return repeatCount > 0;
 +  }
 +
++  // Match GeckoEditable: Android owns these keys. Returning false lets the
++  // IME, Activity back dispatcher and system handle them in their usual order.
++  static boolean shouldProcessKey(final int keyCode) {
++    switch (keyCode) {
++      case KeyEvent.KEYCODE_MENU:
++      case KeyEvent.KEYCODE_BACK:
++      case KeyEvent.KEYCODE_FORWARD:
++      case KeyEvent.KEYCODE_VOLUME_UP:
++      case KeyEvent.KEYCODE_VOLUME_DOWN:
++      case KeyEvent.KEYCODE_VOLUME_MUTE:
++      case KeyEvent.KEYCODE_SEARCH:
++      case KeyEvent.KEYCODE_HEADSETHOOK:
++        return false;
++      default:
++        return true;
++    }
++  }
++
 +  private boolean sendKeyEvent(final KeyEvent event) {
-+    if (!onInputThread() || mClosed || mView == null || event == null) {
++    if (event == null || !shouldProcessKey(event.getKeyCode())
++        || !onInputThread() || mClosed || mView == null) {
 +      return false;
 +    }
 +    if (event.getAction() == KeyEvent.ACTION_MULTIPLE) {

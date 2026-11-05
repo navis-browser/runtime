@@ -7,11 +7,12 @@
       "order": 1,
       "id": "desktop-embedder-build-mode",
       "patch": "patches/gecko/0001-desktop-embedder-build-mode.patch",
-      "sha256": "caf9c5847eba23a813ef5fc11fa04e6558878267ee6abca81f6dde743e0a9266",
+      "sha256": "d58dc744ea01f1adf5b1cf5804a0c9b3deadcad7b07f35771229e409d495d403",
       "classification": "final-capability-adapter",
       "intent": "Define the reusable desktop Runtime build, shared safe Core link and excluded product globals.",
       "invariants": [
         "Runtime/Session/View state remains in the Gecko-independent safe Rust Core; no Gecko, JNI, XPCOM or UI object enters that contract.",
+        "The foundational shared Rust manifest declares navis-core-ffi; later capability adapters may select its feature without owning the dependency declaration.",
         "Fission, sandboxing, DOM, layout, graphics, networking and storage remain Gecko responsibilities.",
         "Product-neutral build selection preserves upstream consumers and tolerates the deliberately absent optional services.",
         "Printing-disabled builds omit window.print; the Desktop Embedder omits the legacy Web installation global without removing retained extensions.",
@@ -23,7 +24,7 @@
       "order": 2,
       "id": "windows-host-integration",
       "patch": "patches/gecko/0002-windows-host-integration.patch",
-      "sha256": "852ab262b1f72ae547ec1a7d8b8a76dd625461153c35583c8e46771e509c67c3",
+      "sha256": "a10fbfdd2b3e62068f59a9c1329f4c53403bbba461af8c39116575e0b89b5677",
       "classification": "final-capability-adapter",
       "intent": "Retain Windows accessibility linkage, launcher tooling and actionable native notifications.",
       "invariants": [
@@ -44,7 +45,7 @@
       "order": 3,
       "id": "local-machine-learning-gate",
       "patch": "patches/gecko/0003-local-machine-learning-gate.patch",
-      "sha256": "9c1c04c00eda4318c7f2a09c429dea601ad4d9613614f20fa76a8a46b2c82c76",
+      "sha256": "b79d4e7b237981ade192b4feb814352ccfc485ac3c8407d605e510ef12ccec4b",
       "classification": "final-capability-adapter",
       "intent": "Gate the complete local inference closure without changing ordinary Gecko execution.",
       "invariants": [
@@ -59,11 +60,11 @@
       "order": 4,
       "id": "webextensions-product-boundaries",
       "patch": "patches/gecko/0004-webextensions-product-boundaries.patch",
-      "sha256": "0050b9c0752d617394183314b53497e5053cee72abfcc2cec555ac13f7219198",
+      "sha256": "b28c0e4e924ae9ca658fdc38c08b9cd6282e8688b59dfe82e758c972492abf6d",
       "classification": "final-capability-adapter",
-      "intent": "Keep configurable WebExtensions execution, reviewed built-ins, explicit profile installs, management restrictions and product safe-mode semantics.",
+      "intent": "Retain reviewed built-ins, explicit signed profile installs, management restrictions and product safe-mode semantics on the required upstream WebExtensions runtime.",
       "invariants": [
-        "Disabling the extension runtime removes its executable closure while preserving required core URI policy and StreamFilter substrate; enabled builds retain the selected extension APIs.",
+        "WebExtensions execution is required; no alternate no-extension graph or inert StreamFilter actor is maintained.",
         "The locked application-built-in allowlist fails closed, accepts multiple IDs and retains the selected signature requirements.",
         "Profile packages enter through explicit product management, not filesystem sideload scans or WebDriver mutation.",
         "Management API policy, absent Firefox Add-ons Manager/default-theme resources and native-messaging exclusions remain intact.",
@@ -74,23 +75,9 @@
     },
     {
       "order": 5,
-      "id": "webrtc-rust-dependency-gate",
-      "patch": "patches/gecko/0005-webrtc-rust-dependency-gate.patch",
-      "sha256": "3207258f3f041e403efa481854403e0a61dceca8e83e3512301b84c5fc516363",
-      "classification": "final-capability-adapter",
-      "intent": "Make the residual SDP Rust bridge follow the selected WebRTC build capability.",
-      "invariants": [
-        "The default WebRTC profile retains the SDP bridge.",
-        "A MOZ_WEBRTC=false build has no rsdparsa_capi source in the final gkrust dependency closure.",
-        "The fake/shared non-WebRTC media substrate remains independently classified."
-      ],
-      "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
-    },
-    {
-      "order": 6,
       "id": "observability-runtime-gate",
       "patch": "patches/gecko/0006-observability-runtime-gate.patch",
-      "sha256": "fd368b9003889e0390cf6d8d189da66a2ab8266bbcc364d511d57148ebffca03",
+      "sha256": "cf9a565ea529b6ce65aeef27eddefc15f234ce9d0f904b5111c0c4dc134e09b9",
       "classification": "final-capability-adapter",
       "intent": "Remove disabled modern and legacy telemetry closures while retaining inert required interfaces and matching GTest support.",
       "invariants": [
@@ -102,10 +89,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 7,
+      "order": 6,
       "id": "webdriver-automation-boundary",
       "patch": "patches/gecko/0007-webdriver-automation-boundary.patch",
-      "sha256": "0b12570c8b5c0e771b9163c8ed787a28fd0349de4b1779eee81377e1c26538cd",
+      "sha256": "836b3e2994bc4d82f4c800db32ce66f1256246c0c3394b88aae32e9b575989d1",
       "classification": "final-capability-adapter",
       "intent": "Retain content-only automation, explicit test-build privileges, virtual-authenticator routing and correct navigation realm lifetime.",
       "invariants": [
@@ -141,10 +128,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 8,
+      "order": 7,
       "id": "encrypted-media-runtime-gate",
       "patch": "patches/gecko/0008-encrypted-media-runtime-gate.patch",
-      "sha256": "1970ed0b93ed13e0267988d55fd5d2923f57506653d7c9bb0b1f34e97042d107",
+      "sha256": "e5c11343298fbfef91942499b4404fff765b38bf2629741989964b1becbff7ce",
       "classification": "final-capability-adapter",
       "intent": "Gate encrypted-media Web exposure and concrete CDM/GMP distribution while retaining ordinary playback substrate.",
       "invariants": [
@@ -160,10 +147,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 9,
+      "order": 8,
       "id": "desktop-embedder-web-push-cut",
       "patch": "patches/gecko/0009-desktop-embedder-web-push-cut.patch",
-      "sha256": "b0e14c895d0ff56836443310b193dfee7e1a48dc1637bc700621ecd3fe41cbe6",
+      "sha256": "ee290e27b9d1ef2406242b66276f383dfc783d5804c9962f310fb8aad391aef8",
       "classification": "final-capability-adapter",
       "intent": "Gate Web Push exposure and its full runtime closure while retaining ordinary Service Workers.",
       "invariants": [
@@ -179,10 +166,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 10,
+      "order": 9,
       "id": "desktop-embedder-safe-browsing-reputation-cut",
       "patch": "patches/gecko/0010-desktop-embedder-safe-browsing-reputation-cut.patch",
-      "sha256": "76989f5f67d866e1a02987d4d6db395a7e5f1f09a90e84e3169da071f17704d5",
+      "sha256": "8247c751884f014144b37bcb829378d34745e79157dad2c9165b52f1cb396380",
       "classification": "final-capability-adapter",
       "intent": "Gate Safe Browsing and application reputation providers while retaining shared classifier substrate.",
       "invariants": [
@@ -197,10 +184,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 11,
+      "order": 10,
       "id": "native-only-geolocation-policy",
       "patch": "patches/gecko/0011-native-only-geolocation-policy.patch",
-      "sha256": "71674d785346c9bb5c248932c1472875743fb731c314795aea681a7a0198dc97",
+      "sha256": "e00f2600ece91916a081623147263884adf85aa517f5aa88cb08adee703317a9",
       "classification": "final-capability-adapter",
       "intent": "Use only native operating-system geolocation providers and preserve standard unavailable results without network fallback.",
       "invariants": [
@@ -213,26 +200,32 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 12,
+      "order": 11,
       "id": "current-permissions-policy",
       "patch": "patches/gecko/0012-current-permissions-policy.patch",
-      "sha256": "069c48e39750cbb7964c41cbb2321b2a6a5a7114da1d20fadccfb7da3497ed1b",
+      "sha256": "4138469c53019d9249749e970afe2f826de1a046d7a0394cdf2a04b8e6778028",
       "classification": "final-capability-adapter",
-      "intent": "Retain current PermissionsPolicy semantics, header/container inheritance and sync-XHR enforcement.",
+      "intent": "Retain current PermissionsPolicy headers, final-origin container inheritance, object/embed publication and sync-XHR enforcement.",
       "invariants": [
         "Content exposes document.permissionsPolicy and iframe.permissionsPolicy but not the obsolete featurePolicy aliases.",
         "The structured Permissions-Policy header accepts self, wildcard, scheme, host and port source expressions and ignores the obsolete Feature-Policy response header.",
         "Header policy, iframe allow policy, nested inheritance, sandboxed opaque origins and cross-process container policy compose without granting a feature denied by an ancestor.",
         "Synchronous XHR is advertised with a default-all allowlist and throws NetworkError from send() when policy disables it.",
-        "The selected WPT metadata records no expected failures for behavior covered by this port."
+        "The selected WPT metadata records no expected failures for behavior covered by this port.",
+        "Serialized container policy keeps the embedding document origin, inherited denials and modern HTTP declaration separately from iframe declarations and the original src. The final loaded principal determines inherited access; src retains its original meaning.",
+        "Reconstruct the embedding document with the Permissions-Policy header parser and the container with the iframe parser. Recompute both restrictions for the final origin; a prospective-src allow or denial cannot authorize or reject a different final origin by itself.",
+        "A loaded document copies the evaluated container decision once and retains its own response policy. Same-process, remote, iframe, object and embed paths share that rule; missing or inconsistent parent identity fails closed.",
+        "LoadObject refreshes and publishes container policy after successful docshell creation and before handing the channel to the document loader. UpgradeLoadToDocument uses that shared path.",
+        "The snapshot retains exact embedding document and browsing context ownership, origin and inherited policy. Missing or inactive frame state cannot publish authority.",
+        "Parent authorization still rejects absent or stale canonical container metadata. This change does not relax response policy, origin delegation or product API exposure locks."
       ],
-      "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
+      "port_review": "Exercise extracted production inheritance, serialization inputs and final-origin decisions with recorded parser/principal peers, plus existing parent-policy and revocation regression checks. Compile the actual FeaturePolicy, document, container and IPC consumers with configured target headers. Replay same-origin/cross-origin redirects, explicit and default delegation, parent and child header restrictions, live policy loss and malformed/stale ownership in current packaged browsers; extracted tests do not establish actual parsing, IPC or native browser behavior. Reproduce missing publication with the original document-load arm, then exercise corrected load ordering, local/remote frame state, failures and refreshed owner/origin under sanitizers. Compile the full changed translation unit against configured target headers. Replay object/embed direct and redirected loads in current packaged browsers together with iframe delegation and live policy revocation. Recorded loader, policy and IPC peers are not native browser evidence."
     },
     {
-      "order": 13,
+      "order": 12,
       "id": "internal-page-routing",
       "patch": "patches/gecko/0013-internal-page-routing.patch",
-      "sha256": "6a287a17c9ee574237ca9180ba51f1318b4a4f863e3ae78cbc59035b76bbd5a7",
+      "sha256": "6868b24048477a1407881a050a01f63f89524892d8eb0801c51b84c2489f2e11",
       "classification": "final-capability-adapter",
       "intent": "Preserve engine recovery and standard about documents while owning navis URI principals and bounded settings History API routes.",
       "invariants": [
@@ -259,7 +252,7 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 14,
+      "order": 13,
       "id": "desktop-embedder-certificate-decoder-backend",
       "patch": "patches/gecko/0014-desktop-embedder-certificate-decoder-backend.patch",
       "sha256": "9c6c79266dbb876cc5bfeeef9ff6ccbce4a03d3e012e70699e170f6aeaa64b43",
@@ -275,10 +268,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 15,
+      "order": 14,
       "id": "native-input-anchor-lifecycle",
       "patch": "patches/gecko/0015-native-input-anchor-lifecycle.patch",
-      "sha256": "5c90e571a84c1d4505d3c528ef9c8b88af9c8356f189a8f0af108090f5132d21",
+      "sha256": "4a8012a0038e4185b05e072324111c30f4cdfe923489aaaa2636cbac5535c5be",
       "classification": "final-capability-adapter",
       "intent": "Preserve GTK IME focus and dismiss Select/date-time popups when their document anchor moves or disappears.",
       "invariants": [
@@ -301,7 +294,7 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 16,
+      "order": 15,
       "id": "web-control-selection-presentation",
       "patch": "patches/gecko/0016-web-control-selection-presentation.patch",
       "sha256": "54a08d18ba9c59d3f6ab24ebf49f18261bd2f9f9dd67dd2e2c766699fb3b50b2",
@@ -322,28 +315,29 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 17,
+      "order": 16,
       "id": "navis-remote-settings-policy",
       "patch": "patches/gecko/0017-navis-remote-settings-policy.patch",
-      "sha256": "ba449ce3e976212146ea78abc055b222eeabce292edd097b536e72e909134939",
+      "sha256": "41d44940e23c98d7d8d6ce5ee114cb9e32aa7aabbcc97b8547c4db5a10837c2f",
       "classification": "final-capability-adapter",
-      "intent": "Apply one product-selected collection, bootstrap and synchronization policy without weakening signed Remote Settings verification.",
+      "intent": "Use product-selected collections and immutable packaged settings/attachments without background Remote Settings or profile-supplied network fallback.",
       "invariants": [
         "Omitting the explicit policy preserves upstream generic Desktop Embedder and GeckoView behavior; supplying it requires one source-tree-relative JSON file with sorted unique collections and a nonempty bootstrap subset.",
-        "Desktop and Android Navis consume the same policy file; allowed identifiers govern local client access, packaged_bootstrap identifiers govern generated JSON and attachment payloads, and only remote_sync identifiers may poll or mutate through synchronization.",
-        "The production runtime reads immutable allowed and sync collection lists from AppConstants; an absent or empty forced test list denies every collection rather than failing open.",
-        "A disallowed client returns no records even when an old profile database exists, while a packaged-only client can read bootstrap/profile data but cannot synchronize or mutate it.",
-        "Production preview bucket names normalize to their reviewed base bucket; preview mode remains unavailable through Navis's locked production preferences.",
-        "Test builds bypass the product allowlist by default so upstream arbitrary-collection and invalid-signature tests retain their original coverage, while a dedicated test can force the policy boundary.",
-        "Collection signature verification, signer identities, rollback behavior and the Mozilla production endpoint remain Gecko-owned and unchanged."
+        "Desktop and Android Navis consume the same policy file. Allowed identifiers govern local client access and packaged_bootstrap identifiers govern generated JSON and attachment payloads; sync-list metadata cannot override the production local-only transport boundary.",
+        "The production runtime reads immutable collection lists from AppConstants; an absent or empty forced test list denies every collection rather than failing open.",
+        "A disallowed client returns no records even when an old profile database exists. Production allowed clients read immutable packaged records and timestamps; mutable profile data, signature URLs and forced-sync preferences cannot supersede the package.",
+        "Polling, startup bundles, explicit client sync, server information, attachment bundles and byte downloads cannot create network traffic. Packaged attachments remain hash checked and stale profile attachments cannot override them.",
+        "Production preview bucket names normalize to their reviewed base bucket; preview mode remains unavailable through locked product preferences.",
+        "Test builds bypass the product boundaries by default so upstream arbitrary-collection and invalid-signature tests retain their original coverage; dedicated opt-ins exercise the production allowlist and local-only boundaries.",
+        "Upstream signer identities, signature verification and network behavior remain available to non-Navis consumers. Android product startup packages and initializes the bundled security consumer through its product-services adapter."
       ],
-      "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
+      "port_review": "Replay the complete hash-owned series independently. Verify first-handshake revocation with fresh and stale profiles offline, independent CT success/failure and expiry boundaries, fixed packaged-data identities and absence of service/attachment/signature requests on every target. Review shared collection filtering and local transport together; verify the Android product-services adapter packages and initializes the shared bundled security consumer."
     },
     {
-      "order": 18,
+      "order": 17,
       "id": "native-webauthn-providers",
       "patch": "patches/gecko/0018-native-webauthn-providers.patch",
-      "sha256": "99b0f709ccb94662346ecf0b164ebb598e22c2efa1a5171e3bab32e22fa7fa05",
+      "sha256": "973bad0e05d614b6fa3bece73d4897f6df14330de37fea982873e737a10d06a1",
       "classification": "final-capability-adapter",
       "intent": "Preserve related-origin consent, bounded Windows ceremonies and the owned Android Credential Manager bridge without GMS lifecycle ownership.",
       "invariants": [
@@ -366,10 +360,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 19,
+      "order": 18,
       "id": "desktop-embedder-builtin-dictionary-registry",
       "patch": "patches/gecko/0019-desktop-embedder-builtin-dictionary-registry.patch",
-      "sha256": "a8d5ddb0ced84186935eaffd5225b36fe34814ca11c72622dfcdd71196d092fc",
+      "sha256": "80a7a2346f221edf215421ec8c62b4c000b2c1a526f8c086bff5d0b42738e970",
       "classification": "final-capability-adapter",
       "intent": "Register packaged Hunspell dictionaries through the product-neutral extension registry.",
       "invariants": [
@@ -381,10 +375,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 20,
+      "order": 19,
       "id": "desktop-embedder-material-error-page-presentation",
       "patch": "patches/gecko/0020-desktop-embedder-material-error-page-presentation.patch",
-      "sha256": "fb66d92d1ae2b86cd3796bc63ab9d8c6d5d2f781aa9ff98571bac6734272d7c9",
+      "sha256": "78d0d2c2be58ea2041936724300d826ea47f2fcdc6a06337fac75d893c8aadf4",
       "classification": "final-capability-adapter",
       "intent": "Apply the product error-page presentation while preserving Gecko network, certificate and crash recovery behavior.",
       "invariants": [
@@ -397,7 +391,7 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 21,
+      "order": 20,
       "id": "unified-product-query-stripping-policy",
       "patch": "patches/gecko/0021-unified-product-query-stripping-policy.patch",
       "sha256": "6d66dc67a2066e380a4c3c11b7e3da8de1d9ca78071b8c0d7920b77629f2cb69",
@@ -413,10 +407,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 22,
+      "order": 21,
       "id": "page-devtools-hosts",
       "patch": "patches/gecko/0022-page-devtools-hosts.patch",
-      "sha256": "e5f30ac146635ce0856adcbde9baa1696d047d54f781a54ed2bec24c1a3f5c0b",
+      "sha256": "fac748309cf58c4ab0a1c4b5e8c48044175d492757dfdf2af9d37c4e8d3c6399",
       "classification": "final-capability-adapter",
       "intent": "Host upstream page DevTools on desktop and in-app Android, with retained typography, panel state, in-document popups and live responsive targets.",
       "invariants": [
@@ -430,10 +424,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 23,
+      "order": 22,
       "id": "navis-product-brand-identity",
       "patch": "patches/gecko/0023-navis-product-brand-identity.patch",
-      "sha256": "28b704716c802ebaf079f473ce7e3ef3844e7a64aec8f8578f20f826587d509c",
+      "sha256": "9ba83ae1d7f2fa3ba26af725865b511c820f48623081bc5876a2669fefb7cadd",
       "classification": "final-capability-adapter",
       "intent": "Project product version and brand to Android pages/extensions and retain Navis artwork when Mozilla translations are installed.",
       "invariants": [
@@ -446,18 +440,19 @@
         "Only branding/brand.ftl, toolkit/branding/brandings.ftl and the legacy branding locale alias fall back to application-owned resources; ordinary translated strings still come from the language pack.",
         "The override is selected by MOZ_NAVIS_CORE and shared by desktop and Android rather than duplicated in platform UI.",
         "The exact-index Fluent source uses the language pack's existing metasource, is registered after translated sources, and is removed with the language pack.",
+        "Nonempty Fluent file indexes survive parent-to-content registration; a brand-only source cannot shadow translated reader or other content strings. The IPC regression covers the exact index and an unrelated PDF resource.",
         "Android legacy and standard branding image names resolve to the canonical navis/branding generated assets without changing native configuration or libraries.",
         "Non-Navis Gecko products retain their original branding and language-pack behavior."
       ],
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 24,
+      "order": 23,
       "id": "direct-navis-android-runtime",
       "patch": "patches/gecko/0024-direct-navis-android-runtime.patch",
-      "sha256": "a0422b5e1209deea6fe8490ea5c88752bb3fa45d837fbe456af9ba080d0c0885",
+      "sha256": "200988945298485ad51d4f940ffbc5411567be34cfba66ee7c26dbc55dd891e4",
       "classification": "final-capability-adapter",
-      "intent": "Own Android Runtime/Session/View JNI, native lifecycle, accessibility and compositor handoff without GeckoView lifecycle ownership.",
+      "intent": "Own Android Runtime/Session/View lifecycle, JNI, native and Gradle build/resource graphs, accessibility and profile-isolated process services.",
       "invariants": [
         "MOZ_NAVIS_ANDROID_RUNTIME selects the owned process/session JNI and widget path without constructing GeckoRuntime, GeckoSession, GeckoView, GeckoDisplay, PanZoomController or SessionTextInput.",
         "Shared Core lifecycle is linked once on desktop and Android; snapshot strings are copied before returning to Java and invalid/closed identifiers fail closed.",
@@ -465,18 +460,7 @@
         "Host readiness, compositor attachment, Surface relinquishment, accessibility coordinate conversion and terminal close retain exact Session ownership.",
         "The final host integrates current navigation/history, site security, favicons, product operations, prompts and DevTools; their provider modules remain separately owned functional patches.",
         "GeckoView compatibility branches remain available to unrelated upstream products but are not the Navis lifecycle owner.",
-        "Process crash, popup/new-window handoff and remote document identity must not leave stale native, input, accessibility or prompt authority."
-      ],
-      "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
-    },
-    {
-      "order": 25,
-      "id": "direct-navis-android-runtime-build-graph",
-      "patch": "patches/gecko/0025-direct-navis-android-runtime-build-graph.patch",
-      "sha256": "33e090983ce017a5c66e75e9ac2654c801a0269193b2051c0e858dec7d116627",
-      "classification": "final-capability-adapter",
-      "intent": "Register the owned Android Gradle/native graph, final module/resource inventory and offline license/source directions.",
-      "invariants": [
+        "Process crash, popup/new-window handoff and remote document identity must not leave stale native, input, accessibility or prompt authority.",
         "The Navis Gradle settings branch includes only annotations, navis-runtime-android and navis product projects; GeckoView, Android Components and example projects remain isolated to upstream product branches.",
         "The Navis application has one engine dependency on its private navis-runtime-android module mounted from the canonical runtime/android source root, and no GeckoView project, published AAR or broad GeckoView source dependency.",
         "The private runtime compiles a reviewed Java primitive allowlist; product sources and the packaged DEX contain no GeckoRuntime, GeckoSession, GeckoView, GeckoDisplay or other excluded lifecycle-owner definition or type reference.",
@@ -487,15 +471,20 @@
         "Only the Navis Android runtime adds the library notice; desktop packaging does not claim the Android UI dependency.",
         "The packaged modules/navis-licenses path matches the fixed resource URI in the shared offline credits reader.",
         "The application-owned notice preserves the unmodified pinned upstream Apache 2.0 license and attribution.",
-        "This resource declaration does not change native code, JNI, extension policy or the Kotlin/Compose toolchain."
+        "This resource declaration does not change native code, JNI, extension policy or the Kotlin/Compose toolchain.",
+        "Each profile selects a distinct child-service class namespace before Gecko parent startup.",
+        "Socket, GPU, RDD, utility and content service ownership cannot cross profile parents.",
+        "Notification and Runtime registration use the same final profile namespace contract.",
+        "The Navis Gradle variant follows developer_options: Debug for development and Release for --enable-release; generated JNI wrappers and APK assembly use that same variant.",
+        "Named event-dispatcher cleanup is safe before native attachment, after native window detachment and on repeated close; an old owner cannot remove its replacement."
       ],
-      "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
+      "port_review": "Review the Android lifecycle, JNI/native and Gradle graphs, staged module/resource inventory and profile-selected child-service namespaces together against the selected Gecko pin. Preserve upstream GeckoView consumers and the stated Core, security and ownership boundaries; validate the complete ordered series and native Android startup, process isolation, crash and relaunch paths."
     },
     {
-      "order": 26,
+      "order": 24,
       "id": "android-webextensions-product-services",
-      "patch": "patches/gecko/0026-android-webextensions-product-services.patch",
-      "sha256": "aad4965db41ff39f14b060cf14d6fcb235043112b68035ed2c2eeaa819863af9",
+      "patch": "patches/gecko/0025-android-webextensions-product-services.patch",
+      "sha256": "2982800dea93ca1c0d4b01e738e1605e512731207da7a52fd61a9344a480200b",
       "classification": "final-capability-adapter",
       "intent": "Expose the final Android extension host, cold-start readiness, real product tabs/windows/profile APIs and local developer policy without a remote debugger listener.",
       "invariants": [
@@ -504,14 +493,15 @@
         "Developer mode uses the product preference and temporary-extension policy; in-app DevTools never enables a remote debugger listener.",
         "Optional/private permissions are transactional and checked against the current extension, tab, window and document; unsupported API operations fail closed.",
         "Bookmarks, topSites, history, closed sessions and window actions consume actual product stores and commit events, not simulated parallel state.",
-        "Shared command/API registration includes the separately implemented downloads, context actions, popup and search capabilities; ordinary upstream GeckoView behavior remains separate."
+        "Shared command/API registration includes the separately implemented downloads, context actions, popup and search capabilities; ordinary upstream GeckoView behavior remains separate.",
+        "Android startup packages CertificateSecurity and CertificateSecurityData and initializes the same bundled certificate-security consumer as desktop; the shared settings adapter owns immutable local data and transport denial."
       ],
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 27,
+      "order": 25,
       "id": "android-product-settings-security",
-      "patch": "patches/gecko/0027-android-product-settings-security.patch",
+      "patch": "patches/gecko/0026-android-product-settings-security.patch",
       "sha256": "2d4caf1db89e4e59b97fc87d88d7eb0a0b68d08290c9af8bd45e10e8a037e424",
       "classification": "final-capability-adapter",
       "intent": "Project shared settings, authenticated site identity, permissions, browsing-data clearing, diagnostics and relaunch persistence.",
@@ -525,9 +515,9 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 28,
+      "order": 26,
       "id": "android-download-storage",
-      "patch": "patches/gecko/0028-android-download-storage.patch",
+      "patch": "patches/gecko/0027-android-download-storage.patch",
       "sha256": "e4c1fd0c8242ce28ca06de3d9b3221c536b3599f4d92ca8d010b5c4300f2c73b",
       "classification": "final-capability-adapter",
       "intent": "Preserve authenticated download retry, resolved filenames and actual product storage actions across the engine bridge.",
@@ -540,9 +530,9 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 29,
+      "order": 27,
       "id": "android-context-menu-actions",
-      "patch": "patches/gecko/0029-android-context-menu-actions.patch",
+      "patch": "patches/gecko/0028-android-context-menu-actions.patch",
       "sha256": "75d64dcfde7a1cc79efa9b85e7e23399a05e3871f1994ae098df4e25f6785994",
       "classification": "final-capability-adapter",
       "intent": "Deliver ordinary and extension context actions against the originating trusted content target.",
@@ -554,9 +544,9 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 30,
+      "order": 28,
       "id": "android-file-picker-uploads",
-      "patch": "patches/gecko/0030-android-file-picker-uploads.patch",
+      "patch": "patches/gecko/0029-android-file-picker-uploads.patch",
       "sha256": "338e48c3cb83aa321e673a6930ae051ad9a302b14bcec5ae22155c76665d6689",
       "classification": "final-capability-adapter",
       "intent": "Hand authorized SAF files and directories to Gecko with preserved relative paths and no duplicate copying.",
@@ -567,9 +557,9 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 31,
+      "order": 29,
       "id": "android-favicon-projection",
-      "patch": "patches/gecko/0031-android-favicon-projection.patch",
+      "patch": "patches/gecko/0030-android-favicon-projection.patch",
       "sha256": "8e8278645c2891c0fe2ce58d7878bf41289f89d8a70794ab9bd4bd9554f2f36a",
       "classification": "final-capability-adapter",
       "intent": "Project bounded document-owned favicon data through the shared actors without widening privileged host authority.",
@@ -581,24 +571,23 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 32,
+      "order": 30,
       "id": "android-navigation-history",
-      "patch": "patches/gecko/0032-android-navigation-history.patch",
+      "patch": "patches/gecko/0031-android-navigation-history.patch",
       "sha256": "ca3c2e948a92574f7af18d2dd8874c3d9429d5b59897d1234250955848e61764",
       "classification": "final-capability-adapter",
-      "intent": "Keep navigation outcomes, titles, optional bounded diagnostics and native/web presentation on real Gecko SessionHistory.",
+      "intent": "Keep navigation outcomes, titles and native/web presentation on real Gecko SessionHistory.",
       "invariants": [
         "Native product pages and web entries share the real Gecko SessionHistory, including selected restoration, back/forward and new branches.",
         "Navigation completion, cancellation, remote titles and dynamic document identity remain engine-derived and generation-bound in the final shared host.",
-        "Optional navigation diagnostics contain only the bounded latest anonymous record and cannot alter load results.",
         "Session and host integration retain the final history implementation rather than replaying URI-only intermediate restoration."
       ],
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 33,
+      "order": 31,
       "id": "android-extension-popup-lifecycle",
-      "patch": "patches/gecko/0033-android-extension-popup-lifecycle.patch",
+      "patch": "patches/gecko/0032-android-extension-popup-lifecycle.patch",
       "sha256": "fbd4f2830eae857639a993770b6b7a89aadeb7b20b3b90ed89b86ae43a88eb5c",
       "classification": "final-capability-adapter",
       "intent": "Bind extension popups to exact live owners, preserve load/error stages and track compositor and animated screen geometry through close.",
@@ -611,10 +600,10 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 34,
+      "order": 32,
       "id": "android-ime-transactions",
-      "patch": "patches/gecko/0034-android-ime-transactions.patch",
-      "sha256": "944f651a46547af1f522190295d94ba7c235a826dabdc7eccbe9ccb54e966f40",
+      "patch": "patches/gecko/0033-android-ime-transactions.patch",
+      "sha256": "2ec56c4114a98a5d444cc3c186eb8f79bd6008f76f4dceabef7dfeae75bfe9a9",
       "classification": "final-capability-adapter",
       "intent": "Keep optimistic IME edits separate from ordered Gecko confirmations and renew framework InputConnection ownership.",
       "invariants": [
@@ -622,15 +611,16 @@
         "Input connections are bound to their view and editor lifetime, and permanent Session closure clears text and pending actions.",
         "Pre-IME dispatch does not swallow all keys and ACTION_MULTIPLE is expanded before reaching Gecko.",
         "Gecko-confirmed text and pending native replies stay with the Session, not the transient InputConnection.",
-        "Old connections cannot write or end a replacement connection's batch, and internal Unicode key fallback does not replace the IME connection."
+        "Old connections cannot write or end a replacement connection's batch, and internal Unicode key fallback does not replace the IME connection.",
+        "System-owned Back, Menu, Forward, volume, Search and headset-hook keys remain unconsumed by the engine input peer, matching GeckoEditable; ordinary text and gamepad keys still reach Gecko."
       ],
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 35,
+      "order": 33,
       "id": "android-password-document-lifecycle",
-      "patch": "patches/gecko/0035-android-password-document-lifecycle.patch",
-      "sha256": "86ce815988dfaa2974ee8da15d8cb0406212605b2b5e7d3a18fc9247c7dca406",
+      "patch": "patches/gecko/0034-android-password-document-lifecycle.patch",
+      "sha256": "1dc53c8b157268ee85a1c94ef6e93f1f7d07a0d36345986ca79eafb8154cb850",
       "classification": "final-capability-adapter",
       "intent": "Bind login selection/save authorization to the originating document and acknowledge only committed Keystore/SQLite writes.",
       "invariants": [
@@ -649,23 +639,9 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 36,
-      "id": "android-profile-process-isolation",
-      "patch": "patches/gecko/0036-android-profile-process-isolation.patch",
-      "sha256": "a93732f08875d7727db5d5c689fec26ad785b0c8329ba47a4bc504d9787cf0da",
-      "classification": "final-capability-adapter",
-      "intent": "Separate profile-owned Android child-service namespaces before Gecko process startup.",
-      "invariants": [
-        "Each profile selects a distinct child-service class namespace before Gecko parent startup.",
-        "Socket, GPU, RDD, utility and content service ownership cannot cross profile parents.",
-        "Notification and Runtime registration use the same final profile namespace contract."
-      ],
-      "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
-    },
-    {
-      "order": 37,
+      "order": 34,
       "id": "navis-offline-search-service",
-      "patch": "patches/gecko/0037-navis-offline-search-service.patch",
+      "patch": "patches/gecko/0035-navis-offline-search-service.patch",
       "sha256": "1f4308cc87ec0ebeab84826ece5fa8a090237a4cb3011987e29edbf88e801678",
       "classification": "final-capability-adapter",
       "intent": "Use one Profile-owned Gecko search service for desktop/Android provider settings, submissions, opt-in suggestions and extension search.",
@@ -684,9 +660,9 @@
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
     },
     {
-      "order": 38,
+      "order": 35,
       "id": "download-launch-without-enterprise-policies",
-      "patch": "patches/gecko/0038-download-launch-without-enterprise-policies.patch",
+      "patch": "patches/gecko/0036-download-launch-without-enterprise-policies.patch",
       "sha256": "67fb09d22ea57d340e8eaa4a20d4f05b2ed9bb3f294396b11ba8151c3ab5b42d",
       "classification": "final-capability-adapter",
       "intent": "Keep Gecko's safe download-launch checks when the optional enterprise-policy service is absent.",
@@ -697,6 +673,113 @@
         "Neither shell commands nor a direct nsIFile launch bypass replaces Download.launch."
       ],
       "port_review": "Review this final capability and its shared build/host registration together against the target Gecko pin. Preserve upstream fallback and the stated security/lifecycle boundaries; validate the complete ordered series, not an isolated partial build."
+    },
+    {
+      "order": 36,
+      "id": "android-site-permission-lifecycle",
+      "patch": "patches/gecko/0037-android-site-permission-lifecycle.patch",
+      "sha256": "2a186e9fefbd1a17e36485ff471e18bd29e05f700856ad43ec68039b36b63ad0",
+      "classification": "final-capability-adapter",
+      "intent": "Keep Android site permissions, explicit camera/microphone source selection and native media state under request, document and revocation ownership.",
+      "invariants": [
+        "Gecko persists exact requesting-principal decisions; the former Android UI permission cache cannot regrant revoked access.",
+        "Current site changes authenticate the document, principal and issued navigation token; private changes are session-only.",
+        "Actor-owned frame identities aggregate media use and clear only their own state at teardown.",
+        "A permission epoch invalidates pending native consent before a late result can recreate a grant.",
+        "Platform receives plain boolean device state; native identities and handles stay private.",
+        "Capture consent selects only offered sources and preserves normal/private persistence and request cancellation.",
+        "Android packages the shared requesting-origin module consumed by its permission bridge."
+      ],
+      "port_review": "Review Android permission persistence, media actor shutdown, native transport event registration and token/epoch cancellation against the pinned ESR. Require native Android consent, stop, reset and cross-frame replay. Verify only offered camera/microphone sources can be selected and forged, stale or cancelled source choices cannot recreate a grant."
+    },
+    {
+      "order": 37,
+      "id": "request-origin-permission-ownership",
+      "patch": "patches/gecko/0038-request-origin-permission-ownership.patch",
+      "sha256": "efa5a889ef7d08713ed92258f6f9ef82bd36b91006e5755c3cb34a3f1c26e88a",
+      "classification": "final-capability-adapter",
+      "intent": "Keep Navis site permission grants, native queries and revocation on the exact requesting origin while retaining Permissions Policy.",
+      "invariants": [
+        "Navis geolocation, camera and microphone permission delegates select the requesting principal, including its native origin attributes.",
+        "Permissions Policy restrictions still reject disallowed embedded requests before stored grants are consulted.",
+        "Native permission queries for these capabilities never inherit the top-level origin or a parent host grant.",
+        "The non-Navis top-origin delegation behavior remains available to upstream consumers.",
+        "Permission controls and whole-tab stop have distinct scopes; device exposure gates are unchanged."
+      ],
+      "port_review": "Review native query and prompt principal selection, cross-process permission propagation and Permissions Policy rejection. Replay embedded grants/blocks and reset with independent top/frame origins on every required platform."
+    },
+    {
+      "order": 38,
+      "id": "media-error-parent-binding-dependency",
+      "classification": "final-capability-adapter",
+      "intent": "Make the MediaError parent type complete independently of generated unified binding order.",
+      "invariants": [
+        "MediaError includes the HTMLMediaElement definition required by its inline parent getter and native wrapper conversion. The dependency is explicit in every build, including non-unified compilation.",
+        "The change preserves MediaError DOM shape, ownership and media behavior. It does not add a capability or change product exposure."
+      ],
+      "port_review": "Reproduce the missing ToSupports overload with the real standalone MediaError binding, verify the corrected header under configured target flags, then complete the retained native build.",
+      "patch": "patches/gecko/0039-media-error-parent-binding-dependency.patch",
+      "sha256": "a6a01f713f79af58378d3e639d08444af5c7c5fdfc329ae00a2257b7a3a18044"
+    },
+    {
+      "order": 39,
+      "id": "excluded-web-api-graphs",
+      "patch": "patches/gecko/0041-excluded-web-api-graphs.patch",
+      "sha256": "52a42c6053f2b8fbcdf8343f370281b0013a7935ed5138bc44177d2f6d3c1eb2",
+      "classification": "final-capability-adapter",
+      "intent": "Remove browser-mediated device, identity, payment and XR implementation graphs when their configure capabilities are disabled.",
+      "invariants": [
+        "All four configure switches default on for upstream consumers; Navis explicitly disables them on every target.",
+        "Disabled graphs omit bindings, IPC, native services, JNI and packaged modules rather than only hiding Web entry points.",
+        "Ordinary WebAuthn, credential operations, camera/microphone capture, WebRTC, gamepad/input, rendering, Workers and generic permission ownership remain intact.",
+        "The DevTools loader requests MIDI map sandbox globals only when MOZ_WEB_DEVICE_APIS is compiled; retained page inspection initializes without the excluded WebMIDI bindings."
+      ],
+      "port_review": "Review disabled and upstream-enabled consumers together against the pinned Gecko graph, preserving exact IPC signatures and generated binding ownership."
+    },
+    {
+      "order": 40,
+      "id": "bundled-certificate-security",
+      "patch": "patches/gecko/0042-bundled-certificate-security.patch",
+      "sha256": "301cb1d6348c6f08dfc200adda857a702e79c9b9ef9559b1da773da84abc8128",
+      "classification": "final-capability-adapter",
+      "intent": "Use complete reviewed upstream certificate data and enforce an immutable offline OneCRL baseline before the first TLS verification.",
+      "invariants": [
+        "Every Navis TLS trust decision checks the complete packaged OneCRL issuer/serial and subject/SPKI-hash baseline before mutable certificate storage. Existing profiles, offline startup and async import cannot weaken it.",
+        "Trust data is the complete official NSS root-list snapshot with its matching library version header. Every upstream addition, removal and trust change is retained; NSS implementation follows the selected Gecko baseline and user-root CT boundaries remain intact.",
+        "Navis explicitly enforces CT mode 2 on all targets including Android and persisted old-profile values. The upstream metadata expiry safeguard remains unchanged.",
+        "The applicable upstream OneCRL startup import fix initializes the normal cert_storage consumer; it is additional to the immutable native baseline."
+      ],
+      "port_review": "Replay the complete hash-owned series independently. Verify first-handshake revocation with fresh and stale profiles offline, independent CT success/failure and expiry boundaries, fixed packaged-data identities and absence of service/attachment/signature requests on every target."
+    },
+    {
+      "order": 41,
+      "id": "context-menu-hover-lifecycle",
+      "patch": "patches/gecko/0043-context-menu-hover-lifecycle.patch",
+      "sha256": "91ab42b1b4444f26c97b798658d3b605849a57efd302c37c0741f748ca63b859",
+      "classification": "final-capability-adapter",
+      "intent": "Retain page hover for the entire chrome-owned context-menu lifetime, including pointer movement outside the popup, then restore normal pointer hit testing on closure.",
+      "invariants": [
+        "Only Desktop Embedder builds suppress content mouse move/enter/exit, and only while a context menu remains open in the same chrome document. Parent remote-target bookkeeping can still leave the actor, preserving other-window input.",
+        "Deferred exits and the last real pointer event retain parent coordinates and follow the existing BrowserParent IPC path. Closure releases exits before restoring only the latest real target, including precise Fission targets, then requests native pointer hit testing. No CSS locks, content script suppression, new public capability or remote service is introduced.",
+        "Actual menu closure releases every affected Fission frame. Submenu closure does not clear page hover while the parent context menu is still open, and another window is unaffected.",
+        "Saved addresses and originating documents remain private to Runtime. Hidden or removed address targets remain usable only for the current offered, enabled, single-use menu request."
+      ],
+      "port_review": "Verify same-window ownership, moves outside the still-open menu over the originating target, other page targets and Fission frames, ordinary popup behavior, cancellation/command/click dismissal, repeated closure and restored hover. Pair sanitizer peers with actual target compilation, independent Runtime consumer and packaged native pointer replay; retain address-snapshot and stale-request tests."
+    },
+    {
+      "order": 42,
+      "id": "local-pdf-and-printing",
+      "patch": "patches/gecko/0044-local-pdf-and-printing.patch",
+      "sha256": "e7f07b4a3b6127fe9c56d71c1b60d5a5dc7ec49999b0661b589289e852384616",
+      "classification": "final-capability-adapter",
+      "intent": "Restore the pinned local PDF viewer and engine printing behind Navis-owned document hosts.",
+      "invariants": [
+        "PDF conversion retains the original channel, response identity, scripting sandbox, range loading and password/form processing.",
+        "Only authenticated current PDF documents in owned Sessions can save; native objects and static-clone identities remain backend-private.",
+        "Desktop and Android use the complete responsive viewer; find stays in the viewer and AI, telemetry, Nimbus, model downloads and signature storage stay absent.",
+        "Engine printing retains its standard snapshot, preview and settings machinery; platform hosts own consent, destination and cancellation."
+      ],
+      "port_review": "Replay the whole ordered series, configure every target and verify reader/save/modified forms/print events, cancellation and native output. Preserve private origins, sandboxed downloads and stale-document denial."
     }
   ]
 }

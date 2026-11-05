@@ -198,7 +198,7 @@
 
           async create(details) {
             if (details.type === "separator") {
-              throw new ExtensionError("Navis 1.0 does not support separators");
+              throw new ExtensionError("Navis does not support separators");
             }
             const type =
               details.type || (details.url == null ? "folder" : "bookmark");

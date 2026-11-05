@@ -56,6 +56,17 @@
         background: Canvas;
         border: 1px solid CanvasText;
       }
+      #context-hover-target {
+        min-height: 6rem;
+        padding: 1rem;
+        border: 1px dashed;
+      }
+      #context-hover-target a {
+        visibility: hidden;
+      }
+      #context-hover-target:hover a {
+        visibility: visible;
+      }
     </style>
   </head>
   <body>
@@ -195,8 +206,33 @@
       <p><meter min="0" max="100" value="72">72%</meter></p>
     </section>
 
+    <section aria-labelledby="context-hover-heading">
+      <h2 id="context-hover-heading">Hover-only context-menu target</h2>
+      <div id="context-hover-target">
+        Hover here to create a link; leaving removes it.
+      </div>
+    </section>
+
     <a id="context-edge-link" href="/history-target">Edge menu target</a>
     <script>
+      const hoverTarget = document.getElementById("context-hover-target");
+      globalThis.navisContextHoverState = { enters: 0, leaves: 0 };
+      hoverTarget.addEventListener("mouseenter", () => {
+        globalThis.navisContextHoverState.enters++;
+        if (!document.getElementById("context-hover-link")) {
+          const link = document.createElement("a");
+          link.id = "context-hover-link";
+          link.href = "/history-target?from=hover-context";
+          link.textContent = "Open this hover-only link";
+          hoverTarget.append(document.createElement("br"), link);
+        }
+      });
+      hoverTarget.addEventListener("mouseleave", () => {
+        globalThis.navisContextHoverState.leaves++;
+        document.getElementById("context-hover-link")?.remove();
+        hoverTarget.querySelector("br")?.remove();
+      });
+
       document.getElementById("context-clean-link").href =
         `http://navis.test:${location.port}/history-target?utm_source=navis-test&keep=1`;
 

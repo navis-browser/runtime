@@ -194,19 +194,6 @@ index 1bafa6e8eb4053d0278f7f12ef172fbbaad3eab6..734b840238e3345b9bd8e1d26a902784
      if (!l10n) {
        l10n = new Localization(
          ["branding/brand.ftl", "toolkit/webauthnDialog.ftl"],
-diff --git a/dom/webauthn/WebAuthnService.h b/dom/webauthn/WebAuthnService.h
-index 4d794796c7dc50e344e49d0d0a41913875d008e9..ab210653fa2c1fad403f1a97551df85459ffceeb 100644
---- a/dom/webauthn/WebAuthnService.h
-+++ b/dom/webauthn/WebAuthnService.h
-@@ -12,7 +12,7 @@
- #include "nsIWebAuthnService.h"
- #include "nsTHashSet.h"
- 
--#ifdef MOZ_WIDGET_ANDROID
-+#if defined(MOZ_WIDGET_ANDROID)
- #  include "AndroidWebAuthnService.h"
- #endif
- 
 diff --git a/dom/webauthn/WinWebAuthnService.cpp b/dom/webauthn/WinWebAuthnService.cpp
 index cc8ffe73085ad523e39347d4c5c9702c68d9b9c6..87e1fc0d65395bbae061be28b0878e5ca6f29707 100644
 --- a/dom/webauthn/WinWebAuthnService.cpp

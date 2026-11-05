@@ -1,8 +1,49 @@
 diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
-index 512d786cdafb35010631762cdca339859a47e4ca..aa2e90aad0bb1166fd24c0f776b2292a15fbed87 100644
+index 9f7e47bb9836a2170c487ed2274d0d3dcc30aa9b..da9e65d81ebedb2ad23b92fb00b6546c62d85728 100644
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
-@@ -4117,12 +4117,13 @@ nsresult Document::InitFeaturePolicy(nsIChannel* aChannel) {
+@@ -4010,9 +4010,11 @@ nsresult Document::InitTLSCertificateBinding(nsIChannel* aChannel) {
+   return NS_OK;
+ }
+ 
+-static FeaturePolicy* GetFeaturePolicyFromElement(Element* aElement) {
++static already_AddRefed<FeaturePolicy> GetFeaturePolicyFromElement(
++    Element* aElement, nsIPrincipal* aLoadedOrigin) {
+   if (auto* iframe = HTMLIFrameElement::FromNodeOrNull(aElement)) {
+-    return iframe->FeaturePolicy();
++    RefPtr<FeaturePolicy> policy = iframe->FeaturePolicy();
++    return policy.forget();
+   }
+ 
+   if (!HTMLObjectElement::FromNodeOrNull(aElement) &&
+@@ -4020,7 +4022,12 @@ static FeaturePolicy* GetFeaturePolicyFromElement(Element* aElement) {
+     return nullptr;
+   }
+ 
+-  return aElement->OwnerDoc()->FeaturePolicy();
++  // Object/embed documents have an empty container declaration, and still
++  // apply default container policy relative to the embedding document.
++  RefPtr<FeaturePolicy> container = new FeaturePolicy(nullptr);
++  container->SetDefaultOrigin(aLoadedOrigin);
++  container->InheritPolicy(aElement->OwnerDoc()->FeaturePolicy());
++  return container.forget();
+ }
+ 
+ nsresult Document::InitDocPolicy(nsIChannel* aChannel) {
+@@ -4071,8 +4078,10 @@ void Document::InitFeaturePolicy(
+         // Let's inherit the policy from the parent container element if it
+         // exists.
+         if (RefPtr<dom::FeaturePolicy> containerFeaturePolicy =
+-                GetFeaturePolicyFromElement(aContainer)) {
+-          featurePolicy->InheritPolicy(containerFeaturePolicy);
++                GetFeaturePolicyFromElement(aContainer,
++                                            featurePolicy->DefaultOrigin())) {
++          featurePolicy->InheritPolicy(
++              containerFeaturePolicy->ToFeaturePolicyInfo());
+           featurePolicy->SetSrcOrigin(containerFeaturePolicy->GetSrcOrigin());
+         }
+       });
+@@ -4115,12 +4124,13 @@ nsresult Document::InitFeaturePolicy(nsIChannel* aChannel) {
      return NS_OK;
    }
  
@@ -20,37 +61,52 @@ index 512d786cdafb35010631762cdca339859a47e4ca..aa2e90aad0bb1166fd24c0f776b2292a
    }
  
    return NS_OK;
+diff --git a/dom/base/nsObjectLoadingContent.cpp b/dom/base/nsObjectLoadingContent.cpp
+index becc79a4361fb8466552b6bbd1c6ad1e4ec83bf0..90a222cd611e06737053ac5a841ce5d90a31e586 100644
+--- a/dom/base/nsObjectLoadingContent.cpp
++++ b/dom/base/nsObjectLoadingContent.cpp
+@@ -1268,6 +1268,11 @@ nsresult nsObjectLoadingContent::LoadObject(bool aNotify, bool aForceLoad,
+         break;
+       }
+ 
++      // Publish the container policy before this channel can create a
++      // document. Same-process object/embed loads need the same parent
++      // authority as loads which later switch to another content process.
++      RefreshFeaturePolicy();
++
+       // We're loading a document, so we have to set LOAD_DOCUMENT_URI
+       // (especially important for firing onload)
+       nsLoadFlags flags = 0;
+@@ -1776,12 +1781,8 @@ nsObjectLoadingContent::UpgradeLoadToDocument(
+     return NS_ERROR_FAILURE;
+   }
+ 
+-  // At this point we know that we have a browsing context, so it's time to make
+-  // sure that that browsing context gets the correct container feature policy.
+-  // This is needed for `DocumentLoadListener::MaybeTriggerProcessSwitch` to be
+-  // able to start loading the document with the correct container feature
+-  // policy in the load info.
+-  RefreshFeaturePolicy();
++  // LoadObject published the container policy before opening its document
++  // channel, for both same-process and process-switching loads.
+ 
+   bc.forget(aBrowsingContext);
+   return NS_OK;
 diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
-index abe1c6a675e13a0d6e55b64614343f031a165535..7e49b52b20c1dc562cb5da5ebe14c56aedff6acd 100644
 --- a/dom/bindings/Bindings.conf
 +++ b/dom/bindings/Bindings.conf
-@@ -627,6 +627,11 @@ DOMInterfaces = {
-     'concrete': True,
- },
+@@ -625,6 +625,11 @@
  
+ 'PerformanceResourceTiming' : {
+     'concrete': True,
++},
++
 +'PermissionsPolicy': {
 +    'nativeType': 'mozilla::dom::FeaturePolicy',
 +    'headerFile': 'mozilla/dom/FeaturePolicy.h',
-+},
-+
- 'TaskController' : {
-     'nativeType' : 'mozilla::dom::WebTaskController',
-     'headerFile' : 'mozilla/dom/WebTaskController.h'
-diff --git a/dom/geolocation/test/mochitest/test_crossorigin_iframe.html b/dom/geolocation/test/mochitest/test_crossorigin_iframe.html
-index f29bb7dd8f73dd98b5da931665019931c81e110e..235daa9e6c46278fd41c60e9113821178daad54c 100644
---- a/dom/geolocation/test/mochitest/test_crossorigin_iframe.html
-+++ b/dom/geolocation/test/mochitest/test_crossorigin_iframe.html
-@@ -53,8 +53,8 @@ async function nextTest() {
- }
+ },
  
- SpecialPowers.pushPrefEnv({"set": [
--  ["dom.security.featurePolicy.header.enabled", true],
--  ["dom.security.featurePolicy.webidl.enabled", true],
-+  ["dom.security.permissionsPolicy.header.enabled", true],
-+  ["dom.security.permissionsPolicy.webidl.enabled", true],
- ]}).then(nextTest);
- </script>
- </body>
+ 'TaskController' : {
 diff --git a/dom/html/HTMLIFrameElement.cpp b/dom/html/HTMLIFrameElement.cpp
 index 592c0e2351e0c745624c5ccfa18088ab982f9e85..16264a86940c08ed43c29babf763ea6cbdbf2d32 100644
 --- a/dom/html/HTMLIFrameElement.cpp
@@ -359,10 +415,21 @@ index 364794bda6f7486e97be2953e2ec0076d01a1344..bc2b09c3da00340e33801e943235e92d
  
  }  // namespace mozilla::dom
 diff --git a/dom/security/featurepolicy/FeaturePolicy.cpp b/dom/security/featurepolicy/FeaturePolicy.cpp
-index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f266500c7 100644
+index 1fe85ff871e1ec81ed3de04587816fab4433d37e..7fe8adb44e8c45ac7f34d1aff3a7873dd145906c 100644
 --- a/dom/security/featurepolicy/FeaturePolicy.cpp
 +++ b/dom/security/featurepolicy/FeaturePolicy.cpp
-@@ -50,21 +50,44 @@ void FeaturePolicy::InheritPolicy(FeaturePolicy* aParentPolicy) {
+@@ -31,6 +31,10 @@ FeaturePolicy::FeaturePolicy(nsINode* aNode) : mParentNode(aNode) {}
+ void FeaturePolicy::InheritPolicy(FeaturePolicy* aParentPolicy) {
+   MOZ_ASSERT(aParentPolicy);
+ 
++  mParentOrigin = aParentPolicy->mDefaultOrigin;
++  mParentDeclaredString = aParentPolicy->mDeclaredString;
++  mParentInheritedDeniedFeatureNames =
++      aParentPolicy->mInheritedDeniedFeatureNames.Clone();
+   mInheritedDeniedFeatureNames.Clear();
+ 
+   RefPtr<FeaturePolicy> dest = this;
+@@ -50,21 +54,44 @@ void FeaturePolicy::InheritPolicy(FeaturePolicy* aParentPolicy) {
        dest->mParentAllowedAllFeatures.AppendElement(featureName);
      }
  
@@ -419,7 +486,71 @@ index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f
        dest->SetInheritedDeniedFeature(featureName);
      }
    });
-@@ -139,7 +162,13 @@ void FeaturePolicy::AppendToDeclaredAllowInAncestorChain(
+@@ -72,26 +99,46 @@ void FeaturePolicy::InheritPolicy(FeaturePolicy* aParentPolicy) {
+ 
+ void FeaturePolicy::InheritPolicy(
+     const FeaturePolicyInfo& aContainerFeaturePolicyInfo) {
+-  // We create a temporary FeaturePolicy from the FeaturePolicyInfo to be able
+-  // to re-use the inheriting functionality from FeaturePolicy.
+-  RefPtr<dom::FeaturePolicy> featurePolicy = new dom::FeaturePolicy(nullptr);
+-  featurePolicy->SetDefaultOrigin(aContainerFeaturePolicyInfo.mDefaultOrigin);
+-  featurePolicy->SetInheritedDeniedFeatureNames(
+-      aContainerFeaturePolicyInfo.mInheritedDeniedFeatureNames);
+-
+-  const auto& declaredString = aContainerFeaturePolicyInfo.mDeclaredString;
+-  if (aContainerFeaturePolicyInfo.mSelfOrigin && !declaredString.IsEmpty()) {
+-    featurePolicy->SetDeclaredPolicy(nullptr, declaredString,
+-                                     aContainerFeaturePolicyInfo.mSelfOrigin,
+-                                     aContainerFeaturePolicyInfo.mSrcOrigin);
++  mInheritedDeniedFeatureNames.Clear();
++  mParentAllowedAllFeatures.Clear();
++  mDeclaredFeaturesInAncestorChain.Clear();
++  const auto& info = aContainerFeaturePolicyInfo;
++  if (!info.mParentOrigin ||
++      (info.mSelfOrigin && !info.mSelfOrigin->Equals(info.mParentOrigin))) {
++    FeaturePolicyUtils::ForEachFeature([this](const char* aName) {
++      nsString name;
++      name.AppendASCII(aName);
++      SetInheritedDeniedFeature(name);
++    });
++    return;
+   }
+ 
+-  for (const auto& featureName :
+-       aContainerFeaturePolicyInfo.mAttributeEnabledFeatureNames) {
+-    featurePolicy->MaybeSetAllowedPolicy(featureName);
++  // Inherited document denials and its actual HTTP declaration are distinct
++  // from an iframe declaration. Reparse the former with the header parser.
++  RefPtr<FeaturePolicy> parent = new FeaturePolicy(nullptr);
++  parent->SetDefaultOrigin(info.mParentOrigin);
++  parent->SetDeclaredPolicyFromPermissionsPolicyHeader(
++      nullptr, NS_ConvertUTF16toUTF8(info.mParentDeclaredString),
++      info.mParentOrigin);
++  parent->SetInheritedDeniedFeatureNames(
++      info.mParentInheritedDeniedFeatureNames);
++
++  RefPtr<FeaturePolicy> container = new FeaturePolicy(nullptr);
++  container->SetDefaultOrigin(mDefaultOrigin);
++  container->SetDeclaredPolicy(nullptr, info.mDeclaredString,
++                               info.mParentOrigin, info.mSrcOrigin);
++  for (const auto& name : info.mAttributeEnabledFeatureNames) {
++    container->MaybeSetAllowedPolicy(name);
+   }
+-
+-  InheritPolicy(featurePolicy);
++  container->InheritPolicy(parent);
++
++  // The container already applied the feature's default allowlist relative
++  // to the embedding document. The loaded document is not another iframe.
++  mInheritedDeniedFeatureNames =
++      container->mInheritedDeniedFeatureNames.Clone();
++  mParentAllowedAllFeatures = container->mParentAllowedAllFeatures.Clone();
++  mDeclaredFeaturesInAncestorChain =
++      container->mDeclaredFeaturesInAncestorChain.Clone();
+ }
+ 
+ void FeaturePolicy::SetInheritedDeniedFeature(const nsAString& aFeatureName) {
+@@ -139,7 +186,13 @@ void FeaturePolicy::AppendToDeclaredAllowInAncestorChain(
        for (nsIPrincipal* principal : list) {
          featureInChain.AppendToAllowList(principal);
        }
@@ -434,7 +565,7 @@ index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f
      }
    }
  
-@@ -178,6 +207,24 @@ void FeaturePolicy::SetDeclaredPolicy(Document* aDocument,
+@@ -178,6 +231,24 @@ void FeaturePolicy::SetDeclaredPolicy(Document* aDocument,
    }
  }
  
@@ -459,7 +590,7 @@ index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f
  void FeaturePolicy::ResetDeclaredPolicy() {
    mFeatures.Clear();
    mDeclaredString.Truncate();
-@@ -189,7 +236,7 @@ void FeaturePolicy::ResetDeclaredPolicy() {
+@@ -189,7 +260,7 @@ void FeaturePolicy::ResetDeclaredPolicy() {
  
  JSObject* FeaturePolicy::WrapObject(JSContext* aCx,
                                      JS::Handle<JSObject*> aGivenProto) {
@@ -468,7 +599,7 @@ index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f
  }
  
  bool FeaturePolicy::AllowsFeature(const nsAString& aFeatureName,
-@@ -285,7 +332,10 @@ void FeaturePolicy::AllowedFeatures(nsTArray<nsString>& aAllowedFeatures) {
+@@ -285,7 +356,10 @@ void FeaturePolicy::AllowedFeatures(nsTArray<nsString>& aAllowedFeatures) {
  
  void FeaturePolicy::GetAllowlistForFeature(const nsAString& aFeatureName,
                                             nsTArray<nsString>& aList) const {
@@ -480,7 +611,7 @@ index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f
      return;
    }
  
-@@ -306,8 +356,20 @@ void FeaturePolicy::GetAllowlistForFeature(const nsAString& aFeatureName,
+@@ -306,8 +380,20 @@ void FeaturePolicy::GetAllowlistForFeature(const nsAString& aFeatureName,
            return;
          }
  
@@ -502,11 +633,46 @@ index 1fe85ff871e1ec81ed3de04587816fab4433d37e..f364b59c9c6d6c3f51a6141e8d5bd42f
        return;
      }
    }
+@@ -362,7 +448,10 @@ FeaturePolicyInfo FeaturePolicy::ToFeaturePolicyInfo() const {
+           mDeclaredString,
+           mDefaultOrigin,
+           mSelfOrigin,
+-          mSrcOrigin};
++          mSrcOrigin,
++          mParentInheritedDeniedFeatureNames.Clone(),
++          mParentDeclaredString,
++          mParentOrigin};
+ }
+ 
+ }  // namespace mozilla::dom
 diff --git a/dom/security/featurepolicy/FeaturePolicy.h b/dom/security/featurepolicy/FeaturePolicy.h
-index cd207b38e9bb5ee22938aae2f975b283215d91b5..5ffdbc06c9b7b54270de5fc452a06a08e2d11e0c 100644
+index cd207b38e9bb5ee22938aae2f975b283215d91b5..4d1c375a2293746e4d1ade86126bc16273fa7df6 100644
 --- a/dom/security/featurepolicy/FeaturePolicy.h
 +++ b/dom/security/featurepolicy/FeaturePolicy.h
-@@ -104,6 +104,12 @@ class FeaturePolicy final : public nsISupports, public nsWrapperCache {
+@@ -68,6 +68,12 @@ struct FeaturePolicyInfo final {
+   nsCOMPtr<nsIPrincipal> mDefaultOrigin;
+   nsCOMPtr<nsIPrincipal> mSelfOrigin;
+   nsCOMPtr<nsIPrincipal> mSrcOrigin;
++
++  // Snapshot the embedding document separately from the container's policy
++  // for its prospective src. Redirects must evaluate the final loaded origin.
++  CopyableTArray<nsString> mParentInheritedDeniedFeatureNames;
++  nsString mParentDeclaredString;
++  nsCOMPtr<nsIPrincipal> mParentOrigin;
+ };
+ 
+ using MaybeFeaturePolicyInfo = Maybe<FeaturePolicyInfo>;
+@@ -95,7 +101,8 @@ class FeaturePolicy final : public nsISupports, public nsWrapperCache {
+   // Inherits the policy from the 'parent' context if it exists.
+   void InheritPolicy(FeaturePolicy* aParentFeaturePolicy);
+ 
+-  // Inherits the policy from the 'parent' context if it exists.
++  // A loaded document inherits its container's evaluated policy once,
++  // using its final origin and the original src for the 'src' keyword.
+   void InheritPolicy(const FeaturePolicyInfo& aContainerFeaturePolicyInfo);
+ 
+   // Sets the declarative part of the policy. This can be from the HTTP header
+@@ -104,6 +111,12 @@ class FeaturePolicy final : public nsISupports, public nsWrapperCache {
                           const nsAString& aPolicyString,
                           nsIPrincipal* aSelfOrigin, nsIPrincipal* aSrcOrigin);
  
@@ -519,6 +685,17 @@ index cd207b38e9bb5ee22938aae2f975b283215d91b5..5ffdbc06c9b7b54270de5fc452a06a08
    // This method creates a policy for aFeatureName allowing it to '*' if it
    // doesn't exist yet. It's used by HTMLIFrameElement to enable features by
    // attributes.
+@@ -212,6 +225,10 @@ class FeaturePolicy final : public nsISupports, public nsWrapperCache {
+   nsCOMPtr<nsIPrincipal> mDefaultOrigin;
+   nsCOMPtr<nsIPrincipal> mSelfOrigin;
+   nsCOMPtr<nsIPrincipal> mSrcOrigin;
++
++  nsTArray<nsString> mParentInheritedDeniedFeatureNames;
++  nsString mParentDeclaredString;
++  nsCOMPtr<nsIPrincipal> mParentOrigin;
+ };
+ 
+ }  // namespace mozilla::dom
 diff --git a/dom/security/featurepolicy/FeaturePolicyParser.cpp b/dom/security/featurepolicy/FeaturePolicyParser.cpp
 index 84bf8175dc33fd11c8f6cff0fc0d21cfaf883f9e..2ea5338d7f6c18841d269dbd85c509ae69c2d0a5 100644
 --- a/dom/security/featurepolicy/FeaturePolicyParser.cpp
@@ -688,7 +865,7 @@ index 6e90e0a48b347cfe368170fa08f61b7760639539..96f63cdfefb754a30a7cd275296a6592
  
  }  // namespace mozilla::dom
 diff --git a/dom/security/featurepolicy/FeaturePolicyUtils.cpp b/dom/security/featurepolicy/FeaturePolicyUtils.cpp
-index b40bf7f16ee6d564f94650d279b055e55927b2f6..910c5062fdb3727f39ef8a028a85cd4b7605262d 100644
+index b40bf7f16ee6d564f94650d279b055e55927b2f6..0f89dda30ecfb562edd92b4e3cedf5c2b5ffca17 100644
 --- a/dom/security/featurepolicy/FeaturePolicyUtils.cpp
 +++ b/dom/security/featurepolicy/FeaturePolicyUtils.cpp
 @@ -50,6 +50,7 @@ static FeatureMap sSupportedFeatures[] = {
@@ -699,6 +876,28 @@ index b40bf7f16ee6d564f94650d279b055e55927b2f6..910c5062fdb3727f39ef8a028a85cd4b
  };
  
  /*
+@@ -259,6 +260,9 @@ void ParamTraits<mozilla::dom::FeaturePolicyInfo>::Write(
+   WriteParam(aWriter, aParam.mDefaultOrigin);
+   WriteParam(aWriter, aParam.mSelfOrigin);
+   WriteParam(aWriter, aParam.mSrcOrigin);
++  WriteParam(aWriter, aParam.mParentInheritedDeniedFeatureNames);
++  WriteParam(aWriter, aParam.mParentDeclaredString);
++  WriteParam(aWriter, aParam.mParentOrigin);
+ }
+ 
+ bool ParamTraits<mozilla::dom::FeaturePolicyInfo>::Read(
+@@ -268,7 +272,10 @@ bool ParamTraits<mozilla::dom::FeaturePolicyInfo>::Read(
+          ReadParam(aReader, &aResult->mDeclaredString) &&
+          ReadParam(aReader, &aResult->mDefaultOrigin) &&
+          ReadParam(aReader, &aResult->mSelfOrigin) &&
+-         ReadParam(aReader, &aResult->mSrcOrigin);
++         ReadParam(aReader, &aResult->mSrcOrigin) &&
++         ReadParam(aReader, &aResult->mParentInheritedDeniedFeatureNames) &&
++         ReadParam(aReader, &aResult->mParentDeclaredString) &&
++         ReadParam(aReader, &aResult->mParentOrigin);
+ }
+ 
+ }  // namespace IPC
 diff --git a/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp b/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp
 index ae1f7d84910d82d82571fc7964d1739ef7dbf0d4..7acd372c452a42c2adfe98766470b25ac7d464c8 100644
 --- a/dom/security/featurepolicy/test/gtest/TestFeaturePolicyParser.cpp
@@ -1598,7 +1797,7 @@ index 1b540b3d3c8cefe057560ee7e16969fc11949b2d..53822f1c03cad6d51aeaf409c19ccfe0
    [CEReactions, SetterThrows, Pure]
             attribute DOMString allow;
 diff --git a/dom/xhr/XMLHttpRequestMainThread.cpp b/dom/xhr/XMLHttpRequestMainThread.cpp
-index d9e123e3e191783356af91805910d260ae909e77..465b5681be4dc98c6efa6b79af8493901ff8bee2 100644
+index bc2ff418307794f04e0508c0dd5a0fc3163b9200..9356d3cdc990e5934ba5b212cf3638f2958a3638 100644
 --- a/dom/xhr/XMLHttpRequestMainThread.cpp
 +++ b/dom/xhr/XMLHttpRequestMainThread.cpp
 @@ -42,6 +42,7 @@
@@ -1609,7 +1808,7 @@ index d9e123e3e191783356af91805910d260ae909e77..465b5681be4dc98c6efa6b79af849390
  #include "mozilla/dom/File.h"
  #include "mozilla/dom/FileBinding.h"
  #include "mozilla/dom/FileCreatorHelper.h"
-@@ -3090,6 +3091,18 @@ bool XMLHttpRequestMainThread::CanSend(ErrorResult& aRv) {
+@@ -3127,6 +3128,18 @@ bool XMLHttpRequestMainThread::CanSend(ErrorResult& aRv) {
      return false;
    }
  

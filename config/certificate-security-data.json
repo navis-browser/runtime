@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "ct": {
+    "path": "security/ct/CTKnownLogs.h",
+    "upstream_revision": "a34c4160e3f75ab9918fbe4669ff7ae56f1977c8",
+    "source_url": "https://raw.githubusercontent.com/mozilla-firefox/firefox/a34c4160e3f75ab9918fbe4669ff7ae56f1977c8/security/ct/CTKnownLogs.h",
+    "sha256": "9996b01fa72014bbca23a17ccb22aa5b406a66ca1b518b2c629dc942b32c4b25",
+    "expires_at": "2026-12-31T13:10:03Z"
+  },
+  "onecrl": {
+    "path": "services/settings/dumps/security-state/onecrl.json",
+    "source_url": "https://firefox.settings.services.mozilla.com/v1/buckets/security-state/collections/onecrl/records",
+    "source_response_sha256": "c7e46552a5b3d7758b3d8e1d8f2a1f69bda5f3b1e3793abba18dee3632a02828",
+    "normalization": "Sort complete official records by id; preserve record fields; timestamp is maximum last_modified. UTF-8 JSON indent=2 with final newline.",
+    "sha256": "82ada214d04b48431e28a0b4f6c121a0beb1254f3f3f2f640284968eddc7e90e",
+    "timestamp": 1793208925525,
+    "records": 1918
+  },
+  "trust": {
+    "path": "security/nss/lib/ckfw/builtins/certdata.txt",
+    "sha256": "3ec2b4d240dc12c747eaf450061db84af757c483bbda302f9e29ceb5d70be510",
+    "upstream_tag": "NSS_3_132_RTM",
+    "upstream_revision": "34716626284b2a8ed64f8055734ae7730e902686",
+    "upstream_source_url": "https://raw.githubusercontent.com/mozilla/nss/34716626284b2a8ed64f8055734ae7730e902686/lib/ckfw/builtins/certdata.txt",
+    "upstream_sha256": "3ec2b4d240dc12c747eaf450061db84af757c483bbda302f9e29ceb5d70be510",
+    "scope": "complete-upstream-snapshot",
+    "version_path": "security/nss/lib/ckfw/builtins/nssckbi.h",
+    "version_upstream_source_url": "https://raw.githubusercontent.com/mozilla/nss/34716626284b2a8ed64f8055734ae7730e902686/lib/ckfw/builtins/nssckbi.h",
+    "version_sha256": "e3218dcdf9d25d838cac36bb6ec2b98df40e2041b335847f26bd137878f658e6",
+    "library_version": "2.92"
+  },
+  "startup_fix": {
+    "upstream_revision": "848b0ae1c82c929c8a5ed5747455df8659deb364",
+    "bug": "https://bugzilla.mozilla.org/show_bug.cgi?id=2084311",
+    "scope": "Included in the selected Gecko release; no extra initialization adaptation. Navis also checks an immutable native baseline before any certificate storage lookup."
+  },
+  "gecko": {
+    "remote": "https://github.com/mozilla-firefox/firefox.git",
+    "tag": "FIREFOX_153_6_0esr_RELEASE",
+    "build_tag": "FIREFOX_153_6_0esr_BUILD2",
+    "commit": "a34c4160e3f75ab9918fbe4669ff7ae56f1977c8",
+    "nss_version": "3.125"
+  }
+}

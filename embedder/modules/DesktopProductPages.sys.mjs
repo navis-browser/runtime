@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import { certificateSecurityDiagnostics } from "resource://gre/modules/CertificateSecurity.sys.mjs";
+
 const CONTENT_PROCESS_TYPES = new Set(["web", "webIsolated", "file", "withCoopCoep", "webServiceWorker"]);
 const bounded = (value, length = 8192) => String(value ?? "").slice(0, length);
 const safe = read => { try { return bounded(read()); } catch { return ""; } };
@@ -118,6 +120,7 @@ export async function getAdditionalSupportDiagnostics(runtime = null) {
     .map(key => safe(() => Services.sysinfo.hasKey(key) ? `${key}: ${Services.sysinfo.getProperty(key)}` : ""))
     .filter(Boolean).join("\n");
   return Object.freeze([
+    ...certificateSecurityDiagnostics(),
     ["diagnostics.cpuDetails", cpuDetails],
     ["diagnostics.adapterDescription2", safe(() => gfx.adapterDescription2)],
     ["diagnostics.adapterRAM", safe(() => gfx.adapterRAM)],

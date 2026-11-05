@@ -36,6 +36,13 @@ DesktopEmbedderStartup.prototype = {
       );
       initializeDesktopLocale();
       initializeDesktopProcessIsolation();
+      const { initializeCertificateSecurity } = ChromeUtils.importESModule(
+        "resource://gre/modules/CertificateSecurity.sys.mjs"
+      );
+      initializeCertificateSecurity();
+      const { initializeNavisPDF } = ChromeUtils.importESModule(
+        "resource://gre/modules/NavisDocuments.sys.mjs");
+      initializeNavisPDF();
     } else if (topic === "final-ui-startup") {
       Services.obs.removeObserver(this, "final-ui-startup");
       // Idempotent fallback for startup paths that do not publish the normal
@@ -60,6 +67,9 @@ DesktopEmbedderStartup.prototype = {
         "resource://gre/modules/DesktopWebAuthnPrompt.sys.mjs"
       );
       shutdownDesktopWebAuthnPrompt();
+      const { shutdownNavisPDF } = ChromeUtils.importESModule(
+        "resource://gre/modules/NavisDocuments.sys.mjs");
+      shutdownNavisPDF();
       if (this.startupCrashTimer !== null) {
         clearTimeout(this.startupCrashTimer);
         this.startupCrashTimer = null;

@@ -8,5 +8,4 @@ DIRS += [
     "modules",
 ]
 
-if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
-    DIRS += ["extensions"]
+DIRS += ["extensions"]

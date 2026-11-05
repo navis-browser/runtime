@@ -367,6 +367,13 @@ export class DesktopEmbedderWebRTCChild extends JSWindowActorChild {
   }
 
   receiveMessage(message) {
+    if (message.name === "webrtc:StopSharing") {
+      const windowId = this.contentWindow?.windowGlobalChild?.innerWindowId;
+      if (windowId) {
+        Services.obs.notifyObservers(null, "getUserMedia:revoke", String(windowId));
+      }
+      return;
+    }
     const { callID, windowID } = message.data;
     const contentWindow = Services.wm.getOuterWindowWithId(windowID);
 

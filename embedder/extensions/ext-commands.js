@@ -57,7 +57,7 @@
     async onManifestEntry() {
       if ("_execute_sidebar_action" in this.extension.manifest.commands) {
         throw new ExtensionError(
-          "Navis 1.0 does not provide extension sidebar commands"
+          "Navis does not provide extension sidebar commands"
         );
       }
       const shortcuts = new ExtensionShortcuts({

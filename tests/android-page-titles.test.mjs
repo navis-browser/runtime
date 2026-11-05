@@ -28,7 +28,7 @@ function fixture(input = source, privateMode = false) {
       NS_BINDING_RETARGETED: 0x804b0004, NS_ERROR_ABORT: 0x80004004 },
     ChromeUtils: { generateQI() {} }, shuttingDown: false, browser,
     dispatcher: { dispatch: (name, data) => events.push({ name, ...data }) },
-    faviconBridge: { invalidate() {} }, reportNavigationDiagnostic() {},
+    faviconBridge: { invalidate() {} }, reportNavigationFailure() {},
     dispatchHistoryState() {}, dispatchSessionState() {},
   };
   const body = input.slice(input.indexOf("class AndroidNavigationProgress {"),

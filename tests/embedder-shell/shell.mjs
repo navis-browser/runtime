@@ -779,12 +779,16 @@ runtime.setSessionDelegateFactory(session => ({
         id: request.id,
         permissions: request.permissions,
       });
-      return Promise.resolve(
-        Services.prefs.getCharPref(
-          "desktop.embedder.shell.permissionDecision",
-          "dismiss"
-        )
+      const decision = Services.prefs.getCharPref(
+        "desktop.embedder.shell.permissionDecision", "dismiss"
       );
+      if (request.choices && decision.startsWith("allow-")) {
+        const choices = JSON.parse(Services.prefs.getCharPref(
+          "desktop.embedder.shell.permissionChoices", "{}"
+        ));
+        return Promise.resolve({ decision, choices });
+      }
+      return Promise.resolve(decision);
     },
     onCanceled: request =>
       emit("permission-canceled", {

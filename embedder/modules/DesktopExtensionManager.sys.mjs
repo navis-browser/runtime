@@ -397,7 +397,7 @@ export class DesktopExtensionManager {
     if (!pending.compatibility.compatible) {
       pending.install.cancel();
       throw installError(
-        "The package requires capabilities outside the Navis 1.0 profile",
+        "The package requires capabilities outside the Navis profile",
         "unsupported-capability"
       );
     }
@@ -621,7 +621,7 @@ export class DesktopExtensionManager {
     if (addon.type !== "extension" || !addon.isWebExtension) {
       install.cancel();
       throw installError(
-        "Navis 1.0 accepts WebExtension packages only",
+        "Navis accepts WebExtension packages only",
         "unsupported-package-type"
       );
     }
@@ -663,7 +663,7 @@ export class DesktopExtensionManager {
       if (comparison < 0) {
         install.cancel();
         throw installError(
-          "Extension downgrades are not supported in Navis 1.0",
+          "Extension downgrades are not supported in Navis",
           "downgrade-rejected"
         );
       }

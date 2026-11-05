@@ -30,10 +30,10 @@ index 15b704d22467e8b6db6236c324cbf5bbd7e71514..63c90be4393cc38c4b7ad63eb40dbe32
      about_pages.append('url-classifier')
  
 diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
-index aa2e90aad0bb1166fd24c0f776b2292a15fbed87..1079588b8ac34419bc11329c4fdeaa56258f77af 100644
+index da9e65d81ebedb2ad23b92fb00b6546c62d85728..afd0f1c1ee2414098b32cef4d07a013999851886 100644
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
-@@ -13534,11 +13534,42 @@ bool Document::CanRewriteURL(nsIURI* aTargetURL, bool aReportErrors) const {
+@@ -13528,11 +13528,42 @@ bool Document::CanRewriteURL(nsIURI* aTargetURL, bool aReportErrors) const {
      return NS_SUCCEEDED(principal->CheckMayLoad(aTargetURL, false));
    }
  
@@ -78,10 +78,10 @@ index aa2e90aad0bb1166fd24c0f776b2292a15fbed87..1079588b8ac34419bc11329c4fdeaa56
    }
  
 diff --git a/netwerk/base/nsNetUtil.cpp b/netwerk/base/nsNetUtil.cpp
-index 5b27e9190c238591845288815e84a2b812e29107..fb04d49eb5db76ccb81187dd46896ad973d686d3 100644
+index 1796212af1b59610a748cf9b6d0471eeb9f25da1..c1def5ddac461d174e40d9af12618d8a46b5a292 100644
 --- a/netwerk/base/nsNetUtil.cpp
 +++ b/netwerk/base/nsNetUtil.cpp
-@@ -1919,6 +1919,13 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
+@@ -1921,6 +1921,13 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
      return NewStandardURI(aSpec, aCharset, aBaseURI, 21, aURI);
    }
  

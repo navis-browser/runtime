@@ -89,20 +89,19 @@ index 326a57da12a5611247c2048d9102e9f7a6b393aa..57243f04ceb0c2719c2e3af31fc16bed
      let pushSubscriptionActor = this._pushSubscriptionActor;
      if (pushSubscriptionActor) {
 diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
-index 79ecc34fdd06fd62aace7445c2d938abd955bb4d..abe1c6a675e13a0d6e55b64614343f031a165535 100644
 --- a/dom/bindings/Bindings.conf
 +++ b/dom/bindings/Bindings.conf
-@@ -1701,6 +1701,10 @@ if not buildconfig.substs.get("MOZ_WEBEXTENSIONS_RUNTIME", False):
+@@ -1677,6 +1677,10 @@
+         "GleanObject",
+         "GleanDualLabeledCounter",
      ):
-         DOMInterfaces.pop(interface)
- 
-+if not buildconfig.substs.get("MOZ_WEB_PUSH", False):
-+    for interface in ("PushEvent", "PushMessageData"):
 +        DOMInterfaces.pop(interface)
 +
- if buildconfig.substs.get("MOZ_DEVTOOLS") != "none":
-     DOMInterfaces.update({
++if not buildconfig.substs.get("MOZ_WEB_PUSH", False):
++    for interface in ("PushEvent", "PushMessageData"):
+         DOMInterfaces.pop(interface)
  
+ if buildconfig.substs.get("MOZ_DEVTOOLS") != "none":
 diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
 index bc026d0a5ba222723e70e1cd40161fe0aa374033..08262066fa56d46d4294f7decefec2430cdd41cc 100644
 --- a/dom/ipc/ContentChild.cpp
@@ -119,7 +118,7 @@ index bc026d0a5ba222723e70e1cd40161fe0aa374033..08262066fa56d46d4294f7decefec243
  #include "mozilla/dom/RemoteWorkerService.h"
  #include "mozilla/dom/ScreenOrientation.h"
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 256834a6c3820cd73302efffac424ce53290fa2a..9b88a8ec494ff925591d6ac0d792c5dbc761a9fa 100644
+index 50a60cb9ec3a9758a76e60489e7b413be7740c7b..f31e14844406701e74dd053fbbf67fc2449b1094 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -114,7 +114,9 @@
@@ -160,7 +159,7 @@ index e25eb30b1373ac1c79741c03c2513dbb3f449d5e..e0fa624a1fb593f409ce0a6b27885d36
      DIRS.remove("privateattribution")
  
 diff --git a/dom/notification/NotificationUtils.cpp b/dom/notification/NotificationUtils.cpp
-index 7adcf382ac584a7b3ea93f0f2018ca2839828967..c6ad3ef8fb0779daef58ed54b64a783b17aa9a2d 100644
+index 0f11f7533322e24d3e6a05d1d052fb056b302fdc..43fc764f10ca211af809b4c8e62844780e64d27e 100644
 --- a/dom/notification/NotificationUtils.cpp
 +++ b/dom/notification/NotificationUtils.cpp
 @@ -14,7 +14,9 @@
@@ -174,7 +173,7 @@ index 7adcf382ac584a7b3ea93f0f2018ca2839828967..c6ad3ef8fb0779daef58ed54b64a783b
  #include "nsNetUtil.h"
  #include "nsServiceManagerUtils.h"
  
-@@ -343,6 +345,9 @@ nsresult OpenSettings(nsIPrincipal* aPrincipal) {
+@@ -350,6 +352,9 @@ nsresult OpenSettings(nsIPrincipal* aPrincipal) {
  
  nsresult AdjustPushQuota(nsIPrincipal* aPrincipal,
                           NotificationStatusChange aChange) {
@@ -184,7 +183,7 @@ index 7adcf382ac584a7b3ea93f0f2018ca2839828967..c6ad3ef8fb0779daef58ed54b64a783b
    MOZ_ASSERT(XRE_IsParentProcess());
    nsCOMPtr<nsIPushQuotaManager> pushQuotaManager =
        do_GetService("@mozilla.org/push/Service;1");
-@@ -357,6 +362,7 @@ nsresult AdjustPushQuota(nsIPrincipal* aPrincipal,
+@@ -364,6 +369,7 @@ nsresult AdjustPushQuota(nsIPrincipal* aPrincipal,
      return pushQuotaManager->NotificationForOriginShown(origin.get());
    }
    return pushQuotaManager->NotificationForOriginClosed(origin.get());
@@ -309,10 +308,10 @@ index 1f40c59051c06c76a0c447e51f95b5cfd80c59d3..487d897acf45fe72ba3a0ddc85de31f9
  class ExtendableMessageEvent final : public ExtendableEvent {
    JS::Heap<JS::Value> mData;
 diff --git a/dom/serviceworkers/ServiceWorkerManager.cpp b/dom/serviceworkers/ServiceWorkerManager.cpp
-index 2ee2a2caae501ff6b7e10a463eb88daf904b21c8..fd4eb7d66ca2bfcbd49980caaea92a7370d4392d 100644
+index 2e641335fb3d205027d576df50dc59604c5d8db3..05df718043b2eff0ef09fc56d57aced08898650d 100644
 --- a/dom/serviceworkers/ServiceWorkerManager.cpp
 +++ b/dom/serviceworkers/ServiceWorkerManager.cpp
-@@ -76,7 +76,9 @@
+@@ -77,7 +77,9 @@
  #include "nsINetworkInterceptController.h"
  #include "nsIPermissionManager.h"
  #include "nsIPrincipal.h"
@@ -323,7 +322,7 @@ index 2ee2a2caae501ff6b7e10a463eb88daf904b21c8..fd4eb7d66ca2bfcbd49980caaea92a73
  #include "nsITimer.h"
  #include "nsIUploadChannel2.h"
  #include "nsNetUtil.h"
-@@ -1118,6 +1120,7 @@ RefPtr<ServiceWorkerRegistrationPromise> ServiceWorkerManager::GetRegistration(
+@@ -1119,6 +1121,7 @@ RefPtr<ServiceWorkerRegistrationPromise> ServiceWorkerManager::GetRegistration(
    return runnable->Promise();
  }
  
@@ -331,7 +330,7 @@ index 2ee2a2caae501ff6b7e10a463eb88daf904b21c8..fd4eb7d66ca2bfcbd49980caaea92a73
  NS_IMETHODIMP
  ServiceWorkerManager::SendPushEvent(const nsACString& aOriginAttributes,
                                      const nsACString& aScope,
-@@ -1137,6 +1140,13 @@ ServiceWorkerManager::SendPushEvent(const nsACString& aOriginAttributes,
+@@ -1138,6 +1141,13 @@ ServiceWorkerManager::SendPushEvent(const nsACString& aOriginAttributes,
    MOZ_ASSERT(optional_argc == 0);
    return SendPushEvent(aOriginAttributes, aScope, u""_ns, Nothing());
  }
@@ -345,7 +344,7 @@ index 2ee2a2caae501ff6b7e10a463eb88daf904b21c8..fd4eb7d66ca2bfcbd49980caaea92a73
  
  nsresult ServiceWorkerManager::SendCookieChangeEvent(
      const OriginAttributes& aOriginAttributes, const nsACString& aScope,
-@@ -1161,6 +1171,7 @@ nsresult ServiceWorkerManager::SendCookieChangeEvent(
+@@ -1162,6 +1172,7 @@ nsresult ServiceWorkerManager::SendCookieChangeEvent(
        aCookie, aCookieDeleted, registration);
  }
  
@@ -353,7 +352,7 @@ index 2ee2a2caae501ff6b7e10a463eb88daf904b21c8..fd4eb7d66ca2bfcbd49980caaea92a73
  nsresult ServiceWorkerManager::SendPushEvent(
      const nsACString& aOriginAttributes, const nsACString& aScope,
      const nsAString& aMessageId, const Maybe<nsTArray<uint8_t>>& aData) {
-@@ -1207,6 +1218,13 @@ ServiceWorkerManager::SendPushSubscriptionChangeEvent(
+@@ -1208,6 +1219,13 @@ ServiceWorkerManager::SendPushSubscriptionChangeEvent(
    return info->WorkerPrivate()->SendPushSubscriptionChangeEvent(
        aOldSubscription);
  }
@@ -384,7 +383,6 @@ index d25f08f78ead8cbcf1dcf6ba38dc7313c80dfd2d..0c56bf1f0eb4c9af56ccb0e600f6b279
    void WorkerIsIdle(ServiceWorkerInfo* aWorker);
  
 diff --git a/dom/serviceworkers/ServiceWorkerOp.cpp b/dom/serviceworkers/ServiceWorkerOp.cpp
-index ab9e85d7da58b971a4e778c009612948e0bf767d..15d6a461ed90411b4e1704b389ecec79c0806a48 100644
 --- a/dom/serviceworkers/ServiceWorkerOp.cpp
 +++ b/dom/serviceworkers/ServiceWorkerOp.cpp
 @@ -32,9 +32,11 @@
@@ -402,7 +400,7 @@ index ab9e85d7da58b971a4e778c009612948e0bf767d..15d6a461ed90411b4e1704b389ecec79
  #include "mozilla/dom/RemoteWorkerChild.h"
  #include "mozilla/dom/RemoteWorkerNonLifeCycleOpControllerChild.h"
  #include "mozilla/dom/RemoteWorkerService.h"
-@@ -57,7 +59,9 @@
+@@ -55,7 +57,9 @@
  #include "nsDebug.h"
  #include "nsError.h"
  #include "nsINamed.h"
@@ -413,7 +411,7 @@ index ab9e85d7da58b971a4e778c009612948e0bf767d..15d6a461ed90411b4e1704b389ecec79
  #include "nsISupportsImpl.h"
  #include "nsITimer.h"
  #include "nsIURI.h"
-@@ -746,6 +750,7 @@ class CookieChangeEventOp final : public ExtendableEventOp {
+@@ -744,6 +748,7 @@
    }
  };
  
@@ -421,7 +419,7 @@ index ab9e85d7da58b971a4e778c009612948e0bf767d..15d6a461ed90411b4e1704b389ecec79
  /**
   * PushEventOp
   */
-@@ -917,6 +922,7 @@ class PushSubscriptionChangeEventOp final : public ExtendableEventOp {
+@@ -915,6 +920,7 @@
      return !DispatchFailed(rv);
    }
  };
@@ -429,7 +427,7 @@ index ab9e85d7da58b971a4e778c009612948e0bf767d..15d6a461ed90411b4e1704b389ecec79
  
  class NotificationEventOp : public ExtendableEventOp,
                              public nsITimerCallback,
-@@ -2091,6 +2097,7 @@ class ExtensionAPIEventOp final : public ServiceWorkerOp {
+@@ -2081,6 +2087,7 @@
        op = MakeRefPtr<CookieChangeEventOp>(std::move(aArgs),
                                             std::move(aCallback));
        break;
@@ -437,7 +435,7 @@ index ab9e85d7da58b971a4e778c009612948e0bf767d..15d6a461ed90411b4e1704b389ecec79
      case ServiceWorkerOpArgs::TServiceWorkerPushEventOpArgs:
        op = MakeRefPtr<PushEventOp>(std::move(aArgs), std::move(aCallback));
        break;
-@@ -2098,6 +2105,7 @@ class ExtensionAPIEventOp final : public ServiceWorkerOp {
+@@ -2088,6 +2095,7 @@
        op = MakeRefPtr<PushSubscriptionChangeEventOp>(std::move(aArgs),
                                                       std::move(aCallback));
        break;
@@ -477,7 +475,7 @@ index 91f81f4e338e4b12feb96cf92b27d528cddff256..1a7f592edad94ff370327d6715e1270e
    ServiceWorkerMessageEventOpArgs;
    ServiceWorkerExtensionAPIEventOpArgs;
 diff --git a/dom/serviceworkers/ServiceWorkerPrivate.cpp b/dom/serviceworkers/ServiceWorkerPrivate.cpp
-index 22ba6f0dce60bb23a5a0366d235d9c3ac8fea5e7..7dcdd5d91a9fecfbcfb175c78164feec91e5885c 100644
+index 6f507b7c235a7eeca1eef85f9fdee66540bd52dc..9852dc38cbbae4a0c3170a41c603c7f3be27c9c2 100644
 --- a/dom/serviceworkers/ServiceWorkerPrivate.cpp
 +++ b/dom/serviceworkers/ServiceWorkerPrivate.cpp
 @@ -38,8 +38,10 @@
@@ -509,7 +507,7 @@ index 22ba6f0dce60bb23a5a0366d235d9c3ac8fea5e7..7dcdd5d91a9fecfbcfb175c78164feec
  
  ServiceWorkerPrivate::PendingFetchEvent::PendingFetchEvent(
      ServiceWorkerPrivate* aOwner,
-@@ -1009,6 +1013,7 @@ nsresult ServiceWorkerPrivate::SendCookieChangeEventInternal(
+@@ -1031,6 +1035,7 @@ nsresult ServiceWorkerPrivate::SendCookieChangeEventInternal(
        });
  }
  
@@ -517,7 +515,7 @@ index 22ba6f0dce60bb23a5a0366d235d9c3ac8fea5e7..7dcdd5d91a9fecfbcfb175c78164feec
  nsresult ServiceWorkerPrivate::SendPushEvent(
      const nsAString& aMessageId, const Maybe<nsTArray<uint8_t>>& aData,
      RefPtr<ServiceWorkerRegistrationInfo> aRegistration) {
-@@ -1077,6 +1082,7 @@ nsresult ServiceWorkerPrivate::SendPushSubscriptionChangeEvent(
+@@ -1105,6 +1110,7 @@ nsresult ServiceWorkerPrivate::SendPushSubscriptionChangeEvent(
          MOZ_ASSERT(aResult.type() == ServiceWorkerOpResult::Tnsresult);
        });
  }
@@ -786,10 +784,9 @@ index c6c415ff429bce6abcf4c7b4609cae71440c7252..06ed680d3f6f147478293242cf3dbff2
    "midi",
    "storage-access", // Defined in https://privacycg.github.io/storage-access/#permissions-integration
 diff --git a/dom/webidl/ServiceWorkerGlobalScope.webidl b/dom/webidl/ServiceWorkerGlobalScope.webidl
-index ec11574283b36df3b3d02044cbaf24f80db03014..51591dfa2343ec2b822ceb5d05c85863e541d84f 100644
 --- a/dom/webidl/ServiceWorkerGlobalScope.webidl
 +++ b/dom/webidl/ServiceWorkerGlobalScope.webidl
-@@ -33,10 +33,12 @@ interface ServiceWorkerGlobalScope : WorkerGlobalScope {
+@@ -33,10 +33,12 @@
  };
  
  // These are from w3c.github.io/push-api/
@@ -859,47 +856,6 @@ index 56ed7942f651e366c50afe10e0277f887ad6ef4d..f7d7145813a33ba24a1fd861771272f5
 +    FINAL_TARGET_FILES.actors += ["GeckoViewPushParent.sys.mjs"]
 +
  MOCHITEST_MANIFESTS += ["tests/mochitests/mochitest.toml"]
-diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-index 83aa63be7ad92211717e7bbe1d18bba5f168267a..80b30b72d9a0f11a223437eb15277db48006b334 100644
---- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-+++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-@@ -45,13 +45,16 @@ const JSPROCESSACTORS = {
-       ],
-     },
-   },
--  GeckoViewPush: {
-+};
-+
-+if (AppConstants.MOZ_WEB_PUSH) {
-+  JSPROCESSACTORS.GeckoViewPush = {
-     parent: {
-       esModuleURI: "resource:///actors/GeckoViewPushParent.sys.mjs",
-     },
-     includeParent: true,
--  },
--};
-+  };
-+}
- 
- const JSWINDOWACTORS = {
-   LoadURIDelegate: {
-@@ -150,10 +153,12 @@ export class GeckoViewStartup {
-           ],
-         });
- 
--        GeckoViewUtils.addLazyGetter(this, "GeckoViewPushController", {
--          module: "resource://gre/modules/GeckoViewPushController.sys.mjs",
--          ged: ["GeckoView:PushEvent", "GeckoView:PushSubscriptionChanged"],
--        });
-+        if (AppConstants.MOZ_WEB_PUSH) {
-+          GeckoViewUtils.addLazyGetter(this, "GeckoViewPushController", {
-+            module: "resource://gre/modules/GeckoViewPushController.sys.mjs",
-+            ged: ["GeckoView:PushEvent", "GeckoView:PushSubscriptionChanged"],
-+          });
-+        }
- 
-         GeckoViewUtils.addLazyPrefObserver(
-           {
 diff --git a/mobile/shared/components/geckoview/components.conf b/mobile/shared/components/geckoview/components.conf
 index 6cb173bd4b485baa59cf6a4d69b1f11397adc176..6e1076111bb19582368a333838077b9d177fc061 100644
 --- a/mobile/shared/components/geckoview/components.conf
@@ -1017,10 +973,9 @@ index f9b903549171337d85639812c757f568125de353..2197e80f83938752e9fab006389d6413
      }
  
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index 1f73af0bcfead523ec3263d9e94d9e7cb009ff34..edc7ef615334b00ce66fd9f5c88221176fca7e0d 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -191,6 +191,13 @@ export var AppConstants = Object.freeze({
+@@ -184,6 +184,13 @@
    false,
  #endif
  

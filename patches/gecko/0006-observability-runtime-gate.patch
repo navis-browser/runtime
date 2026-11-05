@@ -72,7 +72,7 @@ index 22bef400fd4554025afe9c317407e5a68813d8c5..99d55d6f4d36bfafca0ef578b0ec786f
      {"translations",
       "chrome://global/content/translations/about-translations.html",
 diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
-index 079746f77996ca03464c8f30b00cd34817b8430d..f59671c4532d544b891ecae338fa99d06b5a93f1 100644
+index 46331de2d268019689f69b1f440e1fe3f4dc5530..ccade920d7fc10edcd05cd6623731f8f940de1c9 100644
 --- a/dom/base/Navigator.cpp
 +++ b/dom/base/Navigator.cpp
 @@ -22,7 +22,9 @@
@@ -115,7 +115,7 @@ index 079746f77996ca03464c8f30b00cd34817b8430d..f59671c4532d544b891ecae338fa99d0
  
    mUserActivation = nullptr;
  
-@@ -2352,12 +2360,14 @@ dom::ModelContext* Navigator::ModelContext() {
+@@ -2357,12 +2365,14 @@ dom::ModelContext* Navigator::ModelContext() {
    return mModelContext;
  }
  
@@ -165,7 +165,7 @@ index d303ab778fb5a4381d5f5b5db6288175538c2ab5..967b24fb7f316e4bc1ade54a3ef750bb
    RefPtr<dom::WakeLockJS> mWakeLock;
  };
 diff --git a/dom/base/nsGlobalWindowInner.cpp b/dom/base/nsGlobalWindowInner.cpp
-index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d55368553901005159c266c4a 100644
+index 851763a32a891a49c4c8207ef1fbde9c3aa299b5..4256100b25f0170a52c8cb414c8b00a21fd81ab6 100644
 --- a/dom/base/nsGlobalWindowInner.cpp
 +++ b/dom/base/nsGlobalWindowInner.cpp
 @@ -199,8 +199,12 @@
@@ -183,7 +183,7 @@ index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d5536855390100515
  #include "mozilla/intl/LocaleService.h"
  #include "mozilla/ipc/BackgroundUtils.h"
  #include "mozilla/ipc/PBackgroundSharedTypes.h"
-@@ -1346,8 +1350,10 @@ void nsGlobalWindowInner::FreeInnerObjects() {
+@@ -1348,8 +1352,10 @@ void nsGlobalWindowInner::FreeInnerObjects() {
    mSpeechSynthesis = nullptr;
  #endif
  
@@ -194,7 +194,7 @@ index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d5536855390100515
  
    mParentTarget = nullptr;
  
-@@ -1445,8 +1451,10 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsGlobalWindowInner)
+@@ -1447,8 +1453,10 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsGlobalWindowInner)
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSpeechSynthesis)
  #endif
  
@@ -205,7 +205,7 @@ index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d5536855390100515
  
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mOuterWindow)
  
-@@ -1558,8 +1566,10 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(nsGlobalWindowInner)
+@@ -1560,8 +1568,10 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(nsGlobalWindowInner)
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mSpeechSynthesis)
  #endif
  
@@ -216,7 +216,7 @@ index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d5536855390100515
  
    if (tmp->mOuterWindow) {
      nsGlobalWindowOuter::Cast(tmp->mOuterWindow)->MaybeClearInnerWindow(tmp);
-@@ -3262,6 +3272,7 @@ bool nsGlobalWindowInner::HasActiveSpeechSynthesis() {
+@@ -3264,6 +3274,7 @@ bool nsGlobalWindowInner::HasActiveSpeechSynthesis() {
  
  #endif
  
@@ -224,7 +224,7 @@ index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d5536855390100515
  mozilla::glean::Glean* nsGlobalWindowInner::Glean() {
    if (!mGlean) {
      mGlean = MakeRefPtr<mozilla::glean::Glean>(this);
-@@ -3277,6 +3288,20 @@ mozilla::glean::GleanPings* nsGlobalWindowInner::GleanPings() {
+@@ -3279,6 +3290,20 @@ mozilla::glean::GleanPings* nsGlobalWindowInner::GleanPings() {
  
    return mGleanPings;
  }
@@ -246,7 +246,7 @@ index 5d52febe90cf6bb0bcebe674428a647831ffb624..d2076db71114de1d5536855390100515
  Nullable<WindowProxyHolder> nsGlobalWindowInner::GetParent(
      ErrorResult& aError) {
 diff --git a/dom/base/nsGlobalWindowInner.h b/dom/base/nsGlobalWindowInner.h
-index 5198fa3d30e6fb5c0003a1816cadbf9ae9bb849c..618c62a3f1785d1cb0cf6e95c56cffc00e9b3006 100644
+index 7669295cef9801852869c0b73e7babd05270e803..3f7ee038c0be59a3cd4b5cb956377438e816653d 100644
 --- a/dom/base/nsGlobalWindowInner.h
 +++ b/dom/base/nsGlobalWindowInner.h
 @@ -82,10 +82,12 @@ template <class T>
@@ -276,7 +276,7 @@ index 5198fa3d30e6fb5c0003a1816cadbf9ae9bb849c..618c62a3f1785d1cb0cf6e95c56cffc0
  
    already_AddRefed<nsDOMCSSDeclaration> GetDefaultComputedStyle(
        mozilla::dom::Element& aElt, const nsAString& aPseudoElt,
-@@ -1482,8 +1489,10 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+@@ -1486,8 +1493,10 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
    RefPtr<mozilla::dom::SpeechSynthesis> mSpeechSynthesis;
  #endif
  
@@ -288,13 +288,13 @@ index 5198fa3d30e6fb5c0003a1816cadbf9ae9bb849c..618c62a3f1785d1cb0cf6e95c56cffc0
    // This is the CC generation the last time we called CanSkip.
    uint32_t mCanSkipCCGeneration;
 diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
-index a49a8b79afa42b427f0adb9e340a1036912e1aae..79ecc34fdd06fd62aace7445c2d938abd955bb4d 100644
 --- a/dom/bindings/Bindings.conf
 +++ b/dom/bindings/Bindings.conf
-@@ -1650,6 +1650,35 @@ DOMInterfaces = {
+@@ -1649,6 +1649,35 @@
+ },
  
  }
- 
++
 +if not buildconfig.substs.get("MOZ_OBSERVABILITY_RUNTIME", False):
 +    for interface in (
 +        "GleanImpl",
@@ -323,11 +323,10 @@ index a49a8b79afa42b427f0adb9e340a1036912e1aae..79ecc34fdd06fd62aace7445c2d938ab
 +        "GleanDualLabeledCounter",
 +    ):
 +        DOMInterfaces.pop(interface)
-+
- if not buildconfig.substs.get("MOZ_WEBEXTENSIONS_RUNTIME", False):
-     for interface in (
-         "ChannelWrapper",
-@@ -2081,8 +2110,9 @@ addExternalIface('nsIOpenWindowInfo', nativeType='nsIOpenWindowInfo',
+ 
+ if buildconfig.substs.get("MOZ_DEVTOOLS") != "none":
+     DOMInterfaces.update({
+@@ -2059,8 +2088,9 @@
                   notflattened=True)
  addExternalIface('nsICookieJarSettings', nativeType='nsICookieJarSettings',
                   notflattened=True)
@@ -340,7 +339,7 @@ index a49a8b79afa42b427f0adb9e340a1036912e1aae..79ecc34fdd06fd62aace7445c2d938ab
                   nativeType='nsISessionStoreRestoreData',
                   headerFile='nsISessionStoreRestoreData.h', notflattened=True)
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 18cf7df6280a8869200a5ff2ee56230c33b69686..256834a6c3820cd73302efffac424ce53290fa2a 100644
+index c1331c230abf11a19eb78ed5e0251753bafa4b22..50a60cb9ec3a9758a76e60489e7b413be7740c7b 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -222,7 +222,9 @@
@@ -370,7 +369,7 @@ index 18cf7df6280a8869200a5ff2ee56230c33b69686..256834a6c3820cd73302efffac424ce5
  static mozilla::glean::security::FissionPrincipalsExtra
  GetAndLogPrincipalValidationFailure(nsIPrincipal* aPrincipal,
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index bbab9d0d8b81ebd7adf6d11cea8ffa512b8f91eb..a83a025e7c1125e07ae7606b1aa147dd5c359304 100644
+index 53ce9391a5c95b34c615e7f2a874868e098ed685..a37934bf36069b6e211574d868665006a634aaae 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
 @@ -518,6 +518,7 @@ class ContentParent final : public PContentParent,
@@ -390,10 +389,10 @@ index bbab9d0d8b81ebd7adf6d11cea8ffa512b8f91eb..a83a025e7c1125e07ae7606b1aa147dd
    PHeapSnapshotTempFileHelperParent* AllocPHeapSnapshotTempFileHelperParent();
  #endif
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index 37c1b31830681445d49581e55ab06365dec23be6..a6979e42afd8e37010bf846153e0a7b238ca0657 100644
+index 3a8eed799e3f6cf5fcde837d02702eace3502b6c..d1d230695200d68549eb70c0ac4bccb3b7cb37a5 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -180,7 +180,9 @@ using mozilla::dom::Wireframe from "mozilla/dom/DocumentBinding.h";
+@@ -181,7 +181,9 @@ using mozilla::dom::Wireframe from "mozilla/dom/DocumentBinding.h";
  using mozilla::PerfStats::MetricMask from "mozilla/PerfStats.h";
  using nsIDNSService::ResolverMode from "nsIDNSService.h";
  using mozilla::dom::UserActivation::Modifiers from "mozilla/dom/UserActivation.h";
@@ -403,7 +402,7 @@ index 37c1b31830681445d49581e55ab06365dec23be6..a6979e42afd8e37010bf846153e0a7b2
  using nsIClipboard::ClipboardType from "nsIClipboard.h";
  using nsIUrlClassifierFeature::listType from "nsIUrlClassifierFeature.h";
  using mozilla::dom::ReferrerPolicy from "mozilla/dom/ReferrerPolicyBinding.h";
-@@ -1987,6 +1989,7 @@ parent:
+@@ -1994,6 +1996,7 @@ parent:
      async KillGPUProcess();
  #endif
  
@@ -411,7 +410,7 @@ index 37c1b31830681445d49581e55ab06365dec23be6..a6979e42afd8e37010bf846153e0a7b2
    async AttributionEvent(nsCString aSourceHost,
                           PrivateAttributionImpressionType aType,
                           uint32_t aIndex, nsString aAd, nsCString aTargetHost);
-@@ -1997,6 +2000,7 @@ parent:
+@@ -2004,6 +2007,7 @@ parent:
                                PrivateAttributionImpressionType? aImpressionType,
                                nsString[] aAds,
                                nsCString[] aImpressionSourceHosts);
@@ -448,7 +447,7 @@ index d586dc5e43881bae1aef0a9c62b7d2b47f3cac70..d29855cd47cc2aea53c2024c23c8301f
  
  // https://w3c-fedid.github.io/login-status/#login-status-javascript
 diff --git a/dom/webidl/Window.webidl b/dom/webidl/Window.webidl
-index 245f261ce8714cdd05122e21537317f4ec5d2140..26db72537dd5fb68b169b812622ede38b691145d 100644
+index 41234f3e925c30eb454a8898ec3933a3ac810fc2..a9e9473d56e3543f8d9c9ba21fd7e1f76a6d4aa8 100644
 --- a/dom/webidl/Window.webidl
 +++ b/dom/webidl/Window.webidl
 @@ -861,10 +861,17 @@ partial interface Window {
@@ -470,10 +469,9 @@ index 245f261ce8714cdd05122e21537317f4ec5d2140..26db72537dd5fb68b169b812622ede38
  
  partial interface Window {
 diff --git a/dom/webidl/moz.build b/dom/webidl/moz.build
-index 4bf339c92ef36e617a886b8d7b926d49a994087c..483f6697a0373b3c9e87a94ab40be2e841575ba1 100644
 --- a/dom/webidl/moz.build
 +++ b/dom/webidl/moz.build
-@@ -664,9 +664,6 @@ WEBIDL_FILES = [
+@@ -664,9 +664,6 @@
      "GeolocationPositionError.webidl",
      "GeometryUtils.webidl",
      "GetUserMediaRequest.webidl",
@@ -483,7 +481,7 @@ index 4bf339c92ef36e617a886b8d7b926d49a994087c..483f6697a0373b3c9e87a94ab40be2e8
      "Headers.webidl",
      "Highlight.webidl",
      "HighlightRegistry.webidl",
-@@ -1141,8 +1138,36 @@ WEBIDL_FILES = [
+@@ -1141,8 +1138,35 @@
      "XSLTProcessor.webidl",
  ]
  
@@ -499,11 +497,10 @@ index 4bf339c92ef36e617a886b8d7b926d49a994087c..483f6697a0373b3c9e87a94ab40be2e8
 +        "GleanPings.webidl",
 +    ]
 +
-+if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
-+    WEBIDL_FILES += [
-+        "StreamFilter.webidl",
-+        "StreamFilterDataEvent.webidl",
-+    ]
++WEBIDL_FILES += [
++    "StreamFilter.webidl",
++    "StreamFilterDataEvent.webidl",
++]
 +
 +if CONFIG["MOZ_WEB_PUSH"]:
 +    WEBIDL_FILES += [
@@ -540,7 +537,7 @@ index 766f82a5ee043944685922d20ac61d10aa29bedc..b2623fd31519d5c203cbbb9051f66539
  
  [target.'cfg(target_os = "windows")'.dependencies]
 diff --git a/gfx/wgpu_bindings/Cargo.toml b/gfx/wgpu_bindings/Cargo.toml
-index b63256788630561b61678d55e2a461e750d7f8a2..1413007141f47f18889e4be3a88321c6fa6701c8 100644
+index ac89d8a8036fbef8e6c61f4b34cd51a816219020..f8cf2eedaad2882577e9cb9c59c87ec00e720889 100644
 --- a/gfx/wgpu_bindings/Cargo.toml
 +++ b/gfx/wgpu_bindings/Cargo.toml
 @@ -12,7 +12,8 @@ publish = false
@@ -729,41 +726,6 @@ index 656a68e9719adcf6f1a5f7bb1dd82ffad83ed2c6..2e197dcf30e6fa7aa95dd195fb800acb
  
      // This should always go last, since the idle tasks (except for the ones with
      // timeouts) should execute in order. Note that this observer notification is
-diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-index c31b157a5bf3ff7e2bd00fc86b27a924f359b36e..83aa63be7ad92211717e7bbe1d18bba5f168267a 100644
---- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-+++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-@@ -12,12 +12,17 @@ ChromeUtils.defineESModuleGetters(lazy, {
-   ActorManagerParent: "resource://gre/modules/ActorManagerParent.sys.mjs",
-   DoHController: "moz-src:///toolkit/components/doh/DoHController.sys.mjs",
-   EventDispatcher: "resource://gre/modules/Messaging.sys.mjs",
--  NimbusGeckoViewQATelemetry:
--    "resource://gre/modules/NimbusGeckoViewQATelemetry.sys.mjs",
-   PdfJs: "resource://pdf.js/PdfJs.sys.mjs",
-   GeckoViewPreferences: "resource://gre/modules/GeckoViewPreferences.sys.mjs",
- });
- 
-+if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
-+  ChromeUtils.defineESModuleGetters(lazy, {
-+    NimbusGeckoViewQATelemetry:
-+      "resource://gre/modules/NimbusGeckoViewQATelemetry.sys.mjs",
-+  });
-+}
-+
- const { debug, warn } = GeckoViewUtils.initLogging("Startup");
- 
- function InitLater(fn, object, name) {
-@@ -335,7 +340,9 @@ export class GeckoViewStartup {
-         Services.obs.addObserver(this, "browser-idle-startup-tasks-finished");
-         Services.obs.addObserver(this, "handlersvc-store-initialized");
- 
--        lazy.NimbusGeckoViewQATelemetry.init();
-+        if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
-+          lazy.NimbusGeckoViewQATelemetry.init();
-+        }
- 
-         Services.obs.notifyObservers(null, "geckoview-startup-complete");
-         break;
 diff --git a/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
 index d2a252ac53d7d6e6c67bf608b6b74e2663b14ec9..27587880d117b26c731f067c8e63635cfa219217 100644
 --- a/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
@@ -823,7 +785,7 @@ index 355db7092fb88c000d66a1cbff24bb14c3c2e5af..f47680347c6eb6c4a0026dc53d8e57db
  #include "mozilla/glean/NetwerkMetrics.h"
  #include "mozilla/Services.h"
 diff --git a/netwerk/protocol/http/Http3Session.cpp b/netwerk/protocol/http/Http3Session.cpp
-index da3ca43b8bae9f1522169ff9baea99f12708b0d4..bb231590d88229b9172365651bdda15f9b053c76 100644
+index f1abcbb04e8f4d52c536cfa14323cc4e3d95efb4..94cc459d953009da0a7c87f503635595954dbb52 100644
 --- a/netwerk/protocol/http/Http3Session.cpp
 +++ b/netwerk/protocol/http/Http3Session.cpp
 @@ -19,6 +19,7 @@
@@ -936,7 +898,7 @@ index 1fb68b1010e3f2e86292eed34c1ac35f2044de0d..5c6927f93195269d96f16e48d8ad297e
  fuzzing = ["neqo-http3/disable-encryption"]
  
 diff --git a/netwerk/socket/neqo_glue/src/lib.rs b/netwerk/socket/neqo_glue/src/lib.rs
-index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d9e1bafbc 100644
+index 58a198f345980ef6cc6cf8d476903ef5a11df7d6..354b3800f00a6356b172f5ddd2f05e7772fe817e 100644
 --- a/netwerk/socket/neqo_glue/src/lib.rs
 +++ b/netwerk/socket/neqo_glue/src/lib.rs
 @@ -20,6 +20,7 @@ use std::{
@@ -972,7 +934,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
          self.record_stats_in_glean();
      }
  }
-@@ -590,13 +598,19 @@ impl NeqoHttp3Conn {
+@@ -610,13 +618,19 @@ impl NeqoHttp3Conn {
              local_addr: local,
              refcnt: unsafe { AtomicRefcnt::new() },
              socket,
@@ -992,7 +954,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
              datagram_segments_received: networking::http_3_udp_datagram_segments_received
                  .start_buffer(),
              buffered_outbound_datagram: None,
-@@ -605,6 +619,7 @@ impl NeqoHttp3Conn {
+@@ -625,6 +639,7 @@ impl NeqoHttp3Conn {
          unsafe { RefPtr::from_raw(conn).ok_or(NS_ERROR_NOT_CONNECTED) }
      }
  
@@ -1000,7 +962,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
      fn record_stats_in_glean(&self) {
          use firefox_on_glean::metrics::networking as glean;
          use neqo_common::Ecn;
-@@ -1161,12 +1176,17 @@ pub unsafe extern "C" fn neqo_http3conn_process_input(
+@@ -1181,12 +1196,17 @@ pub unsafe extern "C" fn neqo_http3conn_process_input(
  
              // Attach metric instrumentation to `dgrams` iterator.
              let mut sum = 0;
@@ -1020,7 +982,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
              });
  
              // Override `dgrams` ECN marks according to prefs.
-@@ -1180,8 +1200,11 @@ pub unsafe extern "C" fn neqo_http3conn_process_input(
+@@ -1200,8 +1220,11 @@ pub unsafe extern "C" fn neqo_http3conn_process_input(
  
              conn.conn.process_multiple_input(dgrams, Instant::now());
  
@@ -1034,7 +996,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
              bytes_read += sum;
          }
  
-@@ -1344,20 +1367,22 @@ pub extern "C" fn neqo_http3conn_process_output_and_send(
+@@ -1369,20 +1392,22 @@ pub extern "C" fn neqo_http3conn_process_output_and_send(
                  }
                  bytes_written += dg.data().len();
  
@@ -1070,7 +1032,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
              }
              OutputBatch::Callback(to) => {
                  let timeout = if to.is_zero() {
-@@ -1703,7 +1728,7 @@ impl From<TransportError> for CloseError {
+@@ -1728,7 +1753,7 @@ impl From<TransportError> for CloseError {
  }
  
  // Keep in sync with `netwerk/metrics.yaml` `http_3_connection_close_reason` metric labels.
@@ -1079,7 +1041,7 @@ index ba8b9bb7d5d1b4b868d179aa66754dbf1047271c..75fbeab5d338620fb5e6cabf8508148d
  const fn transport_error_to_glean_label(error: &TransportError) -> &'static str {
      match error {
          TransportError::None => "NoError",
-@@ -2206,7 +2231,7 @@ pub extern "C" fn neqo_http3conn_event(
+@@ -2231,7 +2256,7 @@ pub extern "C" fn neqo_http3conn_event(
                          data.extend_from_slice(c.as_ref());
                      }
  
@@ -2395,28 +2357,6 @@ index 105bb6eb09164dcf2e38cb244f4877a1b9c65128..34ab086c114225a5ae22bbaadd8993a7
  
      if (this.implementation.autocompleteItemsAsync) {
        for await (const item of this.implementation.autocompleteItemsAsync(
-diff --git a/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs b/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs
-index 34063b33f877a8e1c043c68298f99ef7901d34b1..8026410cdb5c7f14da941af3ac82034bef3f3a9f 100644
---- a/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs
-+++ b/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs
-@@ -1449,7 +1449,7 @@ EnvironmentCache.prototype = {
-       msclkid: attributionData.msclkid,
-       dlsource: attributionData.dlsource,
-     };
--    Services.fog.updateAttribution(
-+    Services.fog?.updateAttribution(
-       attributionData.source,
-       attributionData.medium,
-       attributionData.campaign,
-@@ -1568,7 +1568,7 @@ EnvironmentCache.prototype = {
-     );
-     partnerData.partnerNames = partnerBranch.getChildList("");
- 
--    Services.fog.updateDistribution(partnerData.distributionId);
-+    Services.fog?.updateDistribution(partnerData.distributionId);
-     Glean.gleanDistribution.ext.set({
-       distributionVersion: partnerData.distributionVersion,
-       partnerId: partnerData.partnerId,
 diff --git a/toolkit/components/telemetry/core/TelemetryNoop.cpp b/toolkit/components/telemetry/core/TelemetryNoop.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..ea183ccb649d9e78d87c79f4227852423b8b3fb9
@@ -3403,7 +3343,7 @@ index 12c566969f4e1c6ed76e0c665df368265d03afdf..ef5121fc14e33f5afeb5ac1dd2c1e309
  if CONFIG["MOZ_ENABLE_DBUS"]:
      gkrust_features += ["with_dbus"]
 diff --git a/toolkit/library/rust/shared/Cargo.toml b/toolkit/library/rust/shared/Cargo.toml
-index 173efa2d97d6540de3ccc17a9aacb5df5d9535e3..5268f08bdd972fdc8e73c4b7b999fc950f954a58 100644
+index f718778dcd942c130d4b6bfce1a4257489bc2ed9..b46d2c07b95b28598e2cc6fe0f16dae54ab4cb04 100644
 --- a/toolkit/library/rust/shared/Cargo.toml
 +++ b/toolkit/library/rust/shared/Cargo.toml
 @@ -22,7 +22,7 @@ static_prefs = { path = "../../../../modules/libpref/init/static_prefs" }
@@ -3418,7 +3358,7 @@ index 173efa2d97d6540de3ccc17a9aacb5df5d9535e3..5268f08bdd972fdc8e73c4b7b999fc95
 @@ -50,10 +50,10 @@ buildid_reader_ffi = { path = "../../buildid_reader/ffi" }
  chardetng_c = "1.0.0"
  audio_thread_priority = { version = "0.35", default-features = false }
- mdns_service = { path="../../../../dom/media/webrtc/transport/mdns_service", optional = true }
+ mdns_service = { path="../../../../dom/media/webrtc/transport/mdns_service", features = ["profiler"], optional = true }
 -neqo_glue = { path = "../../../../netwerk/socket/neqo_glue" }
 -wgpu_bindings = { path = "../../../../gfx/wgpu_bindings" }
 +neqo_glue = { path = "../../../../netwerk/socket/neqo_glue", default-features = false }
@@ -3461,7 +3401,7 @@ index 173efa2d97d6540de3ccc17a9aacb5df5d9535e3..5268f08bdd972fdc8e73c4b7b999fc95
  [target.'cfg(any(target_os = "android", target_os = "macos", target_os = "ios", all(target_os = "windows", not(target_arch = "aarch64"))))'.dependencies]
  osclientcerts = { path = "../../../../security/manager/ssl/osclientcerts" }
 @@ -167,6 +167,18 @@ libfuzzer = ["authrs_bridge/fuzzing"]
- webrtc = ["mdns_service", "rsdparsa_capi"]
+ webrtc = ["mdns_service"]
  glean_disable_upload = ["fog_control/disable_upload"]
  glean_with_gecko = ["fog_control/with_gecko", "jog/with_gecko"]
 +observability_runtime = [
@@ -3516,10 +3456,9 @@ index 178f56d1274f1ace583dffeeac525e2b02b31461..b3f2e245828283201905d33a68a377ed
  
  extern crate log;
 diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
-index e233a350a959318b5ef65ef5a334f500abb298d7..d120d21c9dd52040cefed0a2b3f8dde04000ffdf 100644
 --- a/toolkit/modules/ActorManagerParent.sys.mjs
 +++ b/toolkit/modules/ActorManagerParent.sys.mjs
-@@ -865,6 +865,11 @@ if (AppConstants.MOZ_DESKTOP_EMBEDDER) {
+@@ -865,6 +865,11 @@
    delete JSPROCESSACTORS.TranslationsEngine;
  }
  
@@ -3528,27 +3467,26 @@ index e233a350a959318b5ef65ef5a334f500abb298d7..d120d21c9dd52040cefed0a2b3f8dde0
 +  delete JSWINDOWACTORS.CaptchaDetectionCommunication;
 +}
 +
- if (!AppConstants.MOZ_WEBEXTENSIONS_RUNTIME) {
-   delete JSPROCESSACTORS.ExtensionContent;
-   delete JSPROCESSACTORS.ProcessConduits;
+ 
+ export var ActorManagerParent = {
+   _addActors(actors, kind) {
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index c4781516332c161864739ce76984d1d9b96cbab4..e2a4606e9a0466d0d97bd8d474acc937b78aa4b6 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -53,6 +53,13 @@ export var AppConstants = Object.freeze({
-   false,
- #endif
+@@ -48,6 +48,13 @@
  
-+  MOZ_OBSERVABILITY_RUNTIME:
-+#ifdef MOZ_OBSERVABILITY_RUNTIME
+   MOZ_TELEMETRY_REPORTING:
+ #ifdef MOZ_TELEMETRY_REPORTING
 +  true,
 +#else
 +  false,
 +#endif
 +
-   MOZ_UPDATER: @MOZ_UPDATER_BOOL@,
- 
-   MOZ_WEBRTC: @MOZ_WEBRTC_BOOL@,
++  MOZ_OBSERVABILITY_RUNTIME:
++#ifdef MOZ_OBSERVABILITY_RUNTIME
+   true,
+ #else
+   false,
 diff --git a/toolkit/modules/moz.build b/toolkit/modules/moz.build
 index f82f7c7bb3a235ec81b4a00eaad0ecac374d7089..28b165e10fd3f2baa9fd3da3d630fca3388f176a 100644
 --- a/toolkit/modules/moz.build
@@ -3572,13 +3510,14 @@ index f82f7c7bb3a235ec81b4a00eaad0ecac374d7089..28b165e10fd3f2baa9fd3da3d630fca3
      EXTRA_JS_MODULES += [
          "AppServicesTracing.sys.mjs",
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index 494f8ed3a563b097cfab25f9ee57a2866fa00ae3..f33d971378050efedf1fe7f2f377a3aadbd02e5b 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
-@@ -55,6 +55,20 @@ imply_option(
+@@ -53,6 +53,20 @@
+ set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+ imply_option(
      "MOZ_DESKTOP_EMBEDDER_HISTORY", True, when="--enable-desktop-embedder"
- 
- 
++
++
 +option(
 +    "--enable-observability-runtime",
 +    default=True,
@@ -3591,12 +3530,10 @@ index 494f8ed3a563b097cfab25f9ee57a2866fa00ae3..f33d971378050efedf1fe7f2f377a3aa
 +
 +set_config("MOZ_OBSERVABILITY_RUNTIME", observability_runtime)
 +set_define("MOZ_OBSERVABILITY_RUNTIME", True, when=observability_runtime)
-+
-+
- @depends("--enable-desktop-embedder")
- def webextensions_runtime_default(desktop_embedder):
-     return not desktop_embedder
-@@ -1166,14 +1180,21 @@ def telemetry_reporting_default(official, observability):
+ 
+ 
+ 
+@@ -1146,14 +1160,21 @@
  
  option(
      env="MOZ_TELEMETRY_REPORTING",
@@ -3606,6 +3543,9 @@ index 494f8ed3a563b097cfab25f9ee57a2866fa00ae3..f33d971378050efedf1fe7f2f377a3aa
  )
  
 -set_define("MOZ_TELEMETRY_REPORTING", True, when="MOZ_TELEMETRY_REPORTING")
+-
+-
+-@depends("MOZ_TELEMETRY_REPORTING", milestone.is_nightly)
 +
 +@depends("MOZ_TELEMETRY_REPORTING", observability_runtime)
 +def telemetry_reporting(reporting, observability):
@@ -3614,14 +3554,13 @@ index 494f8ed3a563b097cfab25f9ee57a2866fa00ae3..f33d971378050efedf1fe7f2f377a3aa
 +    return bool(reporting)
 +
 +set_define("MOZ_TELEMETRY_REPORTING", True, when=telemetry_reporting)
- 
- 
--@depends("MOZ_TELEMETRY_REPORTING", milestone.is_nightly)
++
++
 +@depends(telemetry_reporting, milestone.is_nightly)
  def telemetry_on_by_default(reporting, is_nightly):
      return reporting and is_nightly
  
-@@ -4569,12 +4590,12 @@ with only_when(artifact_builds & local_ml):
+@@ -4549,12 +4570,12 @@
  set_config(
      "GECKO_TRACE_ENABLE",
      True,
@@ -3637,10 +3576,9 @@ index 494f8ed3a563b097cfab25f9ee57a2866fa00ae3..f33d971378050efedf1fe7f2f377a3aa
  
  
 diff --git a/toolkit/mozapps/extensions/AddonManager.sys.mjs b/toolkit/mozapps/extensions/AddonManager.sys.mjs
-index 98510a3ddcad6962ac2129acc69e8e70bc638728..f27d56205f4ef3f845565a9072e5ae645260e97e 100644
 --- a/toolkit/mozapps/extensions/AddonManager.sys.mjs
 +++ b/toolkit/mozapps/extensions/AddonManager.sys.mjs
-@@ -92,7 +92,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
+@@ -92,7 +92,6 @@
    Extension: "resource://gre/modules/Extension.sys.mjs",
    ObjectUtils: "resource://gre/modules/ObjectUtils.sys.mjs",
    RemoteSettings: "resource://services-settings/remote-settings.sys.mjs",
@@ -3648,7 +3586,7 @@ index 98510a3ddcad6962ac2129acc69e8e70bc638728..f27d56205f4ef3f845565a9072e5ae64
    isGatedPermissionType:
      "resource://gre/modules/addons/siteperms-addon-utils.sys.mjs",
    isKnownPublicSuffix:
-@@ -195,6 +194,11 @@ const GMP_PROVIDER_REGISTERED_TOPIC = "gmp-provider-registered";
+@@ -193,6 +192,11 @@
  // The maximum length of strings collected in the Glean addons.activeAddons/activeTheme/activeGMPlugins
  // metrics properties (e.g. description).
  const MAX_ADDON_STRING_LENGTH = 100;
@@ -3660,7 +3598,7 @@ index 98510a3ddcad6962ac2129acc69e8e70bc638728..f27d56205f4ef3f845565a9072e5ae64
  
  const UNNAMED_PROVIDER = "<unnamed-provider>";
  function providerName(aProvider) {
-@@ -5267,9 +5271,7 @@ export class EnvironmentAddonBuilder {
+@@ -5253,9 +5257,7 @@
            ),
            scope: addon.scope,
            type: addon.type,
@@ -3671,7 +3609,7 @@ index 98510a3ddcad6962ac2129acc69e8e70bc638728..f27d56205f4ef3f845565a9072e5ae64
            isSystem: addon.isSystem,
            isWebExtension: addon.isWebExtension,
            multiprocessCompatible: true,
-@@ -5296,9 +5298,7 @@ export class EnvironmentAddonBuilder {
+@@ -5282,9 +5284,7 @@
              appDisabled: addon.appDisabled,
              foreignInstall: this.enforceBoolean(addon.foreignInstall),
              hasBinaryComponents: false,
@@ -3682,7 +3620,7 @@ index 98510a3ddcad6962ac2129acc69e8e70bc638728..f27d56205f4ef3f845565a9072e5ae64
              signedState: addon.signedState,
              signedTypes: JSON.stringify(addon.signedTypes),
              quarantineIgnoredByApp: this.enforceBoolean(
-@@ -5356,10 +5356,8 @@ export class EnvironmentAddonBuilder {
+@@ -5342,10 +5342,8 @@
          scope: theme.scope,
          foreignInstall: this.enforceBoolean(theme.foreignInstall),
          hasBinaryComponents: false,
@@ -3695,7 +3633,7 @@ index 98510a3ddcad6962ac2129acc69e8e70bc638728..f27d56205f4ef3f845565a9072e5ae64
          signedState: theme.signedState,
          signedTypes: JSON.stringify(theme.signedTypes),
        };
-@@ -5432,6 +5430,10 @@ AMTelemetry = {
+@@ -5418,6 +5416,10 @@
    // init the telemetry event category and start listening for the events related to the
    // addons installation and management.
    onStartup() {
@@ -3722,7 +3660,7 @@ index 664a7d2368a428a9425b8297d4f1914339a88fc4..30a562c6237d733ced52e4379ae315af
  
    /**
 diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
-index 0b0e8a138e4507bba6aac18d8b355a6dc0a8838d..1e23f5760aa1a45a87438b82a759738e9c6fcb77 100644
+index 83be944a364ad5d1c029627225d5173fbe563c52..b823c8b9a93be4054db11b4612014b5830a5de42 100644
 --- a/toolkit/xre/nsAppRunner.cpp
 +++ b/toolkit/xre/nsAppRunner.cpp
 @@ -12,7 +12,9 @@

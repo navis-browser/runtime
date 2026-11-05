@@ -1,0 +1,4903 @@
+diff --git a/build/sanitizers/TsanOptions.cpp b/build/sanitizers/TsanOptions.cpp
+index 65b19cff99541e2d8a5a5195c53f7f13dff05e7c..141135992e9f0d0bc9abcb61a1d7906940c27695 100644
+--- a/build/sanitizers/TsanOptions.cpp
++++ b/build/sanitizers/TsanOptions.cpp
+@@ -362,11 +362,13 @@ extern "C" MOZ_EXPORT const char* __tsan_default_suppressions() {
+          "race:CamerasParent::ActorDestroy\n"
+          "race:CamerasParent::DispatchToVideoCaptureThread\n"
+ 
++#ifdef MOZ_WEBXR
+          // Bug 1623541
+          "race:VRShMem::PullSystemState\n"
+          "race:VRShMem::PushSystemState\n"
+          "race:VRShMem::PullBrowserState\n"
+          "race:VRShMem::PushBrowserState\n"
++#endif
+ 
+          // Bug 1682951
+          "race:storage::Connection::Release\n"
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+index afd0f1c1ee2414098b32cef4d07a013999851886..05f1cd61f1e680f77d3975c4d817f308e7176a66 100644
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -265,7 +265,9 @@
+ #include "mozilla/dom/ViewTransition.h"
+ #include "mozilla/dom/WakeLockJS.h"
+ #include "mozilla/dom/WakeLockSentinel.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/WebIdentityHandler.h"
++#endif
+ #include "mozilla/dom/WindowBinding.h"
+ #include "mozilla/dom/WindowContext.h"
+ #include "mozilla/dom/WindowGlobalChild.h"
+@@ -18976,24 +18978,31 @@ void Document::MaybeAllowStorageForOpenerAfterUserInteraction() {
+   }
+ 
+   RefPtr<Document> self(this);
++  auto allowOpenerAccess = [self, openerBC]() {
++    if (XRE_IsParentProcess()) {
++      (void)StorageAccessAPIHelper::AllowAccessForOnParentProcess(
++          self->NodePrincipal(), openerBC,
++          ContentBlockingNotifier::eOpenerAfterUserInteraction);
++    } else {
++      (void)StorageAccessAPIHelper::AllowAccessForOnChildProcess(
++          self->NodePrincipal(), openerBC,
++          ContentBlockingNotifier::eOpenerAfterUserInteraction);
++    }
++  };
++#ifdef MOZ_WEB_IDENTITY
+   WebIdentityHandler* identityHandler = inner->GetOrCreateWebIdentityHandler();
+   MOZ_ASSERT(identityHandler);
+   identityHandler->IsContinuationWindow()->Then(
+       GetCurrentSerialEventTarget(), __func__,
+-      [self, openerBC](const MozPromise<bool, nsresult,
+-                                        true>::ResolveOrRejectValue& result) {
++      [allowOpenerAccess](const MozPromise<bool, nsresult,
++                                          true>::ResolveOrRejectValue& result) {
+         if (!result.IsResolve() || !result.ResolveValue()) {
+-          if (XRE_IsParentProcess()) {
+-            (void)StorageAccessAPIHelper::AllowAccessForOnParentProcess(
+-                self->NodePrincipal(), openerBC,
+-                ContentBlockingNotifier::eOpenerAfterUserInteraction);
+-          } else {
+-            (void)StorageAccessAPIHelper::AllowAccessForOnChildProcess(
+-                self->NodePrincipal(), openerBC,
+-                ContentBlockingNotifier::eOpenerAfterUserInteraction);
+-          }
++          allowOpenerAccess();
+         }
+       });
++#else
++  allowOpenerAccess();
++#endif
+ }
+ 
+ namespace {
+diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
+index e9ce5827dd74f20cc65d0c75f45107a9662e14c1..74d82f8189681eeeaaa9f84262dae12e45b85705 100644
+--- a/dom/base/Navigator.cpp
++++ b/dom/base/Navigator.cpp
+@@ -15,7 +15,9 @@
+ #include "mozilla/dom/BodyExtractor.h"
+ #include "mozilla/dom/FetchBinding.h"
+ #include "mozilla/dom/File.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/Serial.h"
++#endif
+ #include "nsCharSeparatedTokenizer.h"
+ #include "nsContentPolicyUtils.h"
+ #include "nsContentUtils.h"
+@@ -52,12 +54,18 @@
+ #include "mozilla/dom/FeaturePolicyUtils.h"
+ #include "mozilla/dom/GamepadServiceTest.h"
+ #include "mozilla/dom/LockManager.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIAccessManager.h"
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIOptionsBinding.h"
++#endif
+ #include "mozilla/dom/MediaCapabilities.h"
+ #include "mozilla/dom/MediaSession.h"
+ #include "mozilla/dom/ModelContext.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/NavigatorLogin.h"
++#endif
+ #include "mozilla/dom/Permissions.h"
+ #ifdef MOZ_OBSERVABILITY_RUNTIME
+ #include "mozilla/dom/PrivateAttribution.h"
+@@ -67,11 +75,19 @@
+ #include "mozilla/dom/TCPSocket.h"
+ #include "mozilla/dom/URLSearchParams.h"
+ #include "mozilla/dom/UserActivation.h"
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplay.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplayEvent.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRServiceTest.h"
++#endif
+ #include "mozilla/dom/WakeLockJS.h"
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/XRSystem.h"
++#endif
+ #include "mozilla/dom/power/PowerManagerService.h"
+ #include "mozilla/dom/workerinternals/RuntimeService.h"
+ #include "nsComponentManagerUtils.h"
+@@ -150,7 +166,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPlugins)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPermissions)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mGeolocation)
++#ifdef MOZ_WEB_DEVICE_APIS
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSerial)
++#endif
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mBatteryManager)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mBatteryPromise)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mConnection)
+@@ -164,7 +182,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAddonManager)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWebGpu)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocks)
++#ifdef MOZ_WEB_IDENTITY
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLogin)
++#endif
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mModelContext)
+ #ifdef MOZ_OBSERVABILITY_RUNTIME
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPrivateAttribution)
+@@ -177,10 +197,16 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Navigator)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMediaKeySystemAccessManager)
+ #endif
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mGamepadServiceTest)
++#ifdef MOZ_WEBXR
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mVRGetDisplaysPromises)
++#endif
++#ifdef MOZ_WEBXR
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mVRServiceTest)
++#endif
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSharePromise)
++#ifdef MOZ_WEBXR
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mXRSystem)
++#endif
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mClipboard)
+ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
+ 
+@@ -203,10 +229,12 @@ void Navigator::Invalidate() {
+     mGeolocation = nullptr;
+   }
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   if (mSerial) {
+     mSerial->Shutdown();
+     mSerial = nullptr;
+   }
++#endif
+ 
+   if (mBatteryManager) {
+     mBatteryManager->Shutdown();
+@@ -236,8 +264,11 @@ void Navigator::Invalidate() {
+     mGamepadServiceTest = nullptr;
+   }
+ 
++#ifdef MOZ_WEBXR
+   mVRGetDisplaysPromises.Clear();
++#endif
+ 
++#ifdef MOZ_WEBXR
+   if (mVRServiceTest) {
+     mVRServiceTest->Shutdown();
+     mVRServiceTest = nullptr;
+@@ -247,7 +278,7 @@ void Navigator::Invalidate() {
+     mXRSystem->Shutdown();
+     mXRSystem = nullptr;
+   }
+-
++#endif
+   mMediaCapabilities = nullptr;
+ 
+   if (mMediaSession) {
+@@ -269,7 +300,9 @@ void Navigator::Invalidate() {
+     mLocks = nullptr;
+   }
+ 
++#ifdef MOZ_WEB_IDENTITY
+   mLogin = nullptr;
++#endif
+ 
+   mModelContext = nullptr;
+ 
+@@ -1170,6 +1203,7 @@ Geolocation* Navigator::GetGeolocation(ErrorResult& aRv) {
+   return mGeolocation;
+ }
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ dom::Serial* Navigator::GetSerial(ErrorResult& aRv) {
+   if (mSerial) {
+     return mSerial;
+@@ -1183,6 +1217,7 @@ dom::Serial* Navigator::GetSerial(ErrorResult& aRv) {
+   mSerial = MakeRefPtr<dom::Serial>(mWindow);
+   return mSerial;
+ }
++#endif
+ 
+ class BeaconStreamListener final : public nsIStreamListener {
+   ~BeaconStreamListener() = default;
+@@ -1720,6 +1755,7 @@ already_AddRefed<Promise> Navigator::RequestAllGamepads(ErrorResult& aRv) {
+   return win->RequestAllGamepads(aRv);
+ }
+ 
++#ifdef MOZ_WEBXR
+ already_AddRefed<Promise> Navigator::GetVRDisplays(ErrorResult& aRv) {
+   if (!mWindow || !mWindow->GetDocShell() || !mWindow->GetExtantDoc()) {
+     aRv.Throw(NS_ERROR_UNEXPECTED);
+@@ -1826,7 +1862,9 @@ void Navigator::OnXRPermissionRequestCancel() {
+     // the user blocks access.
+     p->MaybeResolve(vrDisplays);
+   }
++#ifdef MOZ_WEBXR
+   mVRGetDisplaysPromises.Clear();
++#endif
+ }
+ 
+ void Navigator::GetActiveVRDisplays(
+@@ -1871,7 +1909,9 @@ void Navigator::NotifyVRDisplaysUpdated() {
+       p->MaybeReject(NS_ERROR_FAILURE);
+     }
+   }
++#ifdef MOZ_WEBXR
+   mVRGetDisplaysPromises.Clear();
++#endif
+ }
+ 
+ void Navigator::NotifyActiveVRDisplaysChanged() {
+@@ -1920,7 +1960,8 @@ void Navigator::RequestVRPresentation(VRDisplay& aDisplay) {
+   win->DispatchVRDisplayActivate(aDisplay.DisplayId(),
+                                  VRDisplayEventReason::Requested);
+ }
+-
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ already_AddRefed<Promise> Navigator::RequestMIDIAccess(
+     const MIDIOptions& aOptions, ErrorResult& aRv) {
+   if (!mWindow) {
+@@ -1930,6 +1971,7 @@ already_AddRefed<Promise> Navigator::RequestMIDIAccess(
+   MIDIAccessManager* accessMgr = MIDIAccessManager::Get();
+   return accessMgr->RequestMIDIAccess(mWindow, aOptions, aRv);
+ }
++#endif
+ 
+ network::Connection* Navigator::GetConnection(ErrorResult& aRv) {
+   if (!mConnection) {
+@@ -2025,6 +2067,7 @@ bool Navigator::HasShareSupport(JSContext* cx, JSObject* obj) {
+ #endif
+ }
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ /* static */
+ bool Navigator::HasMidiSupport(JSContext* cx, JSObject* obj) {
+   nsIPrincipal* principal = nsContentUtils::SubjectPrincipal(cx);
+@@ -2034,6 +2077,7 @@ bool Navigator::HasMidiSupport(JSContext* cx, JSObject* obj) {
+          IsSecureContextOrObjectIsFromSecureContext(cx, obj) &&
+          !principal->SchemeIs("file");
+ }
++#endif
+ 
+ /* static */
+ already_AddRefed<nsPIDOMWindowInner> Navigator::GetWindowFromGlobal(
+@@ -2359,12 +2403,14 @@ dom::LockManager* Navigator::Locks() {
+   return mLocks;
+ }
+ 
++#ifdef MOZ_WEB_IDENTITY
+ NavigatorLogin* Navigator::Login() {
+   if (!mLogin) {
+     mLogin = new NavigatorLogin(GetWindow());
+   }
+   return mLogin;
+ }
++#endif
+ 
+ dom::ModelContext* Navigator::ModelContext() {
+   if (!mModelContext) {
+diff --git a/dom/base/Navigator.h b/dom/base/Navigator.h
+index 2d8cb7f5f4a352842b045f6333da3d883fd42e79..b3495923910b42bdcf3eef094cc9c17aa5983df1 100644
+--- a/dom/base/Navigator.h
++++ b/dom/base/Navigator.h
+@@ -36,7 +36,9 @@ class AddonManager;
+ class AudioSession;
+ class BodyExtractorBase;
+ class Geolocation;
++#ifdef MOZ_WEB_DEVICE_APIS
+ class Serial;
++#endif
+ class systemMessageCallback;
+ class MediaDevices;
+ struct MediaStreamConstraints;
+@@ -46,7 +48,9 @@ class CredentialsContainer;
+ class Clipboard;
+ class LockManager;
+ class ModelContext;
++#ifdef MOZ_WEB_IDENTITY
+ class NavigatorLogin;
++#endif
+ #ifdef MOZ_OBSERVABILITY_RUNTIME
+ class PrivateAttribution;
+ #endif
+@@ -78,7 +82,9 @@ class GamepadServiceTest;
+ class NavigatorUserMediaSuccessCallback;
+ class NavigatorUserMediaErrorCallback;
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ struct MIDIOptions;
++#endif
+ 
+ nsTArray<uint32_t> SanitizeVibratePattern(const nsTArray<uint32_t>& aPattern);
+ 
+@@ -87,9 +93,15 @@ class Connection;
+ }  // namespace network
+ 
+ class LegacyMozTCPSocket;
++#ifdef MOZ_WEBXR
+ class VRDisplay;
++#endif
++#ifdef MOZ_WEBXR
+ class VRServiceTest;
++#endif
++#ifdef MOZ_WEBXR
+ class XRSystem;
++#endif
+ class StorageManager;
+ class MediaCapabilities;
+ class MediaSession;
+@@ -136,8 +148,12 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   void GetDoNotTrack(nsAString& aResult);
+   bool GlobalPrivacyControl();
+   Geolocation* GetGeolocation(ErrorResult& aRv);
++#ifdef MOZ_WEB_DEVICE_APIS
+   dom::Serial* GetSerial(ErrorResult& aRv);
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+   dom::Serial* GetExistingSerial() { return mSerial; }
++#endif
+   Promise* GetBattery(ErrorResult& aRv);
+   dom::WakeLockJS* WakeLock();
+ 
+@@ -193,6 +209,7 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   void GetGamepads(nsTArray<RefPtr<Gamepad>>& aGamepads, ErrorResult& aRv);
+   GamepadServiceTest* RequestGamepadServiceTest(ErrorResult& aRv);
+   already_AddRefed<Promise> RequestAllGamepads(ErrorResult& aRv);
++#ifdef MOZ_WEBXR
+   already_AddRefed<Promise> GetVRDisplays(ErrorResult& aRv);
+   void FinishGetVRDisplays(bool isWebVRSupportedInwindow, Promise* p);
+   void GetActiveVRDisplays(nsTArray<RefPtr<VRDisplay>>& aDisplays) const;
+@@ -203,8 +220,11 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   bool IsWebVRContentPresenting() const;
+   void RequestVRPresentation(VRDisplay& aDisplay);
+   XRSystem* GetXr(ErrorResult& aRv);
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+   already_AddRefed<Promise> RequestMIDIAccess(const MIDIOptions& aOptions,
+                                               ErrorResult& aRv);
++#endif
+ 
+   bool SendBeacon(const nsAString& aUrl, const Nullable<fetch::BodyInit>& aData,
+                   ErrorResult& aRv);
+@@ -224,7 +244,9 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   dom::Clipboard* Clipboard();
+   webgpu::Instance* Gpu();
+   dom::LockManager* Locks();
++#ifdef MOZ_WEB_IDENTITY
+   NavigatorLogin* Login();
++#endif
+   dom::ModelContext* ModelContext();
+ #ifdef MOZ_OBSERVABILITY_RUNTIME
+   dom::PrivateAttribution* PrivateAttribution();
+@@ -252,7 +274,9 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+                                      JSObject* /* unused */);
+   static bool HasShareSupport(JSContext* /* unused */, JSObject* /* unused */);
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   static bool HasMidiSupport(JSContext* /* unused */, JSObject* /* unused */);
++#endif
+ 
+   nsPIDOMWindowInner* GetParentObject() const { return GetWindow(); }
+ 
+@@ -291,8 +315,12 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+ #endif
+ 
+  public:
++#ifdef MOZ_WEBXR
+   void NotifyVRDisplaysUpdated();
++#endif
++#ifdef MOZ_WEBXR
+   void NotifyActiveVRDisplaysChanged();
++#endif
+ 
+   bool TestTrialGatedAttribute() const { return true; }
+ 
+@@ -313,7 +341,9 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   RefPtr<nsPluginArray> mPlugins;
+   RefPtr<Permissions> mPermissions;
+   RefPtr<Geolocation> mGeolocation;
++#ifdef MOZ_WEB_DEVICE_APIS
+   RefPtr<dom::Serial> mSerial;
++#endif
+   RefPtr<battery::BatteryManager> mBatteryManager;
+   RefPtr<Promise> mBatteryPromise;
+   RefPtr<network::Connection> mConnection;
+@@ -323,9 +353,15 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   RefPtr<ServiceWorkerContainer> mServiceWorkerContainer;
+   nsCOMPtr<nsPIDOMWindowInner> mWindow;
+   RefPtr<GamepadServiceTest> mGamepadServiceTest;
++#ifdef MOZ_WEBXR
+   nsTArray<RefPtr<Promise>> mVRGetDisplaysPromises;
++#endif
++#ifdef MOZ_WEBXR
+   RefPtr<VRServiceTest> mVRServiceTest;
++#endif
++#ifdef MOZ_WEBXR
+   RefPtr<XRSystem> mXRSystem;
++#endif
+   nsTArray<uint32_t> mRequestedVibrationPattern;
+   RefPtr<StorageManager> mStorageManager;
+   RefPtr<dom::MediaCapabilities> mMediaCapabilities;
+@@ -335,7 +371,9 @@ class Navigator final : public nsISupports, public nsWrapperCache {
+   RefPtr<webgpu::Instance> mWebGpu;
+   RefPtr<Promise> mSharePromise;  // Web Share API related
+   RefPtr<LockManager> mLocks;
++#ifdef MOZ_WEB_IDENTITY
+   RefPtr<NavigatorLogin> mLogin;
++#endif
+   RefPtr<dom::ModelContext> mModelContext;
+ #ifdef MOZ_OBSERVABILITY_RUNTIME
+   RefPtr<dom::PrivateAttribution> mPrivateAttribution;
+diff --git a/dom/base/nsGlobalWindowInner.cpp b/dom/base/nsGlobalWindowInner.cpp
+index 4256100b25f0170a52c8cb414c8b00a21fd81ab6..f0aa7a484a6743d45979e804d7735eb0cca49481 100644
+--- a/dom/base/nsGlobalWindowInner.cpp
++++ b/dom/base/nsGlobalWindowInner.cpp
+@@ -21,7 +21,9 @@
+ #include "PaintWorkletImpl.h"
+ #include "SessionStorageCache.h"
+ #include "Units.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "WindowDestroyedEvent.h"
+ #include "WindowNamedPropertiesHandler.h"
+ #include "js/ComparisonOperators.h"
+@@ -41,7 +43,9 @@
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
+ #include "mozIDOMWindow.h"
++#ifdef MOZ_WEBXR
+ #include "moz_external_vr.h"
++#endif
+ #include "mozilla/AlreadyAddRefed.h"
+ #include "mozilla/AppShutdown.h"
+ #include "mozilla/ArrayIterator.h"
+@@ -172,14 +176,24 @@
+ #include "mozilla/dom/TrustedTypePolicyFactory.h"
+ #include "mozilla/dom/TrustedTypeUtils.h"
+ #include "mozilla/dom/TrustedTypesConstants.h"
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplay.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplayEvent.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplayEventBinding.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VREventObserver.h"
++#endif
+ #include "mozilla/dom/VisualViewport.h"
+ #include "mozilla/dom/WebCompatBinding.h"
+ #include "mozilla/dom/WebIDLGlobalNameHash.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/WebIdentityHandler.h"
++#endif
+ #include "mozilla/dom/WebTaskSchedulerMainThread.h"
+ #include "mozilla/dom/WindowBinding.h"
+ #include "mozilla/dom/WindowContext.h"
+@@ -188,7 +202,9 @@
+ #include "mozilla/dom/WindowProxyHolder.h"
+ #include "mozilla/dom/WorkerCommon.h"
+ #include "mozilla/dom/Worklet.h"
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/XRPermissionRequest.h"
++#endif
+ #include "mozilla/dom/cache/CacheStorage.h"
+ #include "mozilla/dom/cache/Types.h"
+ #include "mozilla/extensions/WebExtensionPolicy.h"
+@@ -918,11 +934,21 @@ nsGlobalWindowInner::nsGlobalWindowInner(nsGlobalWindowOuter* aOuterWindow,
+       mFocusByKeyOccurred(false),
+       mDidFireDocElemInserted(false),
+       mHasGamepad(false),
++#ifdef MOZ_WEBXR
+       mHasXRSession(false),
++#endif
++#ifdef MOZ_WEBXR
+       mHasVRDisplayActivateEvents(false),
++#endif
++#ifdef MOZ_WEBXR
+       mXRRuntimeDetectionInFlight(false),
++#endif
++#ifdef MOZ_WEBXR
+       mXRPermissionRequestInFlight(false),
++#endif
++#ifdef MOZ_WEBXR
+       mXRPermissionGranted(false),
++#endif
+       mWasCurrentInnerWindow(false),
+       mHasSeenGamepadInput(false),
+       mHintedWasLoading(false),
+@@ -1255,13 +1281,25 @@ void nsGlobalWindowInner::FreeInnerObjects() {
+   DisableGamepadUpdates();
+   mHasGamepad = false;
+   mGamepads.Clear();
++#ifdef MOZ_WEBXR
+   DisableVRUpdates();
++#endif
++#ifdef MOZ_WEBXR
+   mHasXRSession = false;
+   mHasVRDisplayActivateEvents = false;
++#endif
++#ifdef MOZ_WEBXR
+   mXRRuntimeDetectionInFlight = false;
++#endif
++#ifdef MOZ_WEBXR
+   mXRPermissionRequestInFlight = false;
++#endif
++#ifdef MOZ_WEBXR
+   mXRPermissionGranted = false;
++#endif
++#ifdef MOZ_WEBXR
+   mVRDisplays.Clear();
++#endif
+ 
+   // This breaks a cycle between the window and the ClientSource object.
+   mClientSource.reset();
+@@ -1484,7 +1522,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsGlobalWindowInner)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDocumentPolicyContainer)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mBrowserChild)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDoc)
++#ifdef MOZ_WEB_IDENTITY
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWebIdentityHandler)
++#endif
+ 
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mIdleRequestExecutor)
+   for (IdleRequest* request : tmp->mIdleRequestCallbacks) {
+@@ -1496,7 +1536,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsGlobalWindowInner)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mGamepads)
+ 
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mCacheStorage)
++#ifdef MOZ_WEBXR
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mVRDisplays)
++#endif
+ 
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDebuggerNotificationManager)
+ 
+@@ -1608,12 +1650,16 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(nsGlobalWindowInner)
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDocumentPolicyContainer)
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mBrowserChild)
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDoc)
++#ifdef MOZ_WEB_IDENTITY
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mWebIdentityHandler)
++#endif
+ 
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mGamepads)
+ 
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mCacheStorage)
++#ifdef MOZ_WEBXR
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mVRDisplays)
++#endif
+ 
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDebuggerNotificationManager)
+ 
+@@ -2454,6 +2500,7 @@ nsresult nsGlobalWindowInner::PostHandleEvent(EventChainPostVisitor& aVisitor) {
+     mIsHandlingResizeEvent = false;
+   } else if (aVisitor.mEvent->mMessage == eUnload &&
+              aVisitor.mEvent->IsTrusted()) {
++#ifdef MOZ_WEBXR
+     // If any VR display presentation is active at unload, the next page
+     // will receive a vrdisplayactive event to indicate that it should
+     // immediately begin vr presentation. This should occur when navigating
+@@ -2475,6 +2522,7 @@ nsresult nsGlobalWindowInner::PostHandleEvent(EventChainPostVisitor& aVisitor) {
+         break;
+       }
+     }
++#endif
+     mIsDocumentLoaded = false;
+     // Tell the parent process that the document is not loaded.
+     if (mWindowGlobalChild) {
+@@ -2495,6 +2543,7 @@ nsresult nsGlobalWindowInner::PostHandleEvent(EventChainPostVisitor& aVisitor) {
+     MOZ_ASSERT(aVisitor.mEvent->IsTrusted());
+     FireFrameLoadEvent();
+ 
++#ifdef MOZ_WEBXR
+     if (mVREventObserver) {
+       mVREventObserver->NotifyAfterLoad();
+     }
+@@ -2508,6 +2557,8 @@ nsresult nsGlobalWindowInner::PostHandleEvent(EventChainPostVisitor& aVisitor) {
+       DispatchVRDisplayActivate(autoActivateVRDisplayID,
+                                 VRDisplayEventReason::Navigation);
+     }
++#endif
++
+   }
+ 
+   return NS_OK;
+@@ -4571,6 +4622,7 @@ void nsGlobalWindowInner::DisableGamepadUpdates() {
+   }
+ }
+ 
++#ifdef MOZ_WEBXR
+ void nsGlobalWindowInner::EnableVRUpdates() {
+   // We need to create a VREventObserver before we can either detect XR runtimes
+   // or start an XR session
+@@ -4634,7 +4686,7 @@ void nsGlobalWindowInner::StopVRActivity() {
+     mVREventObserver->StopActivity();
+   }
+ }
+-
++#endif
+ void nsGlobalWindowInner::SetFocusedElement(Element* aElement,
+                                             uint32_t aFocusMethod,
+                                             bool aNeedsFocus) {
+@@ -5828,7 +5880,9 @@ void nsGlobalWindowInner::Suspend(bool aIncludeSubWindows) {
+       ac->RemoveWindowListener(mEnabledSensors[i], this);
+   }
+   DisableGamepadUpdates();
++#ifdef MOZ_WEBXR
+   DisableVRUpdates();
++#endif
+ 
+   SuspendWorkersForWindow(*this);
+ 
+@@ -5888,7 +5942,9 @@ void nsGlobalWindowInner::Resume(bool aIncludeSubWindows) {
+       ac->AddWindowListener(mEnabledSensors[i], this);
+   }
+   EnableGamepadUpdates();
++#ifdef MOZ_WEBXR
+   EnableVRUpdates();
++#endif
+ 
+   // Resume all of the AudioContexts for this window
+   for (uint32_t i = 0; i < mAudioContexts.Length(); ++i) {
+@@ -6756,11 +6812,14 @@ void nsGlobalWindowInner::SetHasGamepadEventListener(
+   }
+ }
+ 
++#ifdef MOZ_WEBXR
+ void nsGlobalWindowInner::NotifyDetectXRRuntimesCompleted() {
+   if (!mXRRuntimeDetectionInFlight) {
+     return;
+   }
++#ifdef MOZ_WEBXR
+   mXRRuntimeDetectionInFlight = false;
++#endif
+   if (mXRPermissionRequestInFlight) {
+     return;
+   }
+@@ -6802,12 +6861,16 @@ void nsGlobalWindowInner::RequestXRPermission() {
+   // if there is any VR runtime installed.
+   gfx::VRManagerChild* vm = gfx::VRManagerChild::Get();
+   mXRRuntimeDetectionInFlight = true;
++#ifdef MOZ_WEBXR
+   EnableVRUpdates();
++#endif
+   vm->DetectRuntimes();
+ }
+ 
+ void nsGlobalWindowInner::OnXRPermissionRequestAllow() {
++#ifdef MOZ_WEBXR
+   mXRPermissionRequestInFlight = false;
++#endif
+   if (IsDying()) {
+     // The window may have started dying while the permission request
+     // is in flight.
+@@ -6826,7 +6889,9 @@ void nsGlobalWindowInner::OnXRPermissionRequestAllow() {
+ }
+ 
+ void nsGlobalWindowInner::OnXRPermissionRequestCancel() {
++#ifdef MOZ_WEBXR
+   mXRPermissionRequestInFlight = false;
++#endif
+   if (IsDying()) {
+     // The window may have started dying while the permission request
+     // is in flight.
+@@ -6839,8 +6904,9 @@ void nsGlobalWindowInner::OnXRPermissionRequestCancel() {
+   MOZ_ASSERT(nav != nullptr);
+   nav->OnXRPermissionRequestCancel();
+ }
+-
++#endif
+ void nsGlobalWindowInner::EventListenerAdded(nsAtom* aType) {
++#ifdef MOZ_WEBXR
+   if (aType == nsGkAtoms::onvrdisplayactivate ||
+       aType == nsGkAtoms::onvrdisplayconnect ||
+       aType == nsGkAtoms::onvrdisplaydeactivate ||
+@@ -6852,7 +6918,7 @@ void nsGlobalWindowInner::EventListenerAdded(nsAtom* aType) {
+   if (aType == nsGkAtoms::onvrdisplayactivate) {
+     mHasVRDisplayActivateEvents = true;
+   }
+-
++#endif
+   if (aType == nsGkAtoms::onunload && mWindowGlobalChild) {
+     if (++mUnloadOrBeforeUnloadListenerCount == 1) {
+       mWindowGlobalChild->BlockBFCacheFor(BFCacheStatus::UNLOAD_LISTENER);
+@@ -6924,6 +6990,7 @@ void nsGlobalWindowInner::EventListenerRemoved(nsAtom* aType) {
+   }
+ }
+ 
++#ifdef MOZ_WEBXR
+ void nsGlobalWindowInner::NotifyHasXRSession() {
+   if (IsDying()) {
+     // Do not proceed if the window is dying, as that will result
+@@ -6935,7 +7002,9 @@ void nsGlobalWindowInner::NotifyHasXRSession() {
+     mWindowGlobalChild->BlockBFCacheFor(BFCacheStatus::HAS_USED_VR);
+   }
+   mHasXRSession = true;
++#ifdef MOZ_WEBXR
+   EnableVRUpdates();
++#endif
+ }
+ 
+ bool nsGlobalWindowInner::HasUsedVR() const {
+@@ -6959,7 +7028,7 @@ bool nsGlobalWindowInner::IsVRContentPresenting() const {
+   }
+   return false;
+ }
+-
++#endif
+ void nsGlobalWindowInner::AddSizeOfIncludingThis(
+     nsWindowSizes& aWindowSizes) const {
+   aWindowSizes.mDOMSizes.mDOMOtherSize +=
+@@ -7127,6 +7196,7 @@ void nsGlobalWindowInner::StopGamepadHaptics() {
+   }
+ }
+ 
++#ifdef MOZ_WEBXR
+ bool nsGlobalWindowInner::UpdateVRDisplays(
+     nsTArray<RefPtr<mozilla::dom::VRDisplay>>& aDevices) {
+   VRDisplay::UpdateVRDisplays(mVRDisplays, this);
+@@ -7296,7 +7366,7 @@ void nsGlobalWindowInner::DispatchVRDisplayPresentChange(uint32_t aDisplayID) {
+     }
+   }
+ }
+-
++#endif
+ enum WindowState {
+   // These constants need to match the constants in Window.webidl
+   STATE_MAXIMIZED = 1,
+@@ -8112,6 +8182,7 @@ bool nsPIDOMWindowInner::UsingStorageAccess() {
+   return wc->GetUsingStorageAccess();
+ }
+ 
++#ifdef MOZ_WEB_IDENTITY
+ WebIdentityHandler* nsPIDOMWindowInner::GetOrCreateWebIdentityHandler() {
+   if (mWebIdentityHandler) {
+     return mWebIdentityHandler;
+@@ -8123,6 +8194,7 @@ WebIdentityHandler* nsPIDOMWindowInner::GetOrCreateWebIdentityHandler() {
+   }
+   return mWebIdentityHandler;
+ }
++#endif
+ 
+ CloseWatcherManager* nsPIDOMWindowInner::EnsureCloseWatcherManager() {
+   if (!mCloseWatcherManager) {
+diff --git a/dom/base/nsGlobalWindowInner.h b/dom/base/nsGlobalWindowInner.h
+index 3f7ee038c0be59a3cd4b5cb956377438e816653d..91ad1364c45611e1610546fea39c75bd7bf26bde 100644
+--- a/dom/base/nsGlobalWindowInner.h
++++ b/dom/base/nsGlobalWindowInner.h
+@@ -131,9 +131,15 @@ class Timeout;
+ class TrustedTypePolicyFactory;
+ class VisualViewport;
+ class VoidFunction;
++#ifdef MOZ_WEBXR
+ class VRDisplay;
++#endif
++#ifdef MOZ_WEBXR
+ enum class VRDisplayEventReason : uint8_t;
++#endif
++#ifdef MOZ_WEBXR
+ class VREventObserver;
++#endif
+ struct WindowPostMessageOptions;
+ class Worklet;
+ namespace cache {
+@@ -398,13 +404,24 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+ 
+   // Inner windows only.
+   virtual void SetHasGamepadEventListener(bool aHasGamepad = true) override;
++#ifdef MOZ_WEBXR
+   void NotifyHasXRSession();
+   bool HasUsedVR() const;
+   bool IsVRContentDetected() const;
+   bool IsVRContentPresenting() const;
++#endif
++#ifndef MOZ_WEBXR
++  bool HasUsedVR() const { return false; }
++#endif
++#ifdef MOZ_WEBXR
+   void RequestXRPermission();
++#endif
++#ifdef MOZ_WEBXR
+   void OnXRPermissionRequestAllow();
++#endif
++#ifdef MOZ_WEBXR
+   void OnXRPermissionRequestCancel();
++#endif
+ 
+   using EventTarget::EventListenerAdded;
+   virtual void EventListenerAdded(nsAtom* aType) override;
+@@ -532,6 +549,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+   void EnableGamepadUpdates();
+   void DisableGamepadUpdates();
+ 
++#ifdef MOZ_WEBXR
+   // Inner windows only.
+   // Enable/disable updates for VR
+   void EnableVRUpdates();
+@@ -556,6 +574,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+   void DispatchVRDisplayConnect(uint32_t aDisplayID);
+   void DispatchVRDisplayDisconnect(uint32_t aDisplayID);
+   void DispatchVRDisplayPresentChange(uint32_t aDisplayID);
++#endif
+ 
+ #define EVENT(name_, id_, type_, struct_)                              \
+   mozilla::dom::EventHandlerNonNull* GetOn##name_() {                  \
+@@ -1364,6 +1383,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+   // Indicates whether this window wants gamepad input events
+   bool mHasGamepad : 1;
+ 
++#ifdef MOZ_WEBXR
+   // Indicates whether this window has content that has an XR session
+   // An XR session results in enumeration and activation of XR devices.
+   bool mHasXRSession : 1;
+@@ -1382,7 +1402,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+   // Indicates that an XR permission request has been granted.
+   // The page should not request permission multiple times.
+   bool mXRPermissionGranted : 1;
+-
++#endif
+   // True if this was the currently-active inner window for a BrowsingContext at
+   // the time it was discarded.
+   bool mWasCurrentInnerWindow : 1;
+@@ -1502,9 +1522,13 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
+   uint32_t mCanSkipCCGeneration;
+ 
+   // The VR Displays for this window
++#ifdef MOZ_WEBXR
+   nsTArray<RefPtr<mozilla::dom::VRDisplay>> mVRDisplays;
++#endif
+ 
++#ifdef MOZ_WEBXR
+   RefPtr<mozilla::dom::VREventObserver> mVREventObserver;
++#endif
+ 
+   // The number of unload and beforeunload event listeners registered on this
+   // window.
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+index dae1134fa1641788837cbfac0b4f9f95c979ab15..fa4dc5f61c10219df67255e094edb9fc90d0dd74 100644
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -180,9 +180,15 @@
+ #endif
+ 
+ #include "AccessCheck.h"
++#ifdef MOZ_WEBXR
+ #include "FxRWindowManager.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRShMem.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "gfxVR.h"
++#endif
+ #include "mozilla/BasePrincipal.h"
+ #include "mozilla/DOMEventTargetHelper.h"
+ #include "mozilla/GlobalKeyListener.h"
+@@ -213,10 +219,18 @@
+ #include "mozilla/dom/RedirectBlockedEvent.h"
+ #include "mozilla/dom/Selection.h"
+ #include "mozilla/dom/ServiceWorkerRegistration.h"
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplay.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplayEvent.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VRDisplayEventBinding.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "mozilla/dom/VREventObserver.h"
++#endif
+ #include "mozilla/dom/WebIDLGlobalNameHash.h"
+ #include "mozilla/dom/WindowBinding.h"
+ #include "mozilla/dom/Worklet.h"
+@@ -4208,10 +4222,12 @@ nsresult nsGlobalWindowOuter::ProcessWidgetFullscreenRequest(
+   }
+ 
+ #if defined(NIGHTLY_BUILD) && defined(XP_WIN)
++#ifdef MOZ_WEBXR
+   if (FxRWindowManager::GetInstance()->IsFxRWindow(mWindowID)) {
+     mozilla::gfx::VRShMem shmem(nullptr, true /*aRequiresMutex*/);
+     shmem.SendFullscreenState(mWindowID, aFullscreen);
+   }
++#endif
+ #endif  // NIGHTLY_BUILD && XP_WIN
+   FinishFullscreenChange(aFullscreen);
+   return NS_OK;
+@@ -6593,13 +6609,17 @@ void nsGlobalWindowOuter::SetIsBackground(bool aIsBackground) {
+       // Stop the vr telemery time spent when it switches to
+       // the background window.
+       inner->StopGamepadHaptics();
++#ifdef MOZ_WEBXR
+       inner->StopVRActivity();
++#endif
+       return;
+     }
+   }
+   // FIXME: Why doing this even if not changed?
+   inner->SyncGamepadState();
++#ifdef MOZ_WEBXR
+   inner->StartVRActivity();
++#endif
+ }
+ 
+ void nsGlobalWindowOuter::SetIsBackgroundInternal(bool aIsBackground) {
+diff --git a/dom/base/nsGlobalWindowOuter.h b/dom/base/nsGlobalWindowOuter.h
+index 7e1431a2fe55dedc7a52267edb3a11ab42f29a0c..c4330a1a20706f5eedaf5d43d3abd4e7fc4c2b5f 100644
+--- a/dom/base/nsGlobalWindowOuter.h
++++ b/dom/base/nsGlobalWindowOuter.h
+@@ -106,9 +106,15 @@ struct SizeToContentConstraints;
+ class SpeechSynthesis;
+ class Timeout;
+ class U2F;
++#ifdef MOZ_WEBXR
+ class VRDisplay;
++#endif
++#ifdef MOZ_WEBXR
+ enum class VRDisplayEventReason : uint8_t;
++#endif
++#ifdef MOZ_WEBXR
+ class VREventObserver;
++#endif
+ class WakeLock;
+ class Worklet;
+ namespace cache {
+diff --git a/dom/base/nsPIDOMWindow.h b/dom/base/nsPIDOMWindow.h
+index 2a2ec2882e1ce2f40dbb77a07f4912b1ab3add48..ba50a2040a40c7bada0b072cfe5124971ee989e2 100644
+--- a/dom/base/nsPIDOMWindow.h
++++ b/dom/base/nsPIDOMWindow.h
+@@ -66,7 +66,9 @@ class ServiceWorker;
+ class ServiceWorkerDescriptor;
+ class Timeout;
+ class TimeoutManager;
++#ifdef MOZ_WEB_IDENTITY
+ class WebIdentityHandler;
++#endif
+ class WindowContext;
+ class WindowGlobalChild;
+ class CustomElementRegistry;
+@@ -605,7 +607,9 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
+ 
+   bool UsingStorageAccess();
+ 
++#ifdef MOZ_WEB_IDENTITY
+   mozilla::dom::WebIdentityHandler* GetOrCreateWebIdentityHandler();
++#endif
+ 
+   uint32_t UpdateLockCount(bool aIncrement) {
+     MOZ_ASSERT_IF(!aIncrement, mLockCount > 0);
+@@ -661,7 +665,9 @@ class nsPIDOMWindowInner : public mozIDOMWindow {
+ 
+   RefPtr<mozilla::dom::Performance> mPerformance;
+   mozilla::UniquePtr<mozilla::dom::TimeoutManager> mTimeoutManager;
++#ifdef MOZ_WEB_IDENTITY
+   RefPtr<mozilla::dom::WebIdentityHandler> mWebIdentityHandler;
++#endif
+ 
+   RefPtr<mozilla::dom::Navigation> mNavigation;
+ 
+diff --git a/dom/bindings/Bindings.conf b/dom/bindings/Bindings.conf
+--- a/dom/bindings/Bindings.conf
++++ b/dom/bindings/Bindings.conf
+@@ -130,6 +130,11 @@
+ 
+ 'Credential' : {
+     'concrete': True,
++},
++
++'CredentialsContainer': {
++    # WebAuthn and AbortSignal reasons still need a context with identity off.
++    'implicitJSContext': ['get', 'create'],
+ },
+ 
+ 'Crypto' : {
+@@ -2176,3 +2181,7 @@
+ ],
+ 
+ }
++
++if not buildconfig.substs.get("MOZ_WEBXR", False):
++    for interface in ("XRPose", "XRReferenceSpace", "XRSpace"):
++        DOMInterfaces.pop(interface)
+diff --git a/dom/canvas/ClientWebGLContext.cpp b/dom/canvas/ClientWebGLContext.cpp
+index f84f1ceb0f05243fdba1a6695641b246d0e58ca3..6c39422066789f9ca6a991135ac5451599086e61 100644
+--- a/dom/canvas/ClientWebGLContext.cpp
++++ b/dom/canvas/ClientWebGLContext.cpp
+@@ -1042,7 +1042,9 @@ ClientWebGLContext::SetContextOptions(JSContext* cx,
+   newOpts.preserveDrawingBuffer = attributes.mPreserveDrawingBuffer;
+   newOpts.failIfMajorPerformanceCaveat =
+       attributes.mFailIfMajorPerformanceCaveat;
++#ifdef MOZ_WEBXR
+   newOpts.xrCompatible = attributes.mXrCompatible;
++#endif
+   newOpts.powerPreference = attributes.mPowerPreference;
+   newOpts.forceSoftwareRendering = attributes.mForceSoftwareRendering;
+   newOpts.enableDebugRendererInfo =
+@@ -1071,7 +1073,9 @@ ClientWebGLContext::SetContextOptions(JSContext* cx,
+     return NS_ERROR_FAILURE;
+   }
+ 
++#ifdef MOZ_WEBXR
+   mXRCompatible = attributes.mXrCompatible;
++#endif
+ 
+   mInitialOptions.emplace(newOpts);
+   return NS_OK;
+diff --git a/dom/canvas/ClientWebGLContext.h b/dom/canvas/ClientWebGLContext.h
+index 3332baf8111fcf8207373076ed1de45569ae1ecd..c18eba34be147f47eb8e191b3878612c427a325d 100644
+--- a/dom/canvas/ClientWebGLContext.h
++++ b/dom/canvas/ClientWebGLContext.h
+@@ -2401,8 +2401,12 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
+ 
+  public:
+   // https://immersive-web.github.io/webxr/#xr-compatible
++#ifdef MOZ_WEBXR
+   bool IsXRCompatible() const;
++#endif
++#ifdef MOZ_WEBXR
+   already_AddRefed<dom::Promise> MakeXRCompatible(ErrorResult& aRv);
++#endif
+ 
+  protected:
+   uint32_t GetPrincipalHashValue() const;
+@@ -2417,7 +2421,9 @@ class ClientWebGLContext final : public nsICanvasRenderingContextInternal,
+ 
+   mutable bool mResetLayer = true;
+   Maybe<const WebGLContextOptions> mInitialOptions;
++#ifdef MOZ_WEBXR
+   bool mXRCompatible = false;
++#endif
+ };
+ 
+ // used by DOM bindings in conjunction with GetParentObject
+diff --git a/dom/canvas/WebGLContext.cpp b/dom/canvas/WebGLContext.cpp
+index bc700cec265c1cbef3516fc6763dcd0ccc2d0950..f6d1473bd88cf4dd6a7949f5153b8364327307db 100644
+--- a/dom/canvas/WebGLContext.cpp
++++ b/dom/canvas/WebGLContext.cpp
+@@ -22,7 +22,9 @@
+ #include "MozFramebuffer.h"
+ #include "ScopedGLHelpers.h"
+ #include "SharedSurfaceGL.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "gfxConfig.h"
+ #include "gfxContext.h"
+ #include "gfxCrashReporterUtils.h"
+@@ -2195,8 +2197,11 @@ WebGLContext::FuncScope::~FuncScope() {
+ 
+ // --
+ 
++#ifdef MOZ_WEBXR
+ bool ClientWebGLContext::IsXRCompatible() const { return mXRCompatible; }
++#endif
+ 
++#ifdef MOZ_WEBXR
+ already_AddRefed<dom::Promise> ClientWebGLContext::MakeXRCompatible(
+     ErrorResult& aRv) {
+   const FuncScope funcScope(*this, "MakeXRCompatible");
+@@ -2223,6 +2228,7 @@ already_AddRefed<dom::Promise> ClientWebGLContext::MakeXRCompatible(
+   promise->MaybeResolveWithUndefined();
+   return promise.forget();
+ }
++#endif
+ 
+ // --
+ 
+diff --git a/dom/canvas/WebGLContext.h b/dom/canvas/WebGLContext.h
+index a2f0614872b9c5b62dc5870ef99fb8c3bfdc0137..f33ab22690e529277063a23641b89926300edd0d 100644
+--- a/dom/canvas/WebGLContext.h
++++ b/dom/canvas/WebGLContext.h
+@@ -943,7 +943,9 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
+   bool mShouldPresent = false;
+   bool mDisableFragHighP = false;
+   bool mForceResizeOnPresent = false;
++#ifdef MOZ_WEBXR
+   bool mVRReady = false;
++#endif
+ 
+   template <typename WebGLObjectType>
+   void DeleteWebGLObjectsArray(nsTArray<WebGLObjectType>& array);
+diff --git a/dom/canvas/moz.build b/dom/canvas/moz.build
+index 4701296155728ebb2abf21d84b1a7622e17a40f9..8c2623208c4300d0e570d557b58a33ff2acd8afe 100644
+--- a/dom/canvas/moz.build
++++ b/dom/canvas/moz.build
+@@ -77,7 +77,6 @@ EXPORTS.mozilla.dom += [
+     "WebGLParent.h",
+     "WebGLTexelConversions.h",
+     "WebGLTypes.h",
+-    "XRWebGLLayer.h",
+ ]
+ # XRWebGLLayer.h must be exported for use by the generated WebXRBinding.h
+ 
+@@ -103,7 +102,6 @@ UNIFIED_SOURCES += [
+     "ImageData.cpp",
+     "nsICanvasRenderingContextInternal.cpp",
+     "OffscreenCanvas.cpp",
+-    "XRWebGLLayer.cpp",
+ ]
+ 
+ SOURCES += [
+@@ -230,3 +228,7 @@ if CONFIG["CC_TYPE"] == "gcc":
+ 
+ # Add libFuzzer configuration directives
+ include("/tools/fuzzing/libfuzzer-config.mozbuild")
++
++if CONFIG["MOZ_WEBXR"]:
++    EXPORTS.mozilla.dom += ["XRWebGLLayer.h"]
++    UNIFIED_SOURCES += ["XRWebGLLayer.cpp"]
+diff --git a/dom/credentialmanagement/CredentialsContainer.cpp b/dom/credentialmanagement/CredentialsContainer.cpp
+index 6bc6658f97861d888ad03b63ce8c242b1d9c25b4..b9b668d51ab4c73b9f44dfb960c31cee7dc847fd 100644
+--- a/dom/credentialmanagement/CredentialsContainer.cpp
++++ b/dom/credentialmanagement/CredentialsContainer.cpp
+@@ -6,11 +6,15 @@
+ 
+ #include "mozilla/StaticPrefs_security.h"
+ #include "mozilla/dom/Credential.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/DigitalCredentialHandler.h"
++#endif
+ #include "mozilla/dom/FeaturePolicyUtils.h"
+ #include "mozilla/dom/Promise.h"
+ #include "mozilla/dom/WebAuthnHandler.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/WebIdentityHandler.h"
++#endif
+ #include "mozilla/dom/WindowContext.h"
+ #include "mozilla/dom/WindowGlobalChild.h"
+ #include "nsContentUtils.h"
+@@ -18,9 +22,15 @@
+ 
+ namespace mozilla::dom {
+ 
++#ifdef MOZ_WEB_IDENTITY
+ NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(CredentialsContainer, mParent,
+                                       mWebAuthnHandler,
+                                       mDigitalCredentialHandler)
++#endif
++#ifndef MOZ_WEB_IDENTITY
++NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(CredentialsContainer, mParent, mWebAuthnHandler)
++#endif
++
+ NS_IMPL_CYCLE_COLLECTING_ADDREF(CredentialsContainer)
+ NS_IMPL_CYCLE_COLLECTING_RELEASE(CredentialsContainer)
+ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(CredentialsContainer)
+@@ -100,6 +110,7 @@ void CredentialsContainer::EnsureWebAuthnHandler() {
+   }
+ }
+ 
++#ifdef MOZ_WEB_IDENTITY
+ void CredentialsContainer::EnsureDigitalCredentialHandler() {
+   MOZ_ASSERT(NS_IsMainThread());
+ 
+@@ -107,6 +118,7 @@ void CredentialsContainer::EnsureDigitalCredentialHandler() {
+     mDigitalCredentialHandler = new DigitalCredentialHandler(mParent);
+   }
+ }
++#endif
+ 
+ already_AddRefed<WebAuthnHandler> CredentialsContainer::GetWebAuthnHandler() {
+   MOZ_ASSERT(NS_IsMainThread());
+@@ -133,12 +145,16 @@ already_AddRefed<Promise> CredentialsContainer::Get(
+   if (aOptions.mPublicKey.WasPassed()) {
+     totalOptions += 1;
+   }
++#ifdef MOZ_WEB_IDENTITY
+   if (aOptions.mIdentity.WasPassed()) {
+     totalOptions += 1;
+   }
++#endif
++#ifdef MOZ_WEB_IDENTITY
+   if (aOptions.mDigital.WasPassed()) {
+     totalOptions += 1;
+   }
++#endif
+   if (totalOptions > 1) {
+     promise->MaybeRejectWithNotSupportedError(
+         "CredentialsContainer request is not supported."_ns);
+@@ -186,6 +202,7 @@ already_AddRefed<Promise> CredentialsContainer::Get(
+     return promise.forget();
+   }
+ 
++#ifdef MOZ_WEB_IDENTITY
+   if (aOptions.mIdentity.WasPassed()) {
+     if (conditionallyMediated) {
+       promise->MaybeRejectWithTypeError<MSG_INVALID_ENUM_VALUE>(
+@@ -207,7 +224,9 @@ already_AddRefed<Promise> CredentialsContainer::Get(
+ 
+     return promise.forget();
+   }
++#endif
+ 
++#ifdef MOZ_WEB_IDENTITY
+   if (aOptions.mDigital.WasPassed()) {
+     if (!FeaturePolicyUtils::IsFeatureAllowed(mParent->GetExtantDoc(),
+                                               u"digital-credentials-get"_ns)) {
+@@ -221,6 +240,7 @@ already_AddRefed<Promise> CredentialsContainer::Get(
+         aCx, aOptions.mDigital.Value(), aOptions.mSignal, promise);
+     return promise.forget();
+   }
++#endif
+ 
+   promise->MaybeRejectWithNotSupportedError(
+       "CredentialsContainer request is not supported."_ns);
+@@ -240,9 +260,11 @@ already_AddRefed<Promise> CredentialsContainer::Create(
+   if (aOptions.mPublicKey.WasPassed()) {
+     totalOptions += 1;
+   }
++#ifdef MOZ_WEB_IDENTITY
+   if (aOptions.mDigital.WasPassed()) {
+     totalOptions += 1;
+   }
++#endif
+   if (totalOptions > 1) {
+     promise->MaybeRejectWithNotSupportedError(
+         "CredentialsContainer request is not supported."_ns);
+@@ -285,6 +307,7 @@ already_AddRefed<Promise> CredentialsContainer::Create(
+     return promise.forget();
+   }
+ 
++#ifdef MOZ_WEB_IDENTITY
+   if (aOptions.mDigital.WasPassed()) {
+     if (!FeaturePolicyUtils::IsFeatureAllowed(
+             mParent->GetExtantDoc(), u"digital-credentials-create"_ns)) {
+@@ -298,6 +321,7 @@ already_AddRefed<Promise> CredentialsContainer::Create(
+         aCx, aOptions.mDigital.Value(), aOptions.mSignal, promise);
+     return promise.forget();
+   }
++#endif
+ 
+   promise->MaybeRejectWithNotSupportedError(
+       "CredentialsContainer request is not supported."_ns);
+@@ -343,6 +367,7 @@ already_AddRefed<Promise> CredentialsContainer::PreventSilentAccess(
+     return nullptr;
+   }
+ 
++#ifdef MOZ_WEB_IDENTITY
+   WebIdentityHandler* identityHandler =
+       mParent->GetOrCreateWebIdentityHandler();
+   if (!identityHandler) {
+@@ -351,6 +376,10 @@ already_AddRefed<Promise> CredentialsContainer::PreventSilentAccess(
+   }
+ 
+   identityHandler->PreventSilentAccess(promise);
++#endif
++#ifndef MOZ_WEB_IDENTITY
++  promise->MaybeResolveWithUndefined();
++#endif
+   return promise.forget();
+ }
+ 
+diff --git a/dom/credentialmanagement/CredentialsContainer.h b/dom/credentialmanagement/CredentialsContainer.h
+index 9d2e7092eb10870cc9eb5c99e5b96aea3f8a38a9..6c7b73807e2115e49a97aa285681529b8ecd8685 100644
+--- a/dom/credentialmanagement/CredentialsContainer.h
++++ b/dom/credentialmanagement/CredentialsContainer.h
+@@ -9,7 +9,9 @@
+ 
+ namespace mozilla::dom {
+ 
++#ifdef MOZ_WEB_IDENTITY
+ class DigitalCredentialHandler;
++#endif
+ class WebAuthnHandler;
+ 
+ class CredentialsContainer final : public nsISupports, public nsWrapperCache {
+@@ -45,11 +47,15 @@ class CredentialsContainer final : public nsISupports, public nsWrapperCache {
+   ~CredentialsContainer();
+ 
+   void EnsureWebAuthnHandler();
++#ifdef MOZ_WEB_IDENTITY
+   void EnsureDigitalCredentialHandler();
++#endif
+ 
+   nsCOMPtr<nsPIDOMWindowInner> mParent;
+   RefPtr<WebAuthnHandler> mWebAuthnHandler;
++#ifdef MOZ_WEB_IDENTITY
+   RefPtr<DigitalCredentialHandler> mDigitalCredentialHandler;
++#endif
+ };
+ 
+ }  // namespace mozilla::dom
+diff --git a/dom/credentialmanagement/moz.build b/dom/credentialmanagement/moz.build
+index eec8e736eeedc7402a75f669dd62d6246988c785..a37bbbe0fc80113962d87d4637e4a8b5b2781e6f 100644
+--- a/dom/credentialmanagement/moz.build
++++ b/dom/credentialmanagement/moz.build
+@@ -5,7 +5,8 @@
+ with Files("**"):
+     BUG_COMPONENT = ("Core", "DOM: Web Authentication")
+ 
+-DIRS += ["digital", "identity"]
++if CONFIG["MOZ_WEB_IDENTITY"]:
++    DIRS += ["digital", "identity"]
+ 
+ EXPORTS.mozilla.dom += [
+     "Credential.h",
+diff --git a/dom/gamepad/GamepadHandle.h b/dom/gamepad/GamepadHandle.h
+index 3165655e5b792d9d8db7221a5a805710300cc2ae..b14c134a1432b018efa1fb5443c904f24bdf83f5 100644
+--- a/dom/gamepad/GamepadHandle.h
++++ b/dom/gamepad/GamepadHandle.h
+@@ -26,8 +26,12 @@ struct ParamTraits;
+ 
+ namespace mozilla::gfx {
+ 
++#ifdef MOZ_WEBXR
+ class VRDisplayClient;
++#endif
++#ifdef MOZ_WEBXR
+ class VRManager;
++#endif
+ 
+ }  // namespace mozilla::gfx
+ 
+@@ -72,8 +76,12 @@ class GamepadHandle {
+   friend class mozilla::dom::GamepadPlatformService;
+   friend class mozilla::dom::GamepadServiceTest;
+   friend class mozilla::dom::XRInputSource;
++#ifdef MOZ_WEBXR
+   friend class mozilla::gfx::VRDisplayClient;
++#endif
++#ifdef MOZ_WEBXR
+   friend class mozilla::gfx::VRManager;
++#endif
+ 
+   // Allow IPDL to serialize us
+   friend struct IPC::ParamTraits<mozilla::dom::GamepadHandle>;
+diff --git a/dom/gamepad/GamepadManager.cpp b/dom/gamepad/GamepadManager.cpp
+index 58a54ed7a7cd9a43ef4218c470535f70a9bada6e..ecfdbeef03265e40ec9013601bf8faa826dc569c 100644
+--- a/dom/gamepad/GamepadManager.cpp
++++ b/dom/gamepad/GamepadManager.cpp
+@@ -3,8 +3,10 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "mozilla/dom/GamepadManager.h"
++#ifdef MOZ_WEBXR
+ 
+ #include "VRManagerChild.h"
++#endif
+ #include "mozilla/ClearOnShutdown.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+@@ -91,10 +93,13 @@ void GamepadManager::StopMonitoring() {
+     PGamepadEventChannelChild::Send__delete__(mChannelChild);
+     mChannelChild = nullptr;
+   }
++#ifdef MOZ_WEBXR
+   if (gfx::VRManagerChild::IsCreated()) {
+     gfx::VRManagerChild* vm = gfx::VRManagerChild::Get();
+     vm->SendControllerListenerRemoved();
+   }
++#endif
++
+   mGamepads.Clear();
+ }
+ 
+@@ -129,12 +134,15 @@ void GamepadManager::AddListener(nsGlobalWindowInner* aWindow) {
+ 
+     mChannelChild = child;
+ 
++#ifdef MOZ_WEBXR
+     if (gfx::VRManagerChild::IsCreated()) {
+       // Construct VRManagerChannel and ask adding the connected
+       // VR controllers to GamepadManager
+       gfx::VRManagerChild* vm = gfx::VRManagerChild::Get();
+       vm->SendControllerListenerAdded();
+     }
++#endif
++
+   }
+ 
+   if (!mEnabled || mShuttingDown ||
+@@ -590,12 +598,15 @@ already_AddRefed<Promise> GamepadManager::VibrateHaptic(
+   }
+   if (StaticPrefs::dom_gamepad_haptic_feedback_enabled()) {
+     if (aHandle.GetKind() == GamepadHandleKind::VR) {
++#ifdef MOZ_WEBXR
+       if (gfx::VRManagerChild::IsCreated()) {
+         gfx::VRManagerChild* vm = gfx::VRManagerChild::Get();
+         vm->AddPromise(mPromiseID, promise);
+         vm->SendVibrateHaptic(aHandle, aHapticIndex, aIntensity, aDuration,
+                               mPromiseID);
+       }
++#endif
++
+     } else {
+       if (mChannelChild) {
+         mChannelChild->AddPromise(mPromiseID, promise);
+@@ -617,10 +628,13 @@ void GamepadManager::StopHaptics() {
+   for (const auto& entry : mGamepads) {
+     const GamepadHandle handle = entry.GetWeak()->GetHandle();
+     if (handle.GetKind() == GamepadHandleKind::VR) {
++#ifdef MOZ_WEBXR
+       if (gfx::VRManagerChild::IsCreated()) {
+         gfx::VRManagerChild* vm = gfx::VRManagerChild::Get();
+         vm->SendStopVibrateHaptic(handle);
+       }
++#endif
++
+     } else {
+       if (mChannelChild) {
+         mChannelChild->SendStopVibrateHaptic(handle);
+diff --git a/dom/gamepad/GamepadManager.h b/dom/gamepad/GamepadManager.h
+index fddf65bd5b52b75fc467d835d7d1ac93b2a3703b..825de00db9b6a91fdb1917f3c644f60f28baf926 100644
+--- a/dom/gamepad/GamepadManager.h
++++ b/dom/gamepad/GamepadManager.h
+@@ -17,7 +17,9 @@ class nsIGlobalObject;
+ 
+ namespace mozilla {
+ namespace gfx {
++#ifdef MOZ_WEBXR
+ class VRManagerChild;
++#endif
+ }  // namespace gfx
+ namespace dom {
+ 
+diff --git a/dom/html/HTMLCanvasElement.cpp b/dom/html/HTMLCanvasElement.cpp
+index 96479d6fadcab75cfd8c09d671d9184bd0ea0a9e..1828239f62729a033e2b60699b04803cdce6bc95 100644
+--- a/dom/html/HTMLCanvasElement.cpp
++++ b/dom/html/HTMLCanvasElement.cpp
+@@ -9,7 +9,9 @@
+ #include "ClientWebGLContext.h"
+ #include "ImageEncoder.h"
+ #include "MediaTrackGraph.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "WindowRenderer.h"
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
+diff --git a/dom/ipc/BrowserChild.cpp b/dom/ipc/BrowserChild.cpp
+index 5e4f470d2e1f4cf49ce6d955bbe824be1d145c4d..07baa4dbda5c796b2c1e3c4791a72ccaa2a62b7b 100644
+--- a/dom/ipc/BrowserChild.cpp
++++ b/dom/ipc/BrowserChild.cpp
+@@ -18,7 +18,9 @@
+ #include "StructuredCloneData.h"
+ #include "UnitTransforms.h"
+ #include "Units.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "mozilla/Assertions.h"
+ #include "mozilla/BasePrincipal.h"
+ #include "mozilla/EventForwards.h"
+@@ -53,7 +55,9 @@
+ #include "mozilla/dom/MouseEventBinding.h"
+ #include "mozilla/dom/Nullable.h"
+ #include "mozilla/dom/PBrowser.h"
++#ifdef MOZ_WEB_PAYMENTS
+ #include "mozilla/dom/PaymentRequestChild.h"
++#endif
+ #include "mozilla/dom/PointerEventHandler.h"
+ #include "mozilla/dom/SessionStoreChild.h"
+ #include "mozilla/dom/SessionStoreUtils.h"
+@@ -3289,7 +3293,9 @@ void BrowserChild::InitRenderingState(
+     MOZ_ASSERT(mLayersConnected == Some(true));
+     // Succeeded to create "remote" layer manager
+     ImageBridgeChild::IdentifyCompositorTextureHost(mTextureFactoryIdentifier);
++#ifdef MOZ_WEBXR
+     gfx::VRManagerChild::IdentifyTextureHost(mTextureFactoryIdentifier);
++#endif
+     InitAPZState();
+   } else {
+     mLayersConnected = Some(false);
+@@ -3650,7 +3656,9 @@ void BrowserChild::ReinitRendering() {
+ 
+   mLayersConnected = Some(true);
+   ImageBridgeChild::IdentifyCompositorTextureHost(mTextureFactoryIdentifier);
++#ifdef MOZ_WEBXR
+   gfx::VRManagerChild::IdentifyTextureHost(mTextureFactoryIdentifier);
++#endif
+ 
+   InitAPZState();
+   if (nsCOMPtr<Document> doc = GetTopLevelDocument()) {
+@@ -3791,16 +3799,20 @@ mozilla::ipc::IPCResult BrowserChild::RecvReleasePointerLock() {
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEB_PAYMENTS
+ PPaymentRequestChild* BrowserChild::AllocPPaymentRequestChild() {
+   MOZ_CRASH(
+       "We should never be manually allocating PPaymentRequestChild actors");
+   return nullptr;
+ }
++#endif
+ 
++#ifdef MOZ_WEB_PAYMENTS
+ bool BrowserChild::DeallocPPaymentRequestChild(PPaymentRequestChild* actor) {
+   delete actor;
+   return true;
+ }
++#endif
+ 
+ LayoutDeviceIntSize BrowserChild::GetInnerSize() {
+   return RoundedToInt(mUnscaledInnerSize * mPuppetWidget->GetDefaultScale());
+diff --git a/dom/ipc/BrowserChild.h b/dom/ipc/BrowserChild.h
+index 7561b9d512e18fe49dfedccec31a92a4e7089ed9..9faaadafac2390dd65ba21c38f0a8ec43b132e0c 100644
+--- a/dom/ipc/BrowserChild.h
++++ b/dom/ipc/BrowserChild.h
+@@ -553,9 +553,13 @@ class BrowserChild final : public nsMessageManagerScriptExecutor,
+ 
+   mozilla::ipc::IPCResult RecvWillChangeProcess();
+ 
++#ifdef MOZ_WEB_PAYMENTS
+   PPaymentRequestChild* AllocPPaymentRequestChild();
++#endif
+ 
++#ifdef MOZ_WEB_PAYMENTS
+   bool DeallocPPaymentRequestChild(PPaymentRequestChild* aActor);
++#endif
+ 
+   LayoutDeviceIntPoint GetClientOffset() const { return mClientOffset; }
+   LayoutDeviceIntPoint GetChromeOffset() const { return mChromeOffset; };
+diff --git a/dom/ipc/BrowserParent.cpp b/dom/ipc/BrowserParent.cpp
+index 7efb717cde78120df4034ce4c45568bcd883aa6d..02c5a863a4c1ab408e870fa4d54e537d25c7c158 100644
+--- a/dom/ipc/BrowserParent.cpp
++++ b/dom/ipc/BrowserParent.cpp
+@@ -44,7 +44,9 @@
+ #include "mozilla/dom/DocumentInlines.h"
+ #include "mozilla/dom/Event.h"
+ #include "mozilla/dom/PContentPermissionRequestParent.h"
++#ifdef MOZ_WEB_PAYMENTS
+ #include "mozilla/dom/PaymentRequestParent.h"
++#endif
+ #include "mozilla/dom/PointerEventHandler.h"
+ #include "mozilla/dom/RemoteDragStartData.h"
+ #include "mozilla/dom/RemoteWebProgressRequest.h"
+@@ -139,8 +141,10 @@
+ #include "nsThreadUtils.h"
+ 
+ #ifdef XP_WIN
++#ifdef MOZ_WEBXR
+ #  include "FxRWindowManager.h"
+ #endif
++#endif
+ 
+ #if defined(XP_WIN) && defined(ACCESSIBILITY)
+ #  include "mozilla/a11y/AccessibleWrap.h"
+@@ -4016,17 +4020,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvRemoteIsReadyToHandleInputEvents() {
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEB_PAYMENTS
+ PPaymentRequestParent* BrowserParent::AllocPPaymentRequestParent() {
+   RefPtr<PaymentRequestParent> actor = new PaymentRequestParent();
+   return actor.forget().take();
+ }
++#endif
+ 
++#ifdef MOZ_WEB_PAYMENTS
+ bool BrowserParent::DeallocPPaymentRequestParent(
+     PPaymentRequestParent* aActor) {
+   RefPtr<PaymentRequestParent> actor =
+       dont_AddRef(static_cast<PaymentRequestParent*>(aActor));
+   return true;
+ }
++#endif
+ 
+ nsresult BrowserParent::HandleEvent(Event* aEvent) {
+   if (mIsDestroyed) {
+@@ -4379,9 +4387,14 @@ mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingProtectedMedia(
+     const uint64_t& aOuterWindowID,
+     IsWindowSupportingProtectedMediaResolver&& aResolve) {
+ #ifdef XP_WIN
++#ifdef MOZ_WEBXR
+   bool isFxrWindow =
+       FxRWindowManager::GetInstance()->IsFxRWindow(aOuterWindowID);
+   aResolve(!isFxrWindow);
++#endif
++#ifndef MOZ_WEBXR
++  aResolve(true);
++#endif
+ #else
+ #  ifdef FUZZING_SNAPSHOT
+   return IPC_FAIL(this, "Should only be called on Windows");
+@@ -4392,6 +4405,7 @@ mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingProtectedMedia(
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingWebVR(
+     const uint64_t& aOuterWindowID,
+     IsWindowSupportingWebVRResolver&& aResolve) {
+@@ -4405,6 +4419,7 @@ mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingWebVR(
+ 
+   return IPC_OK();
+ }
++#endif
+ 
+ BrowserParent* BrowserParent::TopLevelBrowserParent() {
+   BrowserParent* parent = this;
+diff --git a/dom/ipc/BrowserParent.h b/dom/ipc/BrowserParent.h
+index 544b722da60eaea598d4275392d034a19299b92b..b95ab6d6d271411f4260971dd70969801b525ad8 100644
+--- a/dom/ipc/BrowserParent.h
++++ b/dom/ipc/BrowserParent.h
+@@ -453,9 +453,11 @@ class BrowserParent final : public PBrowserParent,
+       const uint64_t& aOuterWindowID,
+       IsWindowSupportingProtectedMediaResolver&& aResolve);
+ 
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvIsWindowSupportingWebVR(
+       const uint64_t& aOuterWindowID,
+       IsWindowSupportingWebVRResolver&& aResolve);
++#endif
+ 
+   void LoadURL(nsDocShellLoadState* aLoadState);
+ 
+@@ -669,9 +671,13 @@ class BrowserParent final : public PBrowserParent,
+ 
+   void StopIMEStateManagement();
+ 
++#ifdef MOZ_WEB_PAYMENTS
+   PPaymentRequestParent* AllocPPaymentRequestParent();
++#endif
+ 
++#ifdef MOZ_WEB_PAYMENTS
+   bool DeallocPPaymentRequestParent(PPaymentRequestParent* aActor);
++#endif
+ 
+   bool SendLoadRemoteScript(const nsAString& aURL,
+                             const bool& aRunInGlobalScope);
+diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
+index f488257f087499f70b66171b4e78943eb073e9b9..25a61568f7a74d3683ee5c1e6c25475e7cb7460d 100644
+--- a/dom/ipc/ContentChild.cpp
++++ b/dom/ipc/ContentChild.cpp
+@@ -280,7 +280,9 @@
+ #include "DomainPolicy.h"
+ #include "GfxInfoBase.h"
+ #include "MMPrinter.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "gfxPlatform.h"
+ #include "gfxPlatformFontList.h"
+ #include "mozilla/RemoteSpellCheckEngineChild.h"
+@@ -1567,14 +1569,22 @@ void CGSShutdownServerConnections();
+ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+     Endpoint<PCompositorManagerChild>&& aCompositor,
+     Endpoint<PImageBridgeChild>&& aImageBridge,
++#ifdef MOZ_WEBXR
+     Endpoint<PVRManagerChild>&& aVRBridge,
++#endif
+     Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
+     nsTArray<uint32_t>&& namespaces) {
++#ifdef MOZ_WEBXR
+   MOZ_ASSERT(namespaces.Length() == 4);
++#else
++  MOZ_ASSERT(namespaces.Length() == 3);
++#endif
+   const uint32_t compositorManagerNamespace = namespaces[0];
+   const uint32_t compositorBridgeNamespace = namespaces[1];
+   const uint32_t imageBridgeNamespace = namespaces[2];
++#ifdef MOZ_WEBXR
+   const uint32_t vrManagerNamespace = namespaces[3];
++#endif
+ 
+   // Note that for all of the methods below, if it can fail, it should only
+   // return false if the failure is an IPDL error. In such situations,
+@@ -1595,10 +1605,13 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+                                         imageBridgeNamespace)) {
+     return GetResultForRenderingInitFailure(aImageBridge.OtherChildID());
+   }
++#ifdef MOZ_WEBXR
+   if (!gfx::VRManagerChild::InitForContent(std::move(aVRBridge),
+                                            vrManagerNamespace)) {
+     return GetResultForRenderingInitFailure(aVRBridge.OtherChildID());
+   }
++#endif
++
+   RemoteMediaManagerChild::InitForGPUProcess(std::move(aVideoManager));
+ 
+ #if defined(XP_MACOSX) && !defined(MOZ_SANDBOX)
+@@ -1616,14 +1629,22 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+     Endpoint<PCompositorManagerChild>&& aCompositor,
+     Endpoint<PImageBridgeChild>&& aImageBridge,
++#ifdef MOZ_WEBXR
+     Endpoint<PVRManagerChild>&& aVRBridge,
++#endif
+     Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
+     nsTArray<uint32_t>&& namespaces) {
++#ifdef MOZ_WEBXR
+   MOZ_ASSERT(namespaces.Length() == 4);
++#else
++  MOZ_ASSERT(namespaces.Length() == 3);
++#endif
+   const uint32_t compositorManagerNamespace = namespaces[0];
+   const uint32_t compositorBridgeNamespace = namespaces[1];
+   const uint32_t imageBridgeNamespace = namespaces[2];
++#ifdef MOZ_WEBXR
+   const uint32_t vrManagerNamespace = namespaces[3];
++#endif
+ 
+   nsTArray<RefPtr<BrowserChild>> tabs = BrowserChild::GetAll();
+ 
+@@ -1640,10 +1661,13 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+                                           imageBridgeNamespace)) {
+     return GetResultForRenderingInitFailure(aImageBridge.OtherChildID());
+   }
++#ifdef MOZ_WEBXR
+   if (!gfx::VRManagerChild::InitForContent(std::move(aVRBridge),
+                                            vrManagerNamespace)) {
+     return GetResultForRenderingInitFailure(aVRBridge.OtherChildID());
+   }
++#endif
++
+   gfxPlatform::GetPlatform()->CompositorUpdated();
+ 
+   // Establish new PLayerTransactions.
+diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
+index 6b416c6cdc6032908c5331f3b10ba96bab185422..1156fe3ad16e58b9809b2633afc7f89a62406dd7 100644
+--- a/dom/ipc/ContentChild.h
++++ b/dom/ipc/ContentChild.h
+@@ -165,14 +165,18 @@ class ContentChild final : public PContentChild,
+   mozilla::ipc::IPCResult RecvInitRendering(
+       Endpoint<PCompositorManagerChild>&& aCompositor,
+       Endpoint<PImageBridgeChild>&& aImageBridge,
++#ifdef MOZ_WEBXR
+       Endpoint<PVRManagerChild>&& aVRBridge,
++#endif
+       Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
+       nsTArray<uint32_t>&& namespaces);
+ 
+   mozilla::ipc::IPCResult RecvReinitRendering(
+       Endpoint<PCompositorManagerChild>&& aCompositor,
+       Endpoint<PImageBridgeChild>&& aImageBridge,
++#ifdef MOZ_WEBXR
+       Endpoint<PVRManagerChild>&& aVRBridge,
++#endif
+       Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
+       nsTArray<uint32_t>&& namespaces);
+ 
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+index a561fda8a743ec76220b202ffe72dffed4eaa8d1..2a13d564c2d617a600635470147592365f27f945 100644
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -3020,16 +3020,25 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+   // on demand.)
+   Endpoint<PCompositorManagerChild> compositor;
+   Endpoint<PImageBridgeChild> imageBridge;
++#ifdef MOZ_WEBXR
+   Endpoint<PVRManagerChild> vrBridge;
++#endif
+   Endpoint<PRemoteMediaManagerChild> videoManager;
+   AutoTArray<uint32_t, 4> namespaces;
+ 
+   if (NS_SUCCEEDED(gpuReadyRv) &&
+       gpm->CreateContentBridges(OtherEndpointProcInfo(), &compositor,
+-                                &imageBridge, &vrBridge, &videoManager,
++                                &imageBridge,
++#ifdef MOZ_WEBXR
++                                &vrBridge,
++#endif
++                                &videoManager,
+                                 mChildID, &namespaces)) {
+     (void)SendInitRendering(std::move(compositor), std::move(imageBridge),
+-                            std::move(vrBridge), std::move(videoManager),
++#ifdef MOZ_WEBXR
++                            std::move(vrBridge),
++#endif
++                            std::move(videoManager),
+                             namespaces);
+   } else {
+     // This can fail if we've already started shutting down the compositor
+@@ -3206,18 +3215,27 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+ 
+   Endpoint<PCompositorManagerChild> compositor;
+   Endpoint<PImageBridgeChild> imageBridge;
++#ifdef MOZ_WEBXR
+   Endpoint<PVRManagerChild> vrBridge;
++#endif
+   Endpoint<PRemoteMediaManagerChild> videoManager;
+   AutoTArray<uint32_t, 4> namespaces;
+ 
+   if (!gpm->CreateContentBridges(OtherEndpointProcInfo(), &compositor,
+-                                 &imageBridge, &vrBridge, &videoManager,
++                                 &imageBridge,
++#ifdef MOZ_WEBXR
++                                &vrBridge,
++#endif
++                                &videoManager,
+                                  mChildID, &namespaces)) {
+     return;
+   }
+ 
+   (void)SendReinitRendering(std::move(compositor), std::move(imageBridge),
+-                            std::move(vrBridge), std::move(videoManager),
++#ifdef MOZ_WEBXR
++                            std::move(vrBridge),
++#endif
++                            std::move(videoManager),
+                             namespaces);
+ }
+ 
+diff --git a/dom/ipc/PBrowser.ipdl b/dom/ipc/PBrowser.ipdl
+index 91f170e7b9b83495f7d5a96758867c788a06aa32..244edc675bfb363d6c42f8d9a00fd252dfc39407 100644
+--- a/dom/ipc/PBrowser.ipdl
++++ b/dom/ipc/PBrowser.ipdl
+@@ -9,7 +9,9 @@ include protocol PDocAccessible;
+ #endif
+ include protocol PFilePicker;
+ include protocol PRemotePrintJob;
++#ifdef MOZ_WEB_PAYMENTS
+ include protocol PPaymentRequest;
++#endif
+ include protocol PSessionStore;
+ include protocol PWindowGlobal;
+ include protocol PBrowserBridge;
+@@ -202,7 +204,9 @@ struct PrintPreviewResultInfo
+ #endif
+ 
+     manages PFilePicker;
++#ifdef MOZ_WEB_PAYMENTS
+     manages PPaymentRequest;
++#endif
+     manages PSessionStore;
+     manages PWindowGlobal;
+     manages PBrowserBridge;
+@@ -223,7 +227,9 @@ parent:
+                          MaybeDiscardedBrowsingContext aBrowsingContext);
+ #endif
+ 
++#ifdef MOZ_WEB_PAYMENTS
+     async PPaymentRequest();
++#endif
+ 
+     /**
+      * Create a new Vsync connection for our associated root widget
+@@ -1092,7 +1098,9 @@ parent:
+     /**
+     * Fetches whether this window supports WebVR, which is sent back in response.
+     */
++#ifdef MOZ_WEBXR
+     async IsWindowSupportingWebVR(uint64_t aOuterWindowID) returns(bool isSupported);
++#endif
+ 
+     /** Records a history visit. */
+     async VisitURI(nullable nsIURI aURI, nullable nsIURI aLastVisitedURI, uint32_t aFlags, uint64_t aBrowserId);
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+index 040c1d9da96bb74b2d1e7dd4e62b2e28d5222cae..b189b27e4048b40414fc01838164d8eac2844cb7 100644
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -40,7 +40,9 @@ include protocol PWindowGlobal;
+ include protocol PURLClassifier;
+ include protocol PURLClassifierLocal;
+ include protocol PURLClassifierLocalByName;
++#ifdef MOZ_WEBXR
+ include protocol PVRManager;
++#endif
+ include protocol PRemoteMediaManager;
+ include protocol PRemoteWorkerDebuggerManager;
+ include protocol PRemoteWorkerService;
+@@ -609,7 +611,9 @@ child:
+     async InitRendering(
+       Endpoint<PCompositorManagerChild> compositor,
+       Endpoint<PImageBridgeChild> imageBridge,
++#ifdef MOZ_WEBXR
+       Endpoint<PVRManagerChild> vr,
++#endif
+       Endpoint<PRemoteMediaManagerChild> video,
+       uint32_t[] namespaces);
+ 
+@@ -619,7 +623,9 @@ child:
+     async ReinitRendering(
+       Endpoint<PCompositorManagerChild> compositor,
+       Endpoint<PImageBridgeChild> bridge,
++#ifdef MOZ_WEBXR
+       Endpoint<PVRManagerChild> vr,
++#endif
+       Endpoint<PRemoteMediaManagerChild> video,
+       uint32_t[] namespaces);
+ 
+diff --git a/dom/ipc/PWindowGlobal.ipdl b/dom/ipc/PWindowGlobal.ipdl
+index 92b4530a8cdb45decc5e6a09c290bba504cf5387..d08011b653d8fbd80508fe723378ab7a7dc51c18 100644
+--- a/dom/ipc/PWindowGlobal.ipdl
++++ b/dom/ipc/PWindowGlobal.ipdl
+@@ -5,7 +5,9 @@
+ include "ipc/ErrorIPCUtils.h";
+ include "ipc/MediaControlIPC.h";
+ include "mozilla/dom/DocShellMessageUtils.h";
++#ifdef MOZ_WEB_IDENTITY
+ include "mozilla/dom/IdentityCredentialSerializationHelpers.h";
++#endif
+ include "mozilla/dom/PermissionMessageUtils.h";
+ include "mozilla/dom/SessionStoreMessageUtils.h";
+ include "mozilla/ipc/URIUtils.h";
+@@ -13,10 +15,16 @@ include "mozilla/ipc/URIUtils.h";
+ include protocol PBrowser;
+ include protocol PInProcess;
+ include protocol PBrowserBridge;
++#ifdef MOZ_WEB_IDENTITY
+ include protocol PDigitalCredential;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ include protocol PSerialManager;
++#endif
+ include protocol PWebAuthnTransaction;
++#ifdef MOZ_WEB_IDENTITY
+ include protocol PWebIdentity;
++#endif
+ 
+ include DOMTypes;
+ include ClientIPCTypes;
+@@ -41,9 +49,15 @@ using mozilla::dom::MaybeDiscardedWindowContext from "mozilla/dom/WindowContext.
+ using mozilla::dom::AudioSessionType from "mozilla/dom/AudioSessionBinding.h";
+ using mozilla::dom::AudioSessionState from "mozilla/dom/AudioSessionBinding.h";
+ using mozilla::dom::CredentialMediationRequirement from "mozilla/dom/CredentialManagementBinding.h";
++#ifdef MOZ_WEB_IDENTITY
+ using mozilla::dom::IdentityCredentialDisconnectOptions from "mozilla/dom/IdentityCredentialBinding.h";
++#endif
++#ifdef MOZ_WEB_IDENTITY
+ using mozilla::dom::IdentityCredentialRequestOptions from "mozilla/dom/IdentityCredentialBinding.h";
++#endif
++#ifdef MOZ_WEB_IDENTITY
+ using mozilla::dom::LoginStatus from "mozilla/dom/LoginStatusBinding.h";
++#endif
+ using mozilla::CopyableErrorResult from "mozilla/ErrorResult.h";
+ [RefCounted] using mozilla::dom::ParentProcessChannelHandle from "mozilla/dom/ParentProcessChannelHandle.h";
+ 
+@@ -73,10 +87,16 @@ struct IPCWebShareData
+ async protocol PWindowGlobal
+ {
+   manager PBrowser or PInProcess;
++#ifdef MOZ_WEB_IDENTITY
+   manages PDigitalCredential;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+   manages PSerialManager;
++#endif
+   manages PWebAuthnTransaction;
++#ifdef MOZ_WEB_IDENTITY
+   manages PWebIdentity;
++#endif
+ 
+ child:
+   async __delete__();
+@@ -241,10 +261,16 @@ parent:
+   // parent's MediaController can record the per-browsing-context override.
+   async NotifyAudioSessionTypeOverride(AudioSessionType aType);
+ 
++#ifdef MOZ_WEB_IDENTITY
+   async PDigitalCredential();
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+   async PSerialManager();
++#endif
+   async PWebAuthnTransaction();
++#ifdef MOZ_WEB_IDENTITY
+   async PWebIdentity();
++#endif
+ 
+ child:
+   async NotifyAudioSessionStateChanged(AudioSessionState aState);
+diff --git a/dom/ipc/WindowGlobalChild.cpp b/dom/ipc/WindowGlobalChild.cpp
+index 9f8b6e8ed6b50029101eb96a3b0b4f1319b9a38d..ecc7956174368cdddfd1086f740e2ec85ab63cfd 100644
+--- a/dom/ipc/WindowGlobalChild.cpp
++++ b/dom/ipc/WindowGlobalChild.cpp
+@@ -19,7 +19,9 @@
+ #include "mozilla/dom/CloseWatcherManager.h"
+ #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/dom/ContentParent.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/IdentityCredential.h"
++#endif
+ #include "mozilla/dom/InProcessChild.h"
+ #include "mozilla/dom/InProcessParent.h"
+ #include "mozilla/dom/JSActorService.h"
+diff --git a/dom/ipc/WindowGlobalParent.cpp b/dom/ipc/WindowGlobalParent.cpp
+index 150bce24b708814b0c168c385b318a8b5272617f..62cba1c9f34f4c174e509e0ca8a01ba8811c9581 100644
+--- a/dom/ipc/WindowGlobalParent.cpp
++++ b/dom/ipc/WindowGlobalParent.cpp
+@@ -15,7 +15,9 @@
+ #include "mozilla/Components.h"
+ #include "mozilla/ContentBlockingAllowList.h"
+ #include "mozilla/EnumeratedRange.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/IdentityCredentialRequestManager.h"
++#endif
+ #include "mozilla/ScopeExit.h"
+ #include "mozilla/ServoCSSParser.h"
+ #include "mozilla/ServoStyleSet.h"
+@@ -34,23 +36,35 @@
+ #include "mozilla/dom/ContentParent.h"
+ #include "mozilla/dom/DOMException.h"
+ #include "mozilla/dom/DOMExceptionBinding.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/DigitalCredential.h"
++#endif
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/DigitalCredentialParent.h"
++#endif
+ #include "mozilla/dom/ElementBinding.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/IdentityCredential.h"
++#endif
+ #include "mozilla/dom/InProcessParent.h"
+ #include "mozilla/dom/JSActorService.h"
+ #include "mozilla/dom/JSWindowActorBinding.h"
+ #include "mozilla/dom/JSWindowActorParent.h"
+ #include "mozilla/dom/MediaController.h"
+ #include "mozilla/dom/Navigation.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/NavigatorLogin.h"
++#endif
+ #include "mozilla/dom/PBackgroundSessionStorageCache.h"
+ #include "mozilla/dom/ParentProcessChannelHandle.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/SerialManagerParent.h"
++#endif
+ #include "mozilla/dom/UseCounterMetrics.h"
+ #include "mozilla/dom/WebAuthnTransactionParent.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/WebIdentityParent.h"
++#endif
+ #include "mozilla/dom/WindowGlobalChild.h"
+ #include "mozilla/dom/ipc/IdType.h"
+ #include "mozilla/dom/ipc/StructuredCloneData.h"
+@@ -1774,6 +1788,7 @@ IPCResult WindowGlobalParent::RecvGetStorageAccessPermission(
+     return IPC_OK();
+   }
+ 
++#ifdef MOZ_WEB_IDENTITY
+   if (aIncludeIdentityCredential) {
+     bool canCollect;
+     rv = identity::CanSilentlyCollect(topPrincipal, principal, &canCollect);
+@@ -1786,6 +1801,7 @@ IPCResult WindowGlobalParent::RecvGetStorageAccessPermission(
+       return IPC_OK();
+     }
+   }
++#endif
+ 
+   aResolve(result);
+   return IPC_OK();
+@@ -2163,32 +2179,40 @@ IPCResult WindowGlobalParent::RecvNotifyAudioSessionTypeOverride(
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ already_AddRefed<PSerialManagerParent>
+ WindowGlobalParent::AllocPSerialManagerParent() {
+   return MakeAndAddRef<SerialManagerParent>();
+ }
++#endif
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ mozilla::ipc::IPCResult WindowGlobalParent::RecvPSerialManagerConstructor(
+     PSerialManagerParent* aActor) {
+   auto* manager = static_cast<SerialManagerParent*>(aActor);
+   manager->Init(BrowsingContext()->GetBrowserId());
+   return IPC_OK();
+ }
++#endif
+ 
+ already_AddRefed<PWebAuthnTransactionParent>
+ WindowGlobalParent::AllocPWebAuthnTransactionParent() {
+   return MakeAndAddRef<WebAuthnTransactionParent>();
+ }
+ 
++#ifdef MOZ_WEB_IDENTITY
+ already_AddRefed<PWebIdentityParent>
+ WindowGlobalParent::AllocPWebIdentityParent() {
+   return MakeAndAddRef<WebIdentityParent>();
+ }
++#endif
+ 
++#ifdef MOZ_WEB_IDENTITY
+ already_AddRefed<PDigitalCredentialParent>
+ WindowGlobalParent::AllocPDigitalCredentialParent() {
+   return MakeAndAddRef<DigitalCredentialParent>();
+ }
++#endif
+ 
+ NS_IMPL_CYCLE_COLLECTION_CLASS(WindowGlobalParent)
+ 
+diff --git a/dom/ipc/WindowGlobalParent.h b/dom/ipc/WindowGlobalParent.h
+index 86e3cf5fa268e822f570910feb9d30fa8c5f0fde..0dfdf095d3aa509bddf0c98f797ea1809ecc2e28 100644
+--- a/dom/ipc/WindowGlobalParent.h
++++ b/dom/ipc/WindowGlobalParent.h
+@@ -391,19 +391,21 @@ class WindowGlobalParent final : public WindowContext,
+   mozilla::ipc::IPCResult RecvNotifyAudioSessionTypeOverride(
+       const dom::AudioSessionType& aType);
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   already_AddRefed<dom::PSerialManagerParent> AllocPSerialManagerParent();
+ 
+   mozilla::ipc::IPCResult RecvPSerialManagerConstructor(
+       PSerialManagerParent* aActor) override;
+-
++#endif
+   already_AddRefed<dom::PWebAuthnTransactionParent>
+   AllocPWebAuthnTransactionParent();
+ 
++#ifdef MOZ_WEB_IDENTITY
+   already_AddRefed<dom::PWebIdentityParent> AllocPWebIdentityParent();
+ 
+   already_AddRefed<dom::PDigitalCredentialParent>
+   AllocPDigitalCredentialParent();
+-
++#endif
+   void UpdateFullscreenKeyboardLockStatus(FullscreenKeyboardLock aStatus);
+ 
+  private:
+diff --git a/dom/ipc/moz.build b/dom/ipc/moz.build
+index ab8f4334662e393708af3bf8a0b688693702cdd4..0e49f0b98ff3f0dd2de39a7bf1e97036d6bd0f81 100644
+--- a/dom/ipc/moz.build
++++ b/dom/ipc/moz.build
+@@ -172,6 +172,7 @@ PREPROCESSED_IPDL_SOURCES += [
+     "PBrowser.ipdl",
+     "PBrowserBridge.ipdl",
+     "PContent.ipdl",
++    "PWindowGlobal.ipdl",
+ ]
+ 
+ IPDL_SOURCES += [
+@@ -195,7 +196,6 @@ IPDL_SOURCES += [
+     "PURLClassifierLocal.ipdl",
+     "PURLClassifierLocalByName.ipdl",
+     "PVsync.ipdl",
+-    "PWindowGlobal.ipdl",
+     "ServiceWorkerConfiguration.ipdlh",
+     "WindowGlobalTypes.ipdlh",
+ ]
+diff --git a/dom/moz.build b/dom/moz.build
+index e0fa624a1fb593f409ce0a6b27885d3648c79558..d183af8d87aae3e824a0bef400e505171a3fa765 100644
+--- a/dom/moz.build
++++ b/dom/moz.build
+@@ -16,9 +16,11 @@ interfaces = [
+     "geolocation",
+     "notification",
+     "push",
+-    "payments",
+ ]
+ 
++if CONFIG["MOZ_WEB_PAYMENTS"]:
++    interfaces += ["payments"]
++
+ DIRS += ["interfaces/" + i for i in interfaces]
+ 
+ DIRS += [
+@@ -54,7 +56,6 @@ DIRS += [
+     "jsurl",
+     "mathml",
+     "media",
+-    "midi",
+     "mls",
+     "modelcontext",
+     "notification",
+@@ -83,7 +84,6 @@ DIRS += [
+     "urlpattern",
+     "webauthn",
+     "webidl",
+-    "webserial",
+     "webshare",
+     "webtransport",
+     "xml",
+@@ -91,14 +91,12 @@ DIRS += [
+     "xul",
+     "manifest",
+     "view-transitions",
+-    "vr",
+     "console",
+     "performance",
+     "webbrowserpersist",
+     "xhr",
+     "worklet",
+     "script",
+-    "payments",
+     "websocket",
+     "serializers",
+     "serviceworkers",
+@@ -130,3 +128,12 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("gtk", "cocoa", "windows"):
+     TEST_DIRS += ["plugins/test"]
+ 
+ SPHINX_TREES["/dom"] = "docs"
++
++if CONFIG["MOZ_WEB_DEVICE_APIS"]:
++    DIRS += ["midi", "webserial"]
++
++if CONFIG["MOZ_WEBXR"]:
++    DIRS += ["vr"]
++
++if CONFIG["MOZ_WEB_PAYMENTS"]:
++    DIRS += ["payments"]
+diff --git a/dom/permission/PermissionUtils.cpp b/dom/permission/PermissionUtils.cpp
+index 27bbf5ded722705065f1fe190373557d592094ea..ff8181463e680b60f075623d33b87c784c444d15 100644
+--- a/dom/permission/PermissionUtils.cpp
++++ b/dom/permission/PermissionUtils.cpp
+@@ -20,7 +20,9 @@ static const nsLiteralCString kPermissionTypes[] = {
+     "persistent-storage"_ns,
+     // "midi" is the only public permission but internally we have both "midi"
+     // and "midi-sysex" (and yes, this is confusing).
++#ifdef MOZ_WEB_DEVICE_APIS
+     "midi"_ns,
++#endif
+     "storage-access"_ns,
+     "screen-wake-lock"_ns,
+     "camera"_ns,
+@@ -43,9 +45,11 @@ const nsLiteralCString& PermissionNameToType(PermissionName aName) {
+ Maybe<PermissionName> TypeToPermissionName(const nsACString& aType) {
+   // Annoyingly, "midi-sysex" is an internal permission. The public permission
+   // name is "midi" so we have to special-case it here...
++#ifdef MOZ_WEB_DEVICE_APIS
+   if (aType.Equals("midi-sysex"_ns)) {
+     return Some(PermissionName::Midi);
+   }
++#endif
+ 
+   // "storage-access" permissions are also annoying and require a special case.
+   if (StringBeginsWith(aType, "3rdPartyStorage^"_ns) ||
+diff --git a/dom/permission/Permissions.cpp b/dom/permission/Permissions.cpp
+index b5a03afb09f2fbf10d38ac7c337582fdd4d15355..e5ff007f7a9f9cb2c77f2810f3e8d372badcd025 100644
+--- a/dom/permission/Permissions.cpp
++++ b/dom/permission/Permissions.cpp
+@@ -8,7 +8,9 @@
+ #include "mozilla/StaticPrefs_network.h"
+ #include "mozilla/StaticPrefs_permissions.h"
+ #include "mozilla/dom/Document.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MidiPermissionStatus.h"
++#endif
+ #include "mozilla/dom/PermissionSetParametersBinding.h"
+ #include "mozilla/dom/PermissionStatus.h"
+ #include "mozilla/dom/PermissionsBinding.h"
+@@ -69,6 +71,7 @@ RefPtr<PermissionStatus> CreatePermissionStatus(
+   // Step 8.1: Let status be create a PermissionStatus with typedDescriptor.
+   // (The rest is done by the caller)
+   switch (rootDesc.mName) {
++#ifdef MOZ_WEB_DEVICE_APIS
+     case PermissionName::Midi: {
+       MidiPermissionDescriptor midiPerm;
+       if (NS_WARN_IF(!midiPerm.Init(aCx, permissionDescValue))) {
+@@ -78,6 +81,7 @@ RefPtr<PermissionStatus> CreatePermissionStatus(
+ 
+       return MakeRefPtr<MidiPermissionStatus>(aGlobal, midiPerm.mSysex);
+     }
++#endif
+     case PermissionName::Storage_access:
+       return MakeRefPtr<StorageAccessPermissionStatus>(aGlobal);
+     case PermissionName::Geolocation:
+diff --git a/dom/permission/moz.build b/dom/permission/moz.build
+index bbbcecda40cb0739378cee83c97e15f5b68960ac..dd42d1a1bbf6a518343c2ecd8e3866e4a3a7a0f4 100644
+--- a/dom/permission/moz.build
++++ b/dom/permission/moz.build
+@@ -12,7 +12,6 @@ XPIDL_SOURCES += [
+ XPIDL_MODULE = "dom_permission"
+ 
+ EXPORTS.mozilla.dom += [
+-    "MidiPermissionStatus.h",
+     "PermissionObserver.h",
+     "Permissions.h",
+     "PermissionStatus.h",
+@@ -21,7 +20,6 @@ EXPORTS.mozilla.dom += [
+ ]
+ 
+ UNIFIED_SOURCES += [
+-    "MidiPermissionStatus.cpp",
+     "PermissionObserver.cpp",
+     "Permissions.cpp",
+     "PermissionStatus.cpp",
+@@ -35,3 +33,7 @@ MOCHITEST_MANIFESTS += ["tests/mochitest.toml"]
+ FINAL_LIBRARY = "xul"
+ 
+ include("/ipc/chromium/chromium-config.mozbuild")
++
++if CONFIG["MOZ_WEB_DEVICE_APIS"]:
++    EXPORTS.mozilla.dom += ["MidiPermissionStatus.h"]
++    UNIFIED_SOURCES += ["MidiPermissionStatus.cpp"]
+diff --git a/dom/security/featurepolicy/FeaturePolicyUtils.cpp b/dom/security/featurepolicy/FeaturePolicyUtils.cpp
+index 0f89dda30ecfb562edd92b4e3cedf5c2b5ffca17..776e92ab2d70e695075e797a92a314d2ccd4f5c7 100644
+--- a/dom/security/featurepolicy/FeaturePolicyUtils.cpp
++++ b/dom/security/featurepolicy/FeaturePolicyUtils.cpp
+@@ -31,9 +31,13 @@ static FeatureMap sSupportedFeatures[] = {
+     {"camera", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"geolocation", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"microphone", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#ifdef MOZ_WEB_IDENTITY
+     {"digital-credentials-create",
+      FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#endif
++#ifdef MOZ_WEB_IDENTITY
+     {"digital-credentials-get", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#endif
+     {"display-capture", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"fullscreen", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"web-share", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+@@ -42,7 +46,9 @@ static FeatureMap sSupportedFeatures[] = {
+      FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"publickey-credentials-get",
+      FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#ifdef MOZ_WEB_DEVICE_APIS
+     {"serial", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#endif
+     {"speaker-selection", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+     {"storage-access", FeaturePolicyUtils::FeaturePolicyValue::eAll},
+     {"screen-wake-lock", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
+@@ -64,12 +70,20 @@ static FeatureMap sExperimentalFeatures[] = {
+     // policy.
+     {"autoplay", FeaturePolicyUtils::FeaturePolicyValue::eAll},
+     {"encrypted-media", FeaturePolicyUtils::FeaturePolicyValue::eAll},
++#ifdef MOZ_WEB_DEVICE_APIS
+     {"midi", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#endif
++#ifdef MOZ_WEB_PAYMENTS
+     {"payment", FeaturePolicyUtils::FeaturePolicyValue::eAll},
++#endif
+     {"document-domain", FeaturePolicyUtils::FeaturePolicyValue::eAll},
++#ifdef MOZ_WEBXR
+     {"vr", FeaturePolicyUtils::FeaturePolicyValue::eAll},
++#endif
+     // https://immersive-web.github.io/webxr/#feature-policy
++#ifdef MOZ_WEBXR
+     {"xr-spatial-tracking", FeaturePolicyUtils::FeaturePolicyValue::eSelf},
++#endif
+ };
+ 
+ /* static */
+diff --git a/dom/webidl/CredentialManagement.webidl b/dom/webidl/CredentialManagement.webidl
+index 94dbecac7624ac272abdc80be34e3aa044ee2ed3..bbb1402abe9de384658e545ae892fcdeb02cecfb 100644
+--- a/dom/webidl/CredentialManagement.webidl
++++ b/dom/webidl/CredentialManagement.webidl
+@@ -37,12 +37,15 @@ dictionary CredentialRequestOptions {
+   // https://w3c.github.io/webauthn/#sctn-credentialrequestoptions-extension
+   [Pref="security.webauth.webauthn"]
+   PublicKeyCredentialRequestOptions publicKey;
++#ifdef MOZ_WEB_IDENTITY
+   // This is taken from the partial definition in
+   // https://fedidcg.github.io/FedCM/#browser-api-credential-request-options
+   [Pref="dom.security.credentialmanagement.identity.enabled"]
+   IdentityCredentialRequestOptions identity;
+   [Pref="dom.security.credentialmanagement.digital.enabled"]
+   DigitalCredentialRequestOptions digital;
++#endif
++
+ };
+ 
+ enum CredentialMediationRequirement {
+@@ -58,7 +61,9 @@ dictionary CredentialCreationOptions {
+   // https://w3c.github.io/webauthn/#sctn-credentialcreationoptions-extension
+   [Pref="security.webauth.webauthn"]
+   PublicKeyCredentialCreationOptions publicKey;
++#ifdef MOZ_WEB_IDENTITY
+   [Pref="dom.security.credentialmanagement.digital.enabled"]
+   DigitalCredentialCreationOptions digital;
++#endif
+   AbortSignal signal;
+ };
+diff --git a/dom/webidl/Navigator.webidl b/dom/webidl/Navigator.webidl
+index 485b13d64892c10ff2556d103d8e7349a02fb2bf..8b5abe475d06230b72c609ef0b7d775d5882f4e8 100644
+--- a/dom/webidl/Navigator.webidl
++++ b/dom/webidl/Navigator.webidl
+@@ -224,6 +224,7 @@ partial interface Navigator {
+   Promise<sequence<Gamepad>> requestAllGamepads();
+ };
+ 
++#ifdef MOZ_WEBXR
+ // https://immersive-web.github.io/webvr/spec/1.1/#interface-navigator
+ partial interface Navigator {
+   [NewObject, SecureContext, Pref="dom.vr.enabled"]
+@@ -248,17 +249,20 @@ partial interface Navigator {
+   [SecureContext, SameObject, Throws, Pref="dom.vr.webxr.enabled"]
+   readonly attribute XRSystem xr;
+ };
+-
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ // https://wicg.github.io/serial/
+ partial interface Navigator {
+   [SecureContext, Throws, SameObject, Pref="dom.webserial.enabled"]
+   readonly attribute Serial serial;
+ };
+-
++#endif
+ // http://webaudio.github.io/web-midi-api/#requestmidiaccess
+ partial interface Navigator {
++#ifdef MOZ_WEB_DEVICE_APIS
+   [UseCounter, NewObject, Func="Navigator::HasMidiSupport"]
+   Promise<MIDIAccess> requestMIDIAccess(optional MIDIOptions options = {});
++#endif
+ 
+   // Deprecated. Use mediaDevices.getUserMedia instead.
+   [Deprecated="NavigatorGetUserMedia", Throws,
+@@ -416,10 +420,12 @@ partial interface Navigator {
+ };
+ 
+ // https://w3c-fedid.github.io/login-status/#login-status-javascript
++#ifdef MOZ_WEB_IDENTITY
+ [SecureContext]
+ partial interface Navigator {
+   [SameObject] readonly attribute NavigatorLogin login;
+ };
++#endif
+ 
+ // Model Context API
+ [SecureContext]
+diff --git a/dom/webidl/Permissions.webidl b/dom/webidl/Permissions.webidl
+index 06ed680d3f6f147478293242cf3dbff240ec06d1..db81a7c810b6da5dfcc29b4f8d49025c1508de5a 100644
+--- a/dom/webidl/Permissions.webidl
++++ b/dom/webidl/Permissions.webidl
+@@ -13,7 +13,9 @@ enum PermissionName {
+   "push",
+ #endif
+   "persistent-storage",
++#ifdef MOZ_WEB_DEVICE_APIS
+   "midi",
++#endif
+   "storage-access", // Defined in https://privacycg.github.io/storage-access/#permissions-integration
+   "screen-wake-lock", // Defined in https://w3c.github.io/screen-wake-lock/
+   "camera",    // Defined in https://www.w3.org/TR/mediacapture-streams/#permissions-integration
+@@ -27,11 +29,13 @@ dictionary PermissionDescriptor {
+   required PermissionName name;
+ };
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ // https://webaudio.github.io/web-midi-api/#permissions-integration
+ [GenerateInit]
+ dictionary MidiPermissionDescriptor : PermissionDescriptor {
+   boolean sysex = false;
+ };
++#endif
+ 
+ // We don't implement `PushPermissionDescriptor` because we use a background
+ // message quota instead of `userVisibleOnly`.
+diff --git a/dom/webidl/WebGLRenderingContext.webidl b/dom/webidl/WebGLRenderingContext.webidl
+index ecf7e4bca3cd6321571ed03d83a92a77263ed7af..8c236e1b4dd79a2bcee66b139408e1955c68c43a 100644
+--- a/dom/webidl/WebGLRenderingContext.webidl
++++ b/dom/webidl/WebGLRenderingContext.webidl
+@@ -1223,6 +1223,7 @@ interface EXT_depth_clamp {
+ };
+ 
+ // https://immersive-web.github.io/webxr/#dom-webglcontextattributes-xrcompatible
++#ifdef MOZ_WEBXR
+ partial dictionary WebGLContextAttributes {
+     [Pref="dom.vr.webxr.enabled"]
+     boolean xrCompatible = false;
+@@ -1233,3 +1234,4 @@ partial interface mixin WebGLRenderingContextBase {
+     [NewObject, Pref="dom.vr.webxr.enabled"]
+     Promise<undefined> makeXRCompatible();
+ };
++#endif
+diff --git a/dom/webidl/Window.webidl b/dom/webidl/Window.webidl
+index a9e9473d56e3543f8d9c9ba21fd7e1f76a6d4aa8..d1caa8aa2dd3ab4e28f5f3cd803bcfc7ec0e6f37 100644
+--- a/dom/webidl/Window.webidl
++++ b/dom/webidl/Window.webidl
+@@ -874,6 +874,7 @@ partial interface Window {
+ #endif
+ };
+ 
++#ifdef MOZ_WEBXR
+ partial interface Window {
+   [Pref="dom.vr.enabled"]
+   attribute EventHandler onvrdisplayconnect;
+@@ -886,6 +887,7 @@ partial interface Window {
+   [Pref="dom.vr.enabled"]
+   attribute EventHandler onvrdisplaypresentchange;
+ };
++#endif
+ 
+ #ifndef RELEASE_OR_BETA
+ // https://drafts.css-houdini.org/css-paint-api-1/#dom-window-paintworklet
+diff --git a/dom/webidl/WorkerNavigator.webidl b/dom/webidl/WorkerNavigator.webidl
+index 54f4b9cd81f1f8669a95ab77ed9744f83ed158df..5bf2cddc3f172b452c888a1cf25849101004fdd0 100644
+--- a/dom/webidl/WorkerNavigator.webidl
++++ b/dom/webidl/WorkerNavigator.webidl
+@@ -47,9 +47,11 @@ partial interface WorkerNavigator {
+   readonly attribute ServiceWorkerContainer serviceWorker;
+ };
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ // https://wicg.github.io/serial/
+ [Exposed=DedicatedWorker]
+ partial interface WorkerNavigator {
+   [SecureContext, SameObject, Pref="dom.webserial.enabled"]
+   readonly attribute Serial serial;
+ };
++#endif
+diff --git a/dom/webidl/moz.build b/dom/webidl/moz.build
+--- a/dom/webidl/moz.build
++++ b/dom/webidl/moz.build
+@@ -473,7 +473,6 @@
+     "BarProp.webidl",
+     "BaseAudioContext.webidl",
+     "BaseKeyframeTypes.webidl",
+-    "BasicCardPayment.webidl",
+     "BatteryManager.webidl",
+     "BeforeUnloadEvent.webidl",
+     "BiquadFilterNode.webidl",
+@@ -508,7 +507,6 @@
+     "CookieStore.webidl",
+     "CookieStoreManager.webidl",
+     "CreateOfferRequest.webidl",
+-    "CredentialManagement.webidl",
+     "Crypto.webidl",
+     "CSPDictionaries.webidl",
+     "CSPReport.webidl",
+@@ -589,7 +587,6 @@
+     "DedicatedWorkerGlobalScope.webidl",
+     "DelayNode.webidl",
+     "DeviceMotionEvent.webidl",
+-    "DigitalCredential.webidl",
+     "Directory.webidl",
+     "Document.webidl",
+     "DocumentFragment.webidl",
+@@ -761,7 +758,6 @@
+     "IDBRequest.webidl",
+     "IDBTransaction.webidl",
+     "IDBVersionChangeEvent.webidl",
+-    "IdentityCredential.webidl",
+     "IdleDeadline.webidl",
+     "IIRFilterNode.webidl",
+     "ImageBitmap.webidl",
+@@ -785,7 +781,6 @@
+     "Location.webidl",
+     "Lock.webidl",
+     "LockManager.webidl",
+-    "LoginStatus.webidl",
+     "MathMLElement.webidl",
+     "MediaDebugInfo.webidl",
+     "MediaDeviceInfo.webidl",
+@@ -814,18 +809,9 @@
+     "MediaTrackCapabilities.webidl",
+     "MediaTrackSettings.webidl",
+     "MediaTrackSupportedConstraints.webidl",
+-    "MerchantValidationEvent.webidl",
+     "MessageChannel.webidl",
+     "MessageEvent.webidl",
+     "MessagePort.webidl",
+-    "MIDIAccess.webidl",
+-    "MIDIInput.webidl",
+-    "MIDIInputMap.webidl",
+-    "MIDIMessageEvent.webidl",
+-    "MIDIOptions.webidl",
+-    "MIDIOutput.webidl",
+-    "MIDIOutputMap.webidl",
+-    "MIDIPort.webidl",
+     "MimeType.webidl",
+     "MimeTypeArray.webidl",
+     "MLS.webidl",
+@@ -863,11 +849,6 @@
+     "PaintWorkletGlobalScope.webidl",
+     "PannerNode.webidl",
+     "ParentNode.webidl",
+-    "PaymentAddress.webidl",
+-    "PaymentMethodChangeEvent.webidl",
+-    "PaymentRequest.webidl",
+-    "PaymentRequestUpdateEvent.webidl",
+-    "PaymentResponse.webidl",
+     "Performance.webidl",
+     "PerformanceEntry.webidl",
+     "PerformanceEventTiming.webidl",
+@@ -913,8 +894,6 @@
+     "ScrollAreaEvent.webidl",
+     "ScrollTimeline.webidl",
+     "Selection.webidl",
+-    "Serial.webidl",
+-    "SerialPort.webidl",
+     "ServiceWorker.webidl",
+     "ServiceWorkerContainer.webidl",
+     "ShadowRoot.webidl",
+@@ -1089,9 +1068,6 @@
+     "ViewTimeline.webidl",
+     "ViewTransition.webidl",
+     "VisualViewport.webidl",
+-    "VRDisplay.webidl",
+-    "VRDisplayEvent.webidl",
+-    "VRServiceTest.webidl",
+     "VTTCue.webidl",
+     "VTTRegion.webidl",
+     "WakeLock.webidl",
+@@ -1099,7 +1075,6 @@
+     "WaveShaperNode.webidl",
+     "WebAuthentication.webidl",
+     "WebGL2RenderingContext.webidl",
+-    "WebGLRenderingContext.webidl",
+     "WebGPU.webidl",
+     "WebSocket.webidl",
+     "WebTaskScheduling.webidl",
+@@ -1107,14 +1082,12 @@
+     "WebTransportDatagramDuplexStream.webidl",
+     "WebTransportError.webidl",
+     "WebTransportSendReceiveStream.webidl",
+-    "WebXR.webidl",
+     "WheelEvent.webidl",
+     "WindowOrWorkerGlobalScope.webidl",
+     "Worker.webidl",
+     "WorkerDebuggerGlobalScope.webidl",
+     "WorkerGlobalScope.webidl",
+     "WorkerLocation.webidl",
+-    "WorkerNavigator.webidl",
+     "WorkerTestUtils.webidl",
+     "Worklet.webidl",
+     "WorkletGlobalScope.webidl",
+@@ -1289,7 +1262,6 @@
+     "MediaRecorderErrorEvent.webidl",
+     "MediaStreamEvent.webidl",
+     "MediaStreamTrackEvent.webidl",
+-    "MIDIConnectionEvent.webidl",
+     "NavigationCurrentEntryChangeEvent.webidl",
+     "NotificationEvent.webidl",
+     "OfflineAudioCompletionEvent.webidl",
+@@ -1314,10 +1286,6 @@
+     "UDPMessageEvent.webidl",
+     "UserProximityEvent.webidl",
+     "WebGLContextEvent.webidl",
+-    "XRInputSourceEvent.webidl",
+-    "XRInputSourcesChangeEvent.webidl",
+-    "XRReferenceSpaceEvent.webidl",
+-    "XRSessionEvent.webidl",
+ ]
+ 
+ if CONFIG["MOZ_WEBRTC"]:
+@@ -1347,3 +1315,62 @@
+     WEBIDL_FILES += [
+         "AccessibleNode.webidl",
+     ]
++
++if CONFIG["MOZ_WEB_DEVICE_APIS"]:
++    WEBIDL_FILES += [
++        "MIDIAccess.webidl",
++        "MIDIInput.webidl",
++        "MIDIInputMap.webidl",
++        "MIDIMessageEvent.webidl",
++        "MIDIOptions.webidl",
++        "MIDIOutput.webidl",
++        "MIDIOutputMap.webidl",
++        "MIDIPort.webidl",
++        "Serial.webidl",
++        "SerialPort.webidl",
++    ]
++
++if CONFIG["MOZ_WEB_DEVICE_APIS"]:
++    GENERATED_EVENTS_WEBIDL_FILES += [
++        "MIDIConnectionEvent.webidl",
++    ]
++
++if CONFIG["MOZ_WEB_IDENTITY"]:
++    WEBIDL_FILES += [
++        "DigitalCredential.webidl",
++        "IdentityCredential.webidl",
++        "LoginStatus.webidl",
++    ]
++
++if CONFIG["MOZ_WEB_PAYMENTS"]:
++    WEBIDL_FILES += [
++        "BasicCardPayment.webidl",
++        "MerchantValidationEvent.webidl",
++        "PaymentAddress.webidl",
++        "PaymentMethodChangeEvent.webidl",
++        "PaymentRequest.webidl",
++        "PaymentRequestUpdateEvent.webidl",
++        "PaymentResponse.webidl",
++    ]
++
++if CONFIG["MOZ_WEBXR"]:
++    WEBIDL_FILES += [
++        "VRDisplay.webidl",
++        "VRDisplayEvent.webidl",
++        "VRServiceTest.webidl",
++        "WebXR.webidl",
++    ]
++
++if CONFIG["MOZ_WEBXR"]:
++    GENERATED_EVENTS_WEBIDL_FILES += [
++        "XRInputSourceEvent.webidl",
++        "XRInputSourcesChangeEvent.webidl",
++        "XRReferenceSpaceEvent.webidl",
++        "XRSessionEvent.webidl",
++    ]
++
++PREPROCESSED_WEBIDL_FILES += ["WorkerNavigator.webidl"]
++
++PREPROCESSED_WEBIDL_FILES += ["CredentialManagement.webidl"]
++
++PREPROCESSED_WEBIDL_FILES += ["WebGLRenderingContext.webidl"]
+diff --git a/dom/workers/WorkerNavigator.cpp b/dom/workers/WorkerNavigator.cpp
+index 519668019e4532e97231be959c69efd3ad3995d0..bc1b2f02db6a171bf6af2e36543b678dd764646b 100644
+--- a/dom/workers/WorkerNavigator.cpp
++++ b/dom/workers/WorkerNavigator.cpp
+@@ -13,7 +13,9 @@
+ #include "mozilla/dom/MediaCapabilities.h"
+ #include "mozilla/dom/Navigator.h"
+ #include "mozilla/dom/Permissions.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/Serial.h"
++#endif
+ #include "mozilla/dom/ServiceWorkerContainer.h"
+ #include "mozilla/dom/StorageManager.h"
+ #include "mozilla/dom/WorkerCommon.h"
+@@ -51,7 +53,9 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(WorkerNavigator)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocks)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPermissions)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mServiceWorkerContainer)
++#ifdef MOZ_WEB_DEVICE_APIS
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSerial)
++#endif
+ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
+ 
+ WorkerNavigator::WorkerNavigator(const NavigatorProperties& aProperties,
+@@ -99,10 +103,12 @@ void WorkerNavigator::Invalidate() {
+ 
+   mServiceWorkerContainer = nullptr;
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   if (mSerial) {
+     mSerial->Shutdown();
+     mSerial = nullptr;
+   }
++#endif
+ }
+ 
+ JSObject* WorkerNavigator::WrapObject(JSContext* aCx,
+@@ -331,6 +337,7 @@ already_AddRefed<ServiceWorkerContainer> WorkerNavigator::ServiceWorker() {
+   return ref.forget();
+ }
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ dom::Serial* WorkerNavigator::Serial() {
+   if (!mSerial) {
+     WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate();
+@@ -344,5 +351,6 @@ dom::Serial* WorkerNavigator::Serial() {
+ 
+   return mSerial;
+ }
++#endif
+ 
+ }  // namespace mozilla::dom
+diff --git a/dom/workers/WorkerNavigator.h b/dom/workers/WorkerNavigator.h
+index 2f9e06bcb087ca34ddf0a278245a745ff6c845c4..cc1cf3c1a93d3ea79a879f829710dc6ca2a1571c 100644
+--- a/dom/workers/WorkerNavigator.h
++++ b/dom/workers/WorkerNavigator.h
+@@ -32,7 +32,9 @@ class MediaCapabilities;
+ class LockManager;
+ class Permissions;
+ class ServiceWorkerContainer;
++#ifdef MOZ_WEB_DEVICE_APIS
+ class Serial;
++#endif
+ 
+ namespace network {
+ class Connection;
+@@ -50,7 +52,9 @@ class WorkerNavigator final : public nsWrapperCache {
+   RefPtr<dom::LockManager> mLocks;
+   RefPtr<dom::Permissions> mPermissions;
+   RefPtr<ServiceWorkerContainer> mServiceWorkerContainer;
++#ifdef MOZ_WEB_DEVICE_APIS
+   RefPtr<dom::Serial> mSerial;
++#endif
+   bool mOnline;
+ 
+   WorkerNavigator(const NavigatorProperties& aProperties, bool aOnline);
+@@ -123,7 +127,9 @@ class WorkerNavigator final : public nsWrapperCache {
+ 
+   already_AddRefed<ServiceWorkerContainer> ServiceWorker();
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   dom::Serial* Serial();
++#endif
+ };
+ 
+ }  // namespace dom
+diff --git a/gfx/gl/SharedSurface.cpp b/gfx/gl/SharedSurface.cpp
+index 3f1e8f4c599932eab1f0f43374c5d8f250c7c97e..d60da25e236a7e3c53f3b5c554a66551276f365a 100644
+--- a/gfx/gl/SharedSurface.cpp
++++ b/gfx/gl/SharedSurface.cpp
+@@ -19,7 +19,9 @@
+ #include "mozilla/layers/TextureClientSharedSurface.h"
+ #include "mozilla/layers/TextureForwarder.h"
+ #include "mozilla/StaticPrefs_webgl.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ 
+ #ifdef XP_WIN
+ #  include "SharedSurfaceANGLE.h"
+diff --git a/gfx/ipc/GPUChild.cpp b/gfx/ipc/GPUChild.cpp
+index 8e08d7a382d6c1bb127002f0f42f5cbe9fa4e731..cf924830adcf8ccbfee6e0ba42ecbf56ad43f593 100644
+--- a/gfx/ipc/GPUChild.cpp
++++ b/gfx/ipc/GPUChild.cpp
+@@ -8,7 +8,9 @@
+ #include "GfxInfoBase.h"
+ #include "TelemetryProbesReporter.h"
+ #include "VideoUtils.h"
++#ifdef MOZ_WEBXR
+ #include "VRProcessManager.h"
++#endif
+ #include "gfxConfig.h"
+ #include "gfxPlatform.h"
+ #include "mozilla/Components.h"
+@@ -176,6 +178,7 @@ mozilla::ipc::IPCResult GPUChild::RecvGraphicsError(const nsCString& aError) {
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult GPUChild::RecvCreateVRProcess() {
+   // Make sure create VR process at the main process
+   MOZ_ASSERT(XRE_IsParentProcess());
+@@ -192,7 +195,9 @@ mozilla::ipc::IPCResult GPUChild::RecvCreateVRProcess() {
+ 
+   return IPC_OK();
+ }
++#endif
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult GPUChild::RecvShutdownVRProcess() {
+   // Make sure stopping VR process at the main process
+   MOZ_ASSERT(XRE_IsParentProcess());
+@@ -203,6 +208,7 @@ mozilla::ipc::IPCResult GPUChild::RecvShutdownVRProcess() {
+ 
+   return IPC_OK();
+ }
++#endif
+ 
+ mozilla::ipc::IPCResult GPUChild::RecvFlushActiveCheckerboardReportsDone() {
+   nsCOMPtr<nsIObserverService> obsSvc = mozilla::services::GetObserverService();
+diff --git a/gfx/ipc/GPUChild.h b/gfx/ipc/GPUChild.h
+index 6e4d313ee1584ff72cd916ae805a0113a76474f8..d43681333cbb2d72835640a0020c68ae6f798e99 100644
+--- a/gfx/ipc/GPUChild.h
++++ b/gfx/ipc/GPUChild.h
+@@ -60,8 +60,12 @@ class GPUChild final : public mozilla::ipc::CrashReporterHelper<GPUChild>,
+   mozilla::ipc::IPCResult RecvDeclareStable();
+   mozilla::ipc::IPCResult RecvReportCheckerboard(const uint32_t& aSeverity,
+                                                  const nsCString& aLog);
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvCreateVRProcess();
++#endif
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvShutdownVRProcess();
++#endif
+ 
+   mozilla::ipc::IPCResult RecvAccumulateChildHistograms(
+       nsTArray<HistogramAccumulation>&& aAccumulations);
+diff --git a/gfx/ipc/GPUParent.cpp b/gfx/ipc/GPUParent.cpp
+index 65469300a47100bbe20b22981f40b0a2da1ab82a..85dede5d9e98c77216b1f59553d0922df05292f9 100644
+--- a/gfx/ipc/GPUParent.cpp
++++ b/gfx/ipc/GPUParent.cpp
+@@ -13,9 +13,15 @@
+ #include "GPUProcessManager.h"
+ #include "gfxGradientCache.h"
+ #include "GfxInfoBase.h"
++#ifdef MOZ_WEBXR
+ #include "VRGPUChild.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRManager.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRManagerParent.h"
++#endif
+ #include "VsyncBridgeParent.h"
+ #include "cairo.h"
+ #include "gfxConfig.h"
+@@ -402,7 +408,9 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
+   // common memory reporters get registered here instead.
+   gfxPlatform::InitMemoryReportersForGPUProcess();
+ 
++#ifdef MOZ_WEBXR
+   VRManager::ManagerInit();
++#endif
+   // Send a message to the UI process that we're done.
+   GPUDeviceData data;
+   RecvGetDeviceStatus(&data);
+@@ -469,17 +477,21 @@ mozilla::ipc::IPCResult GPUParent::RecvInitVideoBridge(
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult GPUParent::RecvInitVRManager(
+     Endpoint<PVRManagerParent>&& aEndpoint, uint32_t aNamespace) {
+   VRManagerParent::CreateForGPUProcess(std::move(aEndpoint), aNamespace);
+   return IPC_OK();
+ }
++#endif
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult GPUParent::RecvInitVR(
+     Endpoint<PVRGPUChild>&& aEndpoint) {
+   gfx::VRGPUChild::InitForGPUProcess(std::move(aEndpoint));
+   return IPC_OK();
+ }
++#endif
+ 
+ mozilla::ipc::IPCResult GPUParent::RecvInitUiCompositorController(
+     const LayersId& aRootLayerTreeId,
+@@ -611,6 +623,7 @@ mozilla::ipc::IPCResult GPUParent::RecvNewContentImageBridge(
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult GPUParent::RecvNewContentVRManager(
+     Endpoint<PVRManagerParent>&& aEndpoint, const ContentParentId& aChildId,
+     uint32_t aNamespace) {
+@@ -620,6 +633,7 @@ mozilla::ipc::IPCResult GPUParent::RecvNewContentVRManager(
+   }
+   return IPC_OK();
+ }
++#endif
+ 
+ mozilla::ipc::IPCResult GPUParent::RecvNewContentRemoteMediaManager(
+     Endpoint<PRemoteMediaManagerParent>&& aEndpoint,
+@@ -684,6 +698,7 @@ mozilla::ipc::IPCResult GPUParent::RecvRequestMemoryReport(
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult GPUParent::RecvShutdownVR() {
+   if (StaticPrefs::dom_vr_process_enabled_AtStartup() &&
+       StaticPrefs::dom_vr_enabled()) {
+@@ -691,6 +706,7 @@ mozilla::ipc::IPCResult GPUParent::RecvShutdownVR() {
+   }
+   return IPC_OK();
+ }
++#endif
+ 
+ mozilla::ipc::IPCResult GPUParent::RecvUpdatePerfStatsCollectionMask(
+     const uint64_t& aMask) {
+diff --git a/gfx/ipc/GPUParent.h b/gfx/ipc/GPUParent.h
+index 73d4323454074934da1d0ee752c1786bbf5d7ed2..7119578a2d618f9a63c38c63bd55ff2bee635918 100644
+--- a/gfx/ipc/GPUParent.h
++++ b/gfx/ipc/GPUParent.h
+@@ -63,9 +63,13 @@ class GPUParent final : public PGPUParent {
+   mozilla::ipc::IPCResult RecvInitVideoBridge(
+       Endpoint<PVideoBridgeParent>&& aEndpoint,
+       const layers::VideoBridgeSource& aSource);
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvInitVRManager(
+       Endpoint<PVRManagerParent>&& aEndpoint, uint32_t aNamespace);
++#endif
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvInitVR(Endpoint<PVRGPUChild>&& aVRGPUChild);
++#endif
+   mozilla::ipc::IPCResult RecvInitUiCompositorController(
+       const LayersId& aRootLayerTreeId,
+       Endpoint<PUiCompositorControllerParent>&& aEndpoint);
+@@ -85,9 +89,11 @@ class GPUParent final : public PGPUParent {
+   mozilla::ipc::IPCResult RecvNewContentImageBridge(
+       Endpoint<PImageBridgeParent>&& aEndpoint, const ContentParentId& aChildId,
+       uint32_t aNamespace);
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvNewContentVRManager(
+       Endpoint<PVRManagerParent>&& aEndpoint, const ContentParentId& aChildId,
+       uint32_t aNamespace);
++#endif
+   mozilla::ipc::IPCResult RecvNewContentRemoteMediaManager(
+       Endpoint<PRemoteMediaManagerParent>&& aEndpoint,
+       const ContentParentId& aChildId);
+@@ -103,7 +109,9 @@ class GPUParent final : public PGPUParent {
+       const bool& minimizeMemoryUsage,
+       const Maybe<ipc::FileDescriptor>& DMDFile,
+       const RequestMemoryReportResolver& aResolver);
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvShutdownVR();
++#endif
+ 
+   mozilla::ipc::IPCResult RecvUpdatePerfStatsCollectionMask(
+       const uint64_t& aMask);
+diff --git a/gfx/ipc/GPUProcessHost.cpp b/gfx/ipc/GPUProcessHost.cpp
+index 4863f628e17299bc0757eaceafaaa4ffd72b0cc8..85306f2ddbc21c95637075e043fa7d20648b2aa8 100644
+--- a/gfx/ipc/GPUProcessHost.cpp
++++ b/gfx/ipc/GPUProcessHost.cpp
+@@ -11,7 +11,9 @@
+ #include "mozilla/layers/SynchronousTask.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/StaticPrefs_layers.h"
++#ifdef MOZ_WEBXR
+ #include "VRGPUChild.h"
++#endif
+ #include "mozilla/ipc/ProcessUtils.h"
+ #ifdef MOZ_WIDGET_ANDROID
+ #  include "mozilla/java/GeckoProcessManagerWrappers.h"
+@@ -275,10 +277,14 @@ void GPUProcessHost::Shutdown(bool aUnexpectedShutdown) {
+ 
+     // The channel might already be closed if we got here unexpectedly.
+     if (!mChannelClosed) {
++#ifdef MOZ_WEBXR
+       if (VRGPUChild::IsCreated()) {
+         VRGPUChild::Get()->Close();
+       }
++#endif
++#ifdef MOZ_WEBXR
+       mGPUChild->SendShutdownVR();
++#endif
+       mGPUChild->Close();
+     }
+ 
+diff --git a/gfx/ipc/GPUProcessManager.cpp b/gfx/ipc/GPUProcessManager.cpp
+index 54ed5ab35c173829cbfda87e1e28f4f909062172..705e57632bf6d8d658a68469b5ca0fff28a81e60 100644
+--- a/gfx/ipc/GPUProcessManager.cpp
++++ b/gfx/ipc/GPUProcessManager.cpp
+@@ -49,8 +49,12 @@
+ #endif
+ #include "nsIWidget.h"
+ #include "nsContentUtils.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRManagerParent.h"
++#endif
+ #include "VsyncBridgeChild.h"
+ #include "VsyncIOThreadHolder.h"
+ #include "VsyncSource.h"
+@@ -467,8 +471,11 @@ nsresult GPUProcessManager::EnsureGPUReady() {
+ }
+ 
+ bool GPUProcessManager::EnsureProtocolsReady() {
+-  return EnsureCompositorManagerChild() && EnsureImageBridgeChild() &&
+-         EnsureVRManager();
++  return EnsureCompositorManagerChild() && EnsureImageBridgeChild()
++#ifdef MOZ_WEBXR
++         && EnsureVRManager()
++#endif
++      ;
+ }
+ 
+ bool GPUProcessManager::EnsureCompositorManagerChild() {
+@@ -528,6 +535,7 @@ bool GPUProcessManager::EnsureImageBridgeChild() {
+   return true;
+ }
+ 
++#ifdef MOZ_WEBXR
+ bool GPUProcessManager::EnsureVRManager() {
+   MOZ_DIAGNOSTIC_ASSERT(IsGPUReady());
+ 
+@@ -555,6 +563,7 @@ bool GPUProcessManager::EnsureVRManager() {
+   VRManagerChild::InitWithGPUProcess(std::move(childPipe), vrNamespace);
+   return true;
+ }
++#endif
+ 
+ #if defined(MOZ_WIDGET_ANDROID)
+ RefPtr<UiCompositorControllerChild>
+@@ -1382,20 +1391,27 @@ bool GPUProcessManager::CreateContentBridges(
+     ipc::EndpointProcInfo aOtherProcess,
+     ipc::Endpoint<PCompositorManagerChild>* aOutCompositor,
+     ipc::Endpoint<PImageBridgeChild>* aOutImageBridge,
++#ifdef MOZ_WEBXR
+     ipc::Endpoint<PVRManagerChild>* aOutVRBridge,
++#endif
+     ipc::Endpoint<PRemoteMediaManagerChild>* aOutVideoManager,
+     dom::ContentParentId aChildId, nsTArray<uint32_t>* aNamespaces) {
+   const uint32_t compositorManagerNamespace = AllocateNamespace();
+   const uint32_t compositorBridgeNamespace = AllocateNamespace();
+   const uint32_t imageBridgeNamespace = AllocateNamespace();
++#ifdef MOZ_WEBXR
+   const uint32_t vrManagerNamespace = AllocateNamespace();
++#endif
+   if (!CreateContentCompositorManager(aOtherProcess, aChildId,
+                                       compositorManagerNamespace,
+                                       aOutCompositor) ||
+       !CreateContentImageBridge(aOtherProcess, aChildId, imageBridgeNamespace,
+-                                aOutImageBridge) ||
+-      !CreateContentVRManager(aOtherProcess, aChildId, vrManagerNamespace,
+-                              aOutVRBridge)) {
++                                aOutImageBridge)
++#ifdef MOZ_WEBXR
++      || !CreateContentVRManager(aOtherProcess, aChildId, vrManagerNamespace,
++                                aOutVRBridge)
++#endif
++  ) {
+     return false;
+   }
+   // RemoteMediaManager is only supported in the GPU process, so we allow this
+@@ -1407,7 +1423,9 @@ bool GPUProcessManager::CreateContentBridges(
+   aNamespaces->AppendElement(compositorManagerNamespace);
+   aNamespaces->AppendElement(compositorBridgeNamespace);
+   aNamespaces->AppendElement(imageBridgeNamespace);
++#ifdef MOZ_WEBXR
+   aNamespaces->AppendElement(vrManagerNamespace);
++#endif
+   return true;
+ }
+ 
+@@ -1492,6 +1510,7 @@ ipc::EndpointProcInfo GPUProcessManager::GPUEndpointProcInfo() {
+                    : ipc::EndpointProcInfo::Invalid();
+ }
+ 
++#ifdef MOZ_WEBXR
+ bool GPUProcessManager::CreateContentVRManager(
+     ipc::EndpointProcInfo aOtherProcess, dom::ContentParentId aChildId,
+     uint32_t aNamespace, ipc::Endpoint<PVRManagerChild>* aOutEndpoint) {
+@@ -1528,6 +1547,7 @@ bool GPUProcessManager::CreateContentVRManager(
+   *aOutEndpoint = std::move(childPipe);
+   return true;
+ }
++#endif
+ 
+ void GPUProcessManager::CreateContentRemoteMediaManager(
+     ipc::EndpointProcInfo aOtherProcess, dom::ContentParentId aChildId,
+diff --git a/gfx/ipc/GPUProcessManager.h b/gfx/ipc/GPUProcessManager.h
+index a2d464c125b6bf10615f65cd096c9ed46ebe8dd5..1c384aa252528f160fe5aee136452789703f0ca9 100644
+--- a/gfx/ipc/GPUProcessManager.h
++++ b/gfx/ipc/GPUProcessManager.h
+@@ -56,7 +56,9 @@ namespace gfx {
+ 
+ class GPUChild;
+ class GPUProcessListener;
++#ifdef MOZ_WEBXR
+ class PVRManagerChild;
++#endif
+ class VsyncBridgeChild;
+ class VsyncIOThreadHolder;
+ 
+@@ -121,7 +123,9 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
+       mozilla::ipc::EndpointProcInfo aOtherProcess,
+       mozilla::ipc::Endpoint<PCompositorManagerChild>* aOutCompositor,
+       mozilla::ipc::Endpoint<PImageBridgeChild>* aOutImageBridge,
++#ifdef MOZ_WEBXR
+       mozilla::ipc::Endpoint<PVRManagerChild>* aOutVRBridge,
++#endif
+       mozilla::ipc::Endpoint<PRemoteMediaManagerChild>* aOutVideoManager,
+       dom::ContentParentId aChildId, nsTArray<uint32_t>* aNamespaces);
+ 
+@@ -251,10 +255,12 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
+       mozilla::ipc::EndpointProcInfo aOtherProcess,
+       dom::ContentParentId aChildId, uint32_t aNamespace,
+       mozilla::ipc::Endpoint<PImageBridgeChild>* aOutEndpoint);
++#ifdef MOZ_WEBXR
+   bool CreateContentVRManager(
+       mozilla::ipc::EndpointProcInfo aOtherProcess,
+       dom::ContentParentId aChildId, uint32_t aNamespace,
+       mozilla::ipc::Endpoint<PVRManagerChild>* aOutEndpoint);
++#endif
+   void CreateContentRemoteMediaManager(
+       mozilla::ipc::EndpointProcInfo aOtherProcess,
+       dom::ContentParentId aChildId,
+@@ -328,7 +334,9 @@ class GPUProcessManager final : public GPUProcessHost::Listener {
+   bool EnsureProtocolsReady();
+   bool EnsureCompositorManagerChild();
+   bool EnsureImageBridgeChild();
++#ifdef MOZ_WEBXR
+   bool EnsureVRManager();
++#endif
+ 
+ #if defined(XP_WIN)
+   void SetProcessIsForeground();
+diff --git a/gfx/ipc/PGPU.ipdl b/gfx/ipc/PGPU.ipdl
+index 0bcb62f453abc952d8241bf4159d748d16c478ab..1f7871f571294c64a0f52f7018bfb7ceffec6dfc 100644
+--- a/gfx/ipc/PGPU.ipdl
++++ b/gfx/ipc/PGPU.ipdl
+@@ -11,8 +11,12 @@ include protocol PAPZInputBridge;
+ include protocol PCompositorManager;
+ include protocol PImageBridge;
+ include protocol PProfiler;
++#ifdef MOZ_WEBXR
+ include protocol PVRGPU;
++#endif
++#ifdef MOZ_WEBXR
+ include protocol PVRManager;
++#endif
+ include protocol PVideoBridge;
+ include protocol PVsyncBridge;
+ include protocol PUiCompositorController;
+@@ -72,13 +76,17 @@ parent:
+   async InitVsyncBridge(Endpoint<PVsyncBridgeParent> endpoint);
+   async InitImageBridge(Endpoint<PImageBridgeParent> endpoint, uint32_t aNamespace);
+   async InitVideoBridge(Endpoint<PVideoBridgeParent> endpoint, VideoBridgeSource aSource);
++#ifdef MOZ_WEBXR
+   async InitVRManager(Endpoint<PVRManagerParent> endpoint, uint32_t aNamespace);
++#endif
+   async InitUiCompositorController(LayersId rootLayerTreeId, Endpoint<PUiCompositorControllerParent> endpoint);
+   async InitAPZInputBridge(LayersId layersId,
+                            Endpoint<PAPZInputBridgeParent> endpoint);
+   async InitProfiler(Endpoint<PProfilerChild> endpoint);
+   // Forward GPU process its endpoints to the VR process.
++#ifdef MOZ_WEBXR
+   async InitVR(Endpoint<PVRGPUChild> endpoint);
++#endif
+   // Called to update a gfx variable.
+   async UpdateVar(GfxVarUpdate[] var);
+ 
+@@ -89,7 +97,9 @@ parent:
+   // Create a new content-process compositor bridge.
+   async NewContentCompositorManager(Endpoint<PCompositorManagerParent> endpoint, ContentParentId childId, uint32_t aNamespace);
+   async NewContentImageBridge(Endpoint<PImageBridgeParent> endpoint, ContentParentId childId, uint32_t aNamespace);
++#ifdef MOZ_WEBXR
+   async NewContentVRManager(Endpoint<PVRManagerParent> endpoint, ContentParentId childId, uint32_t aNamespace);
++#endif
+   async NewContentRemoteMediaManager(Endpoint<PRemoteMediaManagerParent> endpoint, ContentParentId childId);
+ 
+   // Called to notify the GPU process of who owns a layersId.
+@@ -112,7 +122,9 @@ parent:
+                             FileDescriptor? DMDFile)
+       returns (uint32_t aGeneration);
+ 
++#ifdef MOZ_WEBXR
+   async ShutdownVR();
++#endif
+ 
+   // Functions supporting PerfStats data collection.
+   async UpdatePerfStatsCollectionMask(uint64_t aMask);
+@@ -144,8 +156,12 @@ child:
+ 
+   async InitCrashReporter(CrashReporterInitArgs aInitArgs);
+ 
++#ifdef MOZ_WEBXR
+   async CreateVRProcess();
++#endif
++#ifdef MOZ_WEBXR
+   async ShutdownVRProcess();
++#endif
+ 
+   async FlushActiveCheckerboardReportsDone();
+ 
+diff --git a/gfx/layers/ipc/CompositorBridgeParent.cpp b/gfx/layers/ipc/CompositorBridgeParent.cpp
+index 6e145f876d729a58634116bdb31ff3878378599a..11e075ff0a02ea1a1ca9003f456030b5be23a476 100644
+--- a/gfx/layers/ipc/CompositorBridgeParent.cpp
++++ b/gfx/layers/ipc/CompositorBridgeParent.cpp
+@@ -418,6 +418,7 @@ mozilla::ipc::IPCResult CompositorBridgeParent::RecvPause() {
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEBXR
+ mozilla::ipc::IPCResult CompositorBridgeParent::RecvRequestFxrOutput() {
+ #ifdef XP_WIN
+   // Continue forwarding the request to the Widget + SwapChain
+@@ -426,6 +427,7 @@ mozilla::ipc::IPCResult CompositorBridgeParent::RecvRequestFxrOutput() {
+ 
+   return IPC_OK();
+ }
++#endif
+ 
+ mozilla::ipc::IPCResult CompositorBridgeParent::RecvResume() {
+   ResumeComposition();
+diff --git a/gfx/layers/ipc/CompositorBridgeParent.h b/gfx/layers/ipc/CompositorBridgeParent.h
+index 11d5c1653ba393db316c1fd514ffec14c75a030f..7ecca4b6b37d08c53f6f356c822ab2cd5f2509b7 100644
+--- a/gfx/layers/ipc/CompositorBridgeParent.h
++++ b/gfx/layers/ipc/CompositorBridgeParent.h
+@@ -199,7 +199,9 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
+       const LayersId& rootLayerTreeId) = 0;
+   virtual mozilla::ipc::IPCResult RecvWillClose() = 0;
+   virtual mozilla::ipc::IPCResult RecvPause() = 0;
++#ifdef MOZ_WEBXR
+   virtual mozilla::ipc::IPCResult RecvRequestFxrOutput() = 0;
++#endif
+   virtual mozilla::ipc::IPCResult RecvResume() = 0;
+   virtual mozilla::ipc::IPCResult RecvResumeAsync() = 0;
+   virtual mozilla::ipc::IPCResult RecvNotifyChildCreated(
+@@ -265,7 +267,9 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase {
+       const LayersId& aRootLayerTreeId) override;
+   mozilla::ipc::IPCResult RecvWillClose() override;
+   mozilla::ipc::IPCResult RecvPause() override;
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvRequestFxrOutput() override;
++#endif
+   mozilla::ipc::IPCResult RecvResume() override;
+   mozilla::ipc::IPCResult RecvResumeAsync() override;
+   mozilla::ipc::IPCResult RecvNotifyChildCreated(
+diff --git a/gfx/layers/ipc/CompositorThread.cpp b/gfx/layers/ipc/CompositorThread.cpp
+index 4ed2176a717df7cf34cb7d5520bb0f7d1b5437c3..0ffd20cd2881b94366e5973cf46f781eee9716cf 100644
+--- a/gfx/layers/ipc/CompositorThread.cpp
++++ b/gfx/layers/ipc/CompositorThread.cpp
+@@ -6,7 +6,9 @@
+ #include "CompositorBridgeParent.h"
+ #include "gfxGradientCache.h"
+ #include "MainThreadUtils.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerParent.h"
++#endif
+ #include "mozilla/BackgroundHangMonitor.h"
+ #include "mozilla/SpinEventLoopUntil.h"
+ #include "mozilla/gfx/gfxVars.h"
+@@ -139,7 +141,9 @@ void CompositorThreadHolder::Shutdown() {
+   }
+ 
+   ImageBridgeParent::Shutdown();
++#ifdef MOZ_WEBXR
+   gfx::VRManagerParent::Shutdown();
++#endif
+   CompositorThread()->Dispatch(
+       NS_NewRunnableFunction("MediaSystemResourceService::Shutdown",
+                              []() { MediaSystemResourceService::Shutdown(); }));
+diff --git a/gfx/layers/ipc/CompositorVsyncScheduler.cpp b/gfx/layers/ipc/CompositorVsyncScheduler.cpp
+index 018e2388bf070824847ea34a7b437d3f1a3674d0..2fafc99b3346dfddef368bc50365802236201e34 100644
+--- a/gfx/layers/ipc/CompositorVsyncScheduler.cpp
++++ b/gfx/layers/ipc/CompositorVsyncScheduler.cpp
+@@ -33,7 +33,9 @@
+ #  include "VsyncSource.h"
+ #endif
+ #include "mozilla/widget/CompositorWidget.h"
++#ifdef MOZ_WEBXR
+ #include "VRManager.h"
++#endif
+ 
+ namespace mozilla {
+ 
+@@ -72,9 +74,12 @@ CompositorVsyncScheduler::CompositorVsyncScheduler(
+       mWidget(aWidget),
+       mCurrentCompositeTaskMonitor("CurrentCompositeTaskMonitor"),
+       mCurrentCompositeTask(nullptr),
+-      mCurrentCompositeTaskReasons(wr::RenderReasons::NONE),
+-      mCurrentVRTaskMonitor("CurrentVRTaskMonitor"),
+-      mCurrentVRTask(nullptr) {
++      mCurrentCompositeTaskReasons(wr::RenderReasons::NONE)
++#ifdef MOZ_WEBXR
++      , mCurrentVRTaskMonitor("CurrentVRTaskMonitor"),
++      mCurrentVRTask(nullptr)
++#endif
++{
+   mVsyncObserver = new Observer(this);
+ 
+   // mAsapScheduling is set on the main thread during init,
+@@ -122,6 +127,7 @@ void CompositorVsyncScheduler::PostCompositeTask(const VsyncEvent& aVsyncEvent,
+   }
+ }
+ 
++#ifdef MOZ_WEBXR
+ void CompositorVsyncScheduler::PostVRTask(TimeStamp aTimestamp) {
+   MonitorAutoLock lockVR(mCurrentVRTaskMonitor);
+   if (mCurrentVRTask == nullptr && CompositorThread()) {
+@@ -132,6 +138,7 @@ void CompositorVsyncScheduler::PostVRTask(TimeStamp aTimestamp) {
+     CompositorThread()->Dispatch(task.forget());
+   }
+ }
++#endif
+ 
+ void CompositorVsyncScheduler::ScheduleComposition(wr::RenderReasons aReasons) {
+   MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
+@@ -190,7 +197,7 @@ void CompositorVsyncScheduler::NotifyVsync(const VsyncEvent& aVsync) {
+                 CompositorThreadHolder::IsInCompositorThread());
+ #endif  // DEBUG
+ 
+-#if defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_WEBXR)
+   gfx::VRManager* vm = gfx::VRManager::Get();
+   if (!vm->IsPresenting()) {
+     PostCompositeTask(aVsync, wr::RenderReasons::VSYNC);
+@@ -199,17 +206,21 @@ void CompositorVsyncScheduler::NotifyVsync(const VsyncEvent& aVsync) {
+   PostCompositeTask(aVsync, wr::RenderReasons::VSYNC);
+ #endif  // defined(MOZ_WIDGET_ANDROID)
+ 
++#ifdef MOZ_WEBXR
+   PostVRTask(aVsync.mTime);
++#endif
+ }
+ 
+ void CompositorVsyncScheduler::CancelCurrentVRTask() {
+   MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread() ||
+              NS_IsMainThread());
++#ifdef MOZ_WEBXR
+   MonitorAutoLock lock(mCurrentVRTaskMonitor);
+   if (mCurrentVRTask) {
+     mCurrentVRTask->Cancel();
+     mCurrentVRTask = nullptr;
+   }
++#endif
+ }
+ 
+ wr::RenderReasons CompositorVsyncScheduler::CancelCurrentCompositeTask() {
+@@ -333,6 +344,7 @@ void CompositorVsyncScheduler::UnobserveVsync() {
+   mIsObservingVsync = false;
+ }
+ 
++#ifdef MOZ_WEBXR
+ void CompositorVsyncScheduler::DispatchVREvents(TimeStamp aVsyncTimestamp) {
+   {
+     MonitorAutoLock lock(mCurrentVRTaskMonitor);
+@@ -349,6 +361,7 @@ void CompositorVsyncScheduler::DispatchVREvents(TimeStamp aVsyncTimestamp) {
+   VRManager* vm = VRManager::Get();
+   vm->NotifyVsync(aVsyncTimestamp);
+ }
++#endif
+ 
+ const SampleTime& CompositorVsyncScheduler::GetLastComposeTime() const {
+   MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
+diff --git a/gfx/layers/ipc/CompositorVsyncScheduler.h b/gfx/layers/ipc/CompositorVsyncScheduler.h
+index 8549406cecdd07e2c99f2d0e91eea248d63df69a..f3ef303f49c8e355f3f6005019222d3ebcc7fb2f 100644
+--- a/gfx/layers/ipc/CompositorVsyncScheduler.h
++++ b/gfx/layers/ipc/CompositorVsyncScheduler.h
+@@ -119,7 +119,9 @@ class CompositorVsyncScheduler {
+ 
+   // Post a task to run DispatchVREvents() on the VR thread, if there isn't
+   // such a task already queued. Can be called from any thread.
++#ifdef MOZ_WEBXR
+   void PostVRTask(TimeStamp aTimestamp);
++#endif
+ 
+   /**
+    * Cancel any VR task that has been scheduled but hasn't run yet.
+@@ -133,7 +135,9 @@ class CompositorVsyncScheduler {
+   void ObserveVsync();
+   void UnobserveVsync();
+ 
++#ifdef MOZ_WEBXR
+   void DispatchVREvents(TimeStamp aVsyncTimestamp);
++#endif
+ 
+   class Observer final : public VsyncObserver {
+     NS_INLINE_DECL_THREADSAFE_REFCOUNTING(CompositorVsyncScheduler::Observer,
+@@ -174,9 +178,13 @@ class CompositorVsyncScheduler {
+   wr::RenderReasons mCurrentCompositeTaskReasons
+       MOZ_GUARDED_BY(mCurrentCompositeTaskMonitor);
+ 
++#ifdef MOZ_WEBXR
+   mozilla::Monitor mCurrentVRTaskMonitor;
++#endif
++#ifdef MOZ_WEBXR
+   RefPtr<CancelableRunnable> mCurrentVRTask
+       MOZ_GUARDED_BY(mCurrentVRTaskMonitor);
++#endif
+ };
+ }  // namespace layers
+ }  // namespace mozilla
+diff --git a/gfx/layers/ipc/ContentCompositorBridgeParent.h b/gfx/layers/ipc/ContentCompositorBridgeParent.h
+index 81b91f484023e2cf8719814d2d5ea419a08cc3b1..56a9ea4f87d299b7fe764091421fa399760cc233 100644
+--- a/gfx/layers/ipc/ContentCompositorBridgeParent.h
++++ b/gfx/layers/ipc/ContentCompositorBridgeParent.h
+@@ -38,9 +38,11 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
+   }
+   mozilla::ipc::IPCResult RecvWillClose() override { return IPC_OK(); }
+   mozilla::ipc::IPCResult RecvPause() override { return IPC_OK(); }
++#ifdef MOZ_WEBXR
+   mozilla::ipc::IPCResult RecvRequestFxrOutput() override {
+     return IPC_FAIL_NO_REASON(this);
+   }
++#endif
+   mozilla::ipc::IPCResult RecvResume() override { return IPC_OK(); }
+   mozilla::ipc::IPCResult RecvResumeAsync() override { return IPC_OK(); }
+   mozilla::ipc::IPCResult RecvNotifyChildCreated(
+diff --git a/gfx/layers/ipc/PCompositorBridge.ipdl b/gfx/layers/ipc/PCompositorBridge.ipdl
+index ed7e3032d4825003ec500ab646613c5d9df9cd3d..e42ebae6f69c8e7d70c90db7a0b1d563547f0613 100644
+--- a/gfx/layers/ipc/PCompositorBridge.ipdl
++++ b/gfx/layers/ipc/PCompositorBridge.ipdl
+@@ -209,7 +209,9 @@ parent:
+     returns (FrameRecording? recording);
+ 
+   // To set up sharing the composited output to Firefox Reality on Desktop
++#ifdef MOZ_WEBXR
+   async RequestFxrOutput();
++#endif
+ 
+   async DynamicToolbarOffsetChanged(int32_t aOffset);
+ };
+diff --git a/gfx/layers/moz.build b/gfx/layers/moz.build
+index dcee9ad9e38afc6a96f85b3a430aaf7d04b49891..ba0d5f074ce66484463a8191bcfd94af476efefd 100644
+--- a/gfx/layers/moz.build
++++ b/gfx/layers/moz.build
+@@ -476,6 +476,8 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("cocoa", "uikit"):
+         "opengl/MacIOSurfaceTextureHostOGL.cpp",
+     ]
+ 
++PREPROCESSED_IPDL_SOURCES += ["ipc/PCompositorBridge.ipdl"]
++
+ IPDL_SOURCES += [
+     "ipc/LayersMessages.ipdlh",
+     "ipc/LayersSurfaces.ipdlh",
+@@ -483,7 +485,6 @@ IPDL_SOURCES += [
+     "ipc/PAPZCTreeManager.ipdl",
+     "ipc/PAPZInputBridge.ipdl",
+     "ipc/PCanvas.ipdl",
+-    "ipc/PCompositorBridge.ipdl",
+     "ipc/PCompositorBridgeTypes.ipdlh",
+     "ipc/PCompositorManager.ipdl",
+     "ipc/PImageBridge.ipdl",
+diff --git a/gfx/moz.build b/gfx/moz.build
+index 853d8552a69b3adcbf3ef5ceeda96880dc4e23c6..0c6556c284fd742e345a5c2d01126f8622d475d8 100644
+--- a/gfx/moz.build
++++ b/gfx/moz.build
+@@ -22,7 +22,6 @@ DIRS += [
+     "ots/src",
+     "thebes",
+     "ipc",
+-    "vr",
+     "config",
+     "webrender_bindings",
+     "wgpu_bindings",
+@@ -40,3 +39,6 @@ SPHINX_TREES["/gfx"] = "docs"
+ 
+ with Files("docs/**"):
+     SCHEDULES.exclusive = ["docs"]
++
++if CONFIG["MOZ_WEBXR"]:
++    DIRS += ["vr"]
+diff --git a/gfx/thebes/DeviceManagerDx.cpp b/gfx/thebes/DeviceManagerDx.cpp
+index 5649e8203ea24392b45f1cfdacdf87fe98ea56e5..8808bfa28a856da10cc5512d51eeae2b217fc28e 100644
+--- a/gfx/thebes/DeviceManagerDx.cpp
++++ b/gfx/thebes/DeviceManagerDx.cpp
+@@ -140,7 +140,9 @@ bool DeviceManagerDx::LoadDcomp() {
+ void DeviceManagerDx::ReleaseD3D11() {
+   MOZ_ASSERT(!mCompositorDevice);
+   MOZ_ASSERT(!mContentDevice);
++#ifdef MOZ_WEBXR
+   MOZ_ASSERT(!mVRDevice);
++#endif
+   MOZ_ASSERT(!mDecoderDevice);
+ 
+   mD3D11Module.reset();
+@@ -509,6 +511,7 @@ bool DeviceManagerDx::CreateCompositorDevicesLocked() {
+   return true;
+ }
+ 
++#ifdef MOZ_WEBXR
+ bool DeviceManagerDx::CreateVRDevice() {
+   MOZ_ASSERT(ProcessOwnsCompositor());
+ 
+@@ -546,6 +549,7 @@ bool DeviceManagerDx::CreateVRDevice() {
+ 
+   return true;
+ }
++#endif
+ 
+ bool DeviceManagerDx::CreateCanvasDevice() {
+   MutexAutoLock lock(mDeviceLock);
+@@ -1275,7 +1279,9 @@ void DeviceManagerDx::ResetDevicesLocked() {
+   mContentDevice = nullptr;
+   mCanvasDevice = nullptr;
+   mImageDevice = nullptr;
++#ifdef MOZ_WEBXR
+   mVRDevice = nullptr;
++#endif
+   mDecoderDevice = nullptr;
+   mDirectCompositionDevice = nullptr;
+   mDeviceStatus = Nothing();
+@@ -1485,6 +1491,7 @@ RefPtr<ID3D11Device> DeviceManagerDx::GetImageDevice() {
+   return mImageDevice;
+ }
+ 
++#ifdef MOZ_WEBXR
+ RefPtr<ID3D11Device> DeviceManagerDx::GetVRDevice() {
+   MutexAutoLock lock(mDeviceLock);
+   if (!mVRDevice) {
+@@ -1492,6 +1499,7 @@ RefPtr<ID3D11Device> DeviceManagerDx::GetVRDevice() {
+   }
+   return mVRDevice;
+ }
++#endif
+ 
+ RefPtr<ID3D11Device> DeviceManagerDx::GetCanvasDevice() {
+   MutexAutoLock lock(mDeviceLock);
+diff --git a/gfx/thebes/DeviceManagerDx.h b/gfx/thebes/DeviceManagerDx.h
+index b58cf565c5d8080b6092c39c4494401c500da304..1fc03d92aea481c164b28b1e53b0bf31d22f46e7 100644
+--- a/gfx/thebes/DeviceManagerDx.h
++++ b/gfx/thebes/DeviceManagerDx.h
+@@ -67,7 +67,9 @@ class DeviceManagerDx final {
+   RefPtr<ID3D11Device> GetCanvasDevice();
+   RefPtr<ID3D11Device> GetImageDevice();
+   RefPtr<IDCompositionDevice2> GetDirectCompositionDevice();
++#ifdef MOZ_WEBXR
+   RefPtr<ID3D11Device> GetVRDevice();
++#endif
+   RefPtr<ID3D11Device> CreateDecoderDevice(DeviceFlagSet aFlags);
+   RefPtr<ID3D11Device> CreateMediaEngineDevice();
+   IDirectDraw7* GetDirectDraw();
+@@ -169,7 +171,9 @@ class DeviceManagerDx final {
+       MOZ_REQUIRES(mDeviceLock);
+ 
+   void CreateWARPCompositorDevice() MOZ_REQUIRES(mDeviceLock);
++#ifdef MOZ_WEBXR
+   bool CreateVRDevice() MOZ_REQUIRES(mDeviceLock);
++#endif
+ 
+   mozilla::gfx::FeatureStatus CreateContentDevice() MOZ_REQUIRES(mDeviceLock);
+ 
+@@ -211,7 +215,9 @@ class DeviceManagerDx final {
+   RefPtr<ID3D11Device> mContentDevice MOZ_GUARDED_BY(mDeviceLock);
+   RefPtr<ID3D11Device> mCanvasDevice MOZ_GUARDED_BY(mDeviceLock);
+   RefPtr<ID3D11Device> mImageDevice MOZ_GUARDED_BY(mDeviceLock);
++#ifdef MOZ_WEBXR
+   RefPtr<ID3D11Device> mVRDevice MOZ_GUARDED_BY(mDeviceLock);
++#endif
+   RefPtr<ID3D11Device> mDecoderDevice MOZ_GUARDED_BY(mDeviceLock);
+   RefPtr<IDCompositionDevice2> mDirectCompositionDevice
+       MOZ_GUARDED_BY(mDeviceLock);
+diff --git a/gfx/thebes/gfxPlatform.cpp b/gfx/thebes/gfxPlatform.cpp
+index 2bfb6601831a668f4de32c6f91e8cffc2ca06ee5..b5229b3b9e51cc3dec5bebb5c8d807ec88a4149f 100644
+--- a/gfx/thebes/gfxPlatform.cpp
++++ b/gfx/thebes/gfxPlatform.cpp
+@@ -57,8 +57,12 @@
+ #include "gfxUserFontSet.h"
+ #include "gfxConfig.h"
+ #include "GfxDriverInfo.h"
++#ifdef MOZ_WEBXR
+ #include "VRProcessManager.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRThread.h"
++#endif
+ 
+ #ifdef XP_WIN
+ #  include <process.h>
+@@ -153,9 +157,15 @@ static const uint32_t kDefaultGlyphCacheSize = -1;
+ #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/dom/ContentParent.h"
+ #include "mozilla/dom/TouchEvent.h"
++#ifdef MOZ_WEBXR
+ #include "gfxVR.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRManager.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "mozilla/gfx/GPUParent.h"
+ #include "prsystem.h"
+ 
+@@ -448,7 +458,9 @@ gfxPlatform::gfxPlatform()
+   mAllowDownloadableFonts = UNINITIALIZED_VALUE;
+ 
+   InitBackendPrefs(GetBackendPrefs());
++#ifdef MOZ_WEBXR
+   VRManager::ManagerInit();
++#endif
+ }
+ 
+ bool gfxPlatform::Initialized() { return !!gPlatform; }
+@@ -1330,7 +1342,9 @@ void gfxPlatform::Shutdown() {
+ 
+   if (XRE_IsParentProcess()) {
+     GPUProcessManager::Shutdown();
++#ifdef MOZ_WEBXR
+     VRProcessManager::Shutdown();
++#endif
+     RDDProcessManager::Shutdown();
+   }
+ 
+@@ -1384,14 +1398,18 @@ void gfxPlatform::ShutdownLayersIPC() {
+   sLayersIPCIsUp = false;
+ 
+   if (XRE_IsContentProcess()) {
++#ifdef MOZ_WEBXR
+     gfx::VRManagerChild::ShutDown();
++#endif
+     gfx::CanvasShutdownManager::Shutdown();
+     layers::CompositorManagerChild::Shutdown();
+     layers::ImageBridgeChild::ShutDown();
+   } else if (XRE_IsParentProcess()) {
+     VideoBridgeParent::Shutdown();
+     RDDProcessManager::RDDProcessShutdown();
++#ifdef MOZ_WEBXR
+     gfx::VRManagerChild::ShutDown();
++#endif
+     gfx::CanvasShutdownManager::Shutdown();
+     layers::CompositorManagerChild::Shutdown();
+     layers::ImageBridgeChild::ShutDown();
+diff --git a/gfx/webrender_bindings/RenderCompositorANGLE.cpp b/gfx/webrender_bindings/RenderCompositorANGLE.cpp
+index 6c73f6d1588bd621f4e8e8750222e65eb560c6fc..6260a9fd676cd480a5548049911ac140c5aeada2 100644
+--- a/gfx/webrender_bindings/RenderCompositorANGLE.cpp
++++ b/gfx/webrender_bindings/RenderCompositorANGLE.cpp
+@@ -23,7 +23,9 @@
+ #include "mozilla/widget/WinCompositorWidget.h"
+ #include "mozilla/glean/GfxMetrics.h"
+ #include "nsPrintfCString.h"
++#ifdef MOZ_WEBXR
+ #include "FxROutputHandler.h"
++#endif
+ 
+ #include <d3d11.h>
+ #include <dcomp.h>
+@@ -469,6 +471,7 @@ RenderedFrameId RenderCompositorANGLE::EndFrame(
+ 
+   if (!UseCompositor()) {
+     auto start = TimeStamp::Now();
++#ifdef MOZ_WEBXR
+     if (auto* fxrHandler = mWidget->AsWindows()->GetFxrOutputHandler()) {
+       // There is a Firefox Reality handler for this swapchain. Update this
+       // window's contents to the VR window.
+@@ -476,6 +479,7 @@ RenderedFrameId RenderCompositorANGLE::EndFrame(
+         fxrHandler->UpdateOutput(mCtx);
+       }
+     }
++#endif
+ 
+     const UINT interval =
+         mFirstPresent ||
+@@ -968,7 +972,9 @@ void RenderCompositorANGLE::InitializeUsePartialPresent() {
+   // when mSwapChain1 is null, SwapChain is blit model swap chain with one
+   // buffer.
+   mUsePartialPresent = !UseCompositor() &&
++#ifdef MOZ_WEBXR
+                        !mWidget->AsWindows()->HasFxrOutputHandler() &&
++#endif
+                        gfx::gfxVars::WebRenderMaxPartialPresentRects() > 0;
+ }
+ 
+diff --git a/ipc/glue/BackgroundChildImpl.cpp b/ipc/glue/BackgroundChildImpl.cpp
+index f63fe4e1c7735158f3cf43b02442183390572552..a257e2c595b6c35020e7f2aa7b74cec2a8f78f22 100644
+--- a/ipc/glue/BackgroundChildImpl.cpp
++++ b/ipc/glue/BackgroundChildImpl.cpp
+@@ -36,8 +36,12 @@
+ #include "mozilla/ipc/PBackgroundTestChild.h"
+ #include "mozilla/net/PUDPSocketChild.h"
+ #include "mozilla/dom/network/UDPSocketChild.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIPortChild.h"
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIManagerChild.h"
++#endif
+ #include "nsID.h"
+ 
+ namespace {
+@@ -72,8 +76,12 @@ using mozilla::dom::StorageDBChild;
+ using mozilla::dom::cache::PCacheChild;
+ using mozilla::dom::cache::PCacheStreamControlChild;
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::PMIDIManagerChild;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::PMIDIPortChild;
++#endif
+ 
+ // -----------------------------------------------------------------------------
+ // BackgroundChildImpl::ThreadLocal
+diff --git a/ipc/glue/BackgroundParentImpl.cpp b/ipc/glue/BackgroundParentImpl.cpp
+index 34fbcb5027cfdef03b71c82e89a5771516eab86a..1b47199d83c34c4d9ab065d2409fc2c7a494ba70 100644
+--- a/ipc/glue/BackgroundParentImpl.cpp
++++ b/ipc/glue/BackgroundParentImpl.cpp
+@@ -25,9 +25,15 @@
+ #include "mozilla/dom/FileSystemRequestParent.h"
+ #include "mozilla/dom/GamepadEventChannelParent.h"
+ #include "mozilla/dom/GamepadTestChannelParent.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIManagerParent.h"
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIPlatformService.h"
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIPortParent.h"
++#endif
+ #include "mozilla/dom/MLSTransactionParent.h"
+ #include "mozilla/dom/ProcessIsolation.h"
+ #include "mozilla/dom/MessagePortParent.h"
+@@ -77,12 +83,22 @@
+ using mozilla::AssertIsOnMainThread;
+ using mozilla::dom::FileSystemRequestParent;
+ using mozilla::dom::MessagePortParent;
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::MIDIManagerParent;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::MIDIPlatformService;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::MIDIPortParent;
++#endif
+ using mozilla::dom::PMessagePortParent;
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::PMIDIManagerParent;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ using mozilla::dom::PMIDIPortParent;
++#endif
+ using mozilla::dom::PMLSTransactionParent;
+ using mozilla::dom::PServiceWorkerContainerParent;
+ using mozilla::dom::PServiceWorkerParent;
+@@ -1216,6 +1232,7 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateBoundStorageKeyParent(
+   return IPC_OK();
+ }
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateMIDIPort(
+     Endpoint<PMIDIPortParent>&& aEndpoint, const MIDIPortInfo& aPortInfo,
+     const bool& aSysexEnabled) {
+@@ -1235,7 +1252,9 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateMIDIPort(
+ 
+   return IPC_OK();
+ }
++#endif
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateMIDIManager(
+     Endpoint<PMIDIManagerParent>&& aEndpoint) {
+   AssertIsInMainProcess();
+@@ -1255,7 +1274,9 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateMIDIManager(
+ 
+   return IPC_OK();
+ }
++#endif
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+ mozilla::ipc::IPCResult BackgroundParentImpl::RecvHasMIDIDevice(
+     HasMIDIDeviceResolver&& aResolver) {
+   AssertIsInMainProcess();
+@@ -1274,6 +1295,7 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvHasMIDIDevice(
+ 
+   return IPC_OK();
+ }
++#endif
+ 
+ // NOTE: Only accessed on the background thread.
+ static StaticRefPtr<nsISerialEventTarget> sMLSTaskQueue;
+diff --git a/ipc/glue/BackgroundParentImpl.h b/ipc/glue/BackgroundParentImpl.h
+index 735dd8e1321cad04c080b9566ca2a06b49bbc825..7a212c50ca7e70bfc54c0313226ffb3782d4d430 100644
+--- a/ipc/glue/BackgroundParentImpl.h
++++ b/ipc/glue/BackgroundParentImpl.h
+@@ -287,15 +287,21 @@ class BackgroundParentImpl : public PBackgroundParent {
+       const Namespace& aNamespace,
+       const PrincipalInfo& aPrincipalInfo) override;
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   mozilla::ipc::IPCResult RecvCreateMIDIPort(
+       Endpoint<PMIDIPortParent>&& aEndpoint, const MIDIPortInfo& aPortInfo,
+       const bool& aSysexEnabled) override;
++#endif
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   mozilla::ipc::IPCResult RecvCreateMIDIManager(
+       Endpoint<PMIDIManagerParent>&& aEndpoint) override;
++#endif
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   mozilla::ipc::IPCResult RecvHasMIDIDevice(
+       HasMIDIDeviceResolver&& aResolver) override;
++#endif
+ 
+   mozilla::ipc::IPCResult RecvCreateMLSTransaction(
+       Endpoint<PMLSTransactionParent>&& aEndpoint,
+diff --git a/ipc/glue/PBackground.ipdl b/ipc/glue/PBackground.ipdl
+index bfc523c53e0767bea50a751d623af3d0409720dc..264a701cb486868dfde01250d3ec1cc9cd0c20b8 100644
+--- a/ipc/glue/PBackground.ipdl
++++ b/ipc/glue/PBackground.ipdl
+@@ -35,8 +35,12 @@ include protocol PFileCreator;
+ include protocol PMessagePort;
+ include protocol PCameras;
+ include protocol PLockManager;
++#ifdef MOZ_WEB_DEVICE_APIS
+ include protocol PMIDIManager;
++#endif
++#ifdef MOZ_WEB_DEVICE_APIS
+ include protocol PMIDIPort;
++#endif
+ include protocol PMLSTransaction;
+ include protocol PQuota;
+ include protocol PServiceWorker;
+@@ -61,7 +65,9 @@ include PBackgroundIDBSharedTypes;
+ include PFileSystemParams;
+ include ProtocolTypes;
+ include RemoteWorkerTypes;
++#ifdef MOZ_WEB_DEVICE_APIS
+ include MIDITypes;
++#endif
+ 
+ include "mozilla/dom/cache/IPCUtils.h";
+ include "mozilla/dom/quota/SerializationHelpers.h";
+@@ -260,11 +266,12 @@ parent:
+     Namespace aNamespace,
+     PrincipalInfo aPrincipalInfo);
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   async CreateMIDIManager(Endpoint<PMIDIManagerParent> aEndpoint);
+   async CreateMIDIPort(Endpoint<PMIDIPortParent> aEndpoint,
+                        MIDIPortInfo portInfo, bool sysexEnabled);
+   async HasMIDIDevice() returns (bool hasDevice);
+-
++#endif
+   async CreateMLSTransaction(Endpoint<PMLSTransactionParent> aEndpoint, nsIPrincipal aPrincipal);
+ 
+   // This method is used to propagate storage activities from the child actor
+diff --git a/ipc/glue/moz.build b/ipc/glue/moz.build
+index 9c24b5b79ce49f9a05a936a7af7555db0d1dcec6..37f7bd3c054c0abd7acaa88c022ec5567f23ecb3 100644
+--- a/ipc/glue/moz.build
++++ b/ipc/glue/moz.build
+@@ -243,6 +243,7 @@ LOCAL_INCLUDES += [
+ ]
+ 
+ PREPROCESSED_IPDL_SOURCES = [
++    "PBackground.ipdl",
+     "PUtilityMediaService.ipdl",
+     "PUtilityProcess.ipdl",
+ ]
+@@ -250,7 +251,6 @@ PREPROCESSED_IPDL_SOURCES = [
+ IPDL_SOURCES = [
+     "InputStreamParams.ipdlh",
+     "IPCStream.ipdlh",
+-    "PBackground.ipdl",
+     "PBackgroundSharedTypes.ipdlh",
+     "PBackgroundStarter.ipdl",
+     "PBackgroundTest.ipdl",
+diff --git a/js/xpconnect/src/Sandbox.cpp b/js/xpconnect/src/Sandbox.cpp
+index 2ac90e3f4c41f09dee82229e76dee8009c9e0ee0..ad7aecdc4137301b64813b9d301c796a1e9d6106 100644
+--- a/js/xpconnect/src/Sandbox.cpp
++++ b/js/xpconnect/src/Sandbox.cpp
+@@ -63,8 +63,10 @@
+ #include "mozilla/dom/LockManager.h"
+ #include "mozilla/dom/MessageChannelBinding.h"
+ #include "mozilla/dom/MessagePortBinding.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIInputMapBinding.h"
+ #include "mozilla/dom/MIDIOutputMapBinding.h"
++#endif
+ #include "mozilla/dom/ModuleLoader.h"
+ #include "mozilla/dom/NodeBinding.h"
+ #include "mozilla/dom/NodeFilterBinding.h"
+@@ -1001,10 +1003,12 @@ bool xpc::GlobalProperties::Parse(JSContext* cx, JS::HandleObject obj) {
+       InspectorUtils = true;
+     } else if (JS_LinearStringEqualsLiteral(nameStr, "MessageChannel")) {
+       MessageChannel = true;
++#ifdef MOZ_WEB_DEVICE_APIS
+     } else if (JS_LinearStringEqualsLiteral(nameStr, "MIDIInputMap")) {
+       MIDIInputMap = true;
+     } else if (JS_LinearStringEqualsLiteral(nameStr, "MIDIOutputMap")) {
+       MIDIOutputMap = true;
++#endif
+     } else if (JS_LinearStringEqualsLiteral(nameStr, "Node")) {
+       Node = true;
+     } else if (JS_LinearStringEqualsLiteral(nameStr, "NodeFilter")) {
+@@ -1119,8 +1123,10 @@ bool xpc::GlobalProperties::Define(JSContext* cx, JS::HandleObject obj) {
+   if (MessageChannel && !MessagePort_Binding::CreateAndDefineOnGlobal(cx)) {
+     return false;
+   }
++#ifdef MOZ_WEB_DEVICE_APIS
+   DEFINE_WEBIDL_INTERFACE_OR_NAMESPACE(MIDIInputMap)
+   DEFINE_WEBIDL_INTERFACE_OR_NAMESPACE(MIDIOutputMap)
++#endif
+   DEFINE_WEBIDL_INTERFACE_OR_NAMESPACE(Node)
+   DEFINE_WEBIDL_INTERFACE_OR_NAMESPACE(NodeFilter)
+   DEFINE_WEBIDL_INTERFACE_OR_NAMESPACE(PathUtils)
+diff --git a/js/xpconnect/src/xpcprivate.h b/js/xpconnect/src/xpcprivate.h
+index e8383ccc7e22aa50b60cf61bb803690a2d7a2d18..6becfa36d8a8c2658a256a73a97766b778b0eb55 100644
+--- a/js/xpconnect/src/xpcprivate.h
++++ b/js/xpconnect/src/xpcprivate.h
+@@ -2188,8 +2188,10 @@ struct GlobalProperties {
+   bool InspectorCSSParser : 1;
+   bool InspectorUtils : 1;
+   bool MessageChannel : 1;
++#ifdef MOZ_WEB_DEVICE_APIS
+   bool MIDIInputMap : 1;
+   bool MIDIOutputMap : 1;
++#endif
+   bool Node : 1;
+   bool NodeFilter : 1;
+   bool PathUtils : 1;
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+index 2e624b2f71bae54bdbf16d24494b752354e4cf8f..d2ec85a53e079112b93cc587d7afb39207fe313c 100644
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -96,7 +96,9 @@
+ #include "nsTransitionManager.h"
+ 
+ #if defined(MOZ_WIDGET_ANDROID)
++#ifdef MOZ_WEBXR
+ #  include "VRManagerChild.h"
++#endif
+ #endif  // defined(MOZ_WIDGET_ANDROID)
+ 
+ #include "nsXULPopupManager.h"
+@@ -1166,7 +1168,7 @@ static StaticAutoPtr<nsTArray<RefreshDriverTimer*>> sRegularRateTimerList;
+ static StaticRefPtr<InactiveRefreshDriverTimer> sThrottledRateTimer;
+ 
+ static bool IsPresentingInVR() {
+-#ifdef MOZ_WIDGET_ANDROID
++#if defined(MOZ_WIDGET_ANDROID) && defined(MOZ_WEBXR)
+   return gfx::VRManagerChild::IsPresenting();
+ #else
+   return false;
+diff --git a/layout/build/nsLayoutStatics.cpp b/layout/build/nsLayoutStatics.cpp
+index 0fa2353fee3a73d446539effcb41c6d02097c440..8cd5fa72e32db2d78c05c13d75a8f7b89a730073 100644
+--- a/layout/build/nsLayoutStatics.cpp
++++ b/layout/build/nsLayoutStatics.cpp
+@@ -92,11 +92,15 @@
+ #include "mozilla/dom/CustomElementRegistry.h"
+ #include "mozilla/dom/Document.h"
+ #include "mozilla/dom/HTMLVideoElement.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/MIDIPlatformService.h"
++#endif
+ #include "mozilla/dom/PointerEventHandler.h"
+ #include "mozilla/dom/RemoteWorkerService.h"
+ #include "mozilla/dom/ReportingHeader.h"
++#ifdef MOZ_WEB_DEVICE_APIS
+ #include "mozilla/dom/SerialPlatformService.h"
++#endif
+ #include "mozilla/dom/WebIDLGlobalNameHash.h"
+ #include "mozilla/dom/localstorage/ActorsParent.h"
+ #include "mozilla/dom/quota/ActorsParent.h"
+@@ -274,9 +278,11 @@ nsresult nsLayoutStatics::Initialize() {
+ 
+   RLBoxWOFF2SandboxPool::Initalize();
+ 
++#ifdef MOZ_WEB_DEVICE_APIS
+   if (XRE_IsParentProcess()) {
+     MIDIPlatformService::InitStatics();
+   }
++#endif
+ 
+   mozilla::intl::EncodingToLang::Initialize();
+ 
+diff --git a/mobile/android/geckoview/build.gradle b/mobile/android/geckoview/build.gradle
+index fe6376482af9cf78d4892573ef88e521f9701bc4..ccb589a37e0dadb543b1ebd53508b8f617eca9ca 100644
+--- a/mobile/android/geckoview/build.gradle
++++ b/mobile/android/geckoview/build.gradle
+@@ -92,6 +92,9 @@ android {
+     sourceSets {
+         main {
+             java {
++                if (!mozconfig.substs.MOZ_WEBXR) {
++                    exclude "org/mozilla/geckoview/GeckoVRManager.java"
++                }
+                 if (!mozconfig.substs.MOZ_ANDROID_HLS_SUPPORT) {
+                     exclude 'org/mozilla/gecko/media/GeckoHlsAudioRenderer.java'
+                     exclude 'org/mozilla/gecko/media/GeckoHlsPlayer.java'
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+index 4f478b99b6f9976f05de624bbea8039d5ab275cc..db7014612f3b203b0b176dde76595563543f472b 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -108,7 +108,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+     /** A bounded PNG produced by Gecko for the current top-level document. */
+     default void onFaviconChanged(long sessionId, String pageUri, String png) {}
+ 
+-    default void onDeviceUseChanged(long sessionId, boolean camera, boolean microphone, boolean serial) {}
++    default void onDeviceUseChanged(long sessionId, boolean camera, boolean microphone) {}
+ 
+     void onLoadStarted(long sessionId, long generation, String uri);
+ 
+@@ -873,7 +873,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+         break;
+       case EVENT_DEVICE_STATE:
+         mDelegate.onDeviceUseChanged(mSessionId, message.getBoolean("camera", false),
+-            message.getBoolean("microphone", false), message.getBoolean("serial", false));
++            message.getBoolean("microphone", false));
+         break;
+       case EVENT_FULLSCREEN:
+         final boolean fullscreen = message.getBoolean("enabled", false);
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -66,7 +66,7 @@
+ ];
+ 
+ const PRODUCT_QUERIES = new Set([
+-  "product:initialize", "site:get", "site:clear", "site:permission", "data:clear",
++  "product:initialize", "site:get", "site:clear", "site:permission", "site:stop-devices", "data:clear",
+   "links:set", "links:copy", "prefs:flush", "session:can-close", "support:get",
+   "processes:get", "processes:end", "credits:get", "appearance:set",
+   "search:get", "search:default", "search:upsert", "search:remove", "search:move",
+diff --git a/mobile/shared/modules/geckoview/moz.build b/mobile/shared/modules/geckoview/moz.build
+index 92b8919b8305dc635bd242d19b7a6247cfb06b2b..dbcd23ee153ed795cf3ef5f583dc29d0d9b33d36 100644
+--- a/mobile/shared/modules/geckoview/moz.build
++++ b/mobile/shared/modules/geckoview/moz.build
+@@ -15,7 +15,6 @@ EXTRA_JS_MODULES += [
+     "GeckoViewConsole.sys.mjs",
+     "GeckoViewContent.sys.mjs",
+     "GeckoViewContentBlocking.sys.mjs",
+-    "GeckoViewIdentityCredential.sys.mjs",
+     "GeckoViewIPProtection.sys.mjs",
+     "GeckoViewMediaControl.sys.mjs",
+     "GeckoViewModule.sys.mjs",
+@@ -53,3 +52,6 @@ if CONFIG["MOZ_LOCAL_ML"]:
+         "GeckoViewAIFeatures.sys.mjs",
+         "GeckoViewTranslations.sys.mjs",
+     ]
++
++if CONFIG["MOZ_WEB_IDENTITY"]:
++    EXTRA_JS_MODULES += ["GeckoViewIdentityCredential.sys.mjs"]
+diff --git a/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs b/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
+index 37119306f3dce97b095d19ba8345acd1bceb796b..b60c35f1919fa28958e366a89e82fd76cc87f34e 100644
+--- a/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
+@@ -19,7 +19,6 @@ const SITE_PERMISSIONS = Object.freeze({
+   "desktop-notification": "NOTIFICATIONS",
+   "persistent-storage": "PERSISTENT_STORAGE",
+   "storage-access": "STORAGE_ACCESS",
+-  xr: "XR",
+ });
+ 
+ const PLATFORM_PERMISSIONS = Object.freeze({
+@@ -27,8 +26,6 @@ const PLATFORM_PERMISSIONS = Object.freeze({
+   "android.permission.RECORD_AUDIO": "MICROPHONE",
+   "android.permission.ACCESS_FINE_LOCATION": "FINE_LOCATION",
+   "android.permission.ACCESS_COARSE_LOCATION": "COARSE_LOCATION",
+-  "android.permission.BLUETOOTH_CONNECT": "BLUETOOTH_CONNECT",
+-  "android.permission.BLUETOOTH_SCAN": "BLUETOOTH_SCAN",
+ });
+ 
+ let processActorsRegistered = false;
+diff --git a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+index 61aa3f7a5347df98df08283fa139f11da9c7c60a..1963328fec5e098543ccdd3cad40dfe4066ec43e 100644
+--- a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+@@ -13,7 +13,7 @@ import { setAppearanceSetting }
+   from "resource://gre/modules/navis/NavisSettingsPolicy.sys.mjs";
+ import { initializeAndroidSearch, queryAndroidSearch }
+   from "resource://gre/modules/NavisAndroidSearch.sys.mjs";
+-import { androidSitePermissions, setAndroidSitePermission, revokeAndroidPermissions, revokeAllAndroidPermissions }
++import { androidSitePermissions, setAndroidSitePermission, revokeAndroidPermissions, revokeAllAndroidPermissions, stopAndroidSiteDevices }
+   from "resource://gre/modules/NavisAndroidPermissions.sys.mjs";
+ 
+ const processManagers = new WeakMap();
+@@ -160,7 +160,7 @@ async function clearData(browser, token) {
+   ));
+   if (failures) throw new Error("Some site data could not be cleared");
+   clearWebPermissions(web.principal);
+-  await revokeAndroidPermissions(web.principal, ["camera", "microphone", "serial", "midi", "midi-sysex"], true);
++  await revokeAndroidPermissions(web.principal, ["camera", "microphone"], true);
+   return { cleared: true, origin: web.principal.originNoSuffix,
+     privateMode: web.principal.privateBrowsingId !== 0 };
+ }
+@@ -188,7 +188,7 @@ export async function query(window, operation, data = {}) {
+       if (Services.prefs.getIntPref("navis.sitePermissions.policyVersion", 0) < 2) {
+         // The previous boolean projection persisted even prompt dismissal. Its
+         // old entries cannot be interpreted as explicit user intent; re-prompt.
+-        clearWebPermissions(null, ["geolocation", "desktop-notification", "persistent-storage", "xr"]);
++        clearWebPermissions(null, ["geolocation", "desktop-notification", "persistent-storage"]);
+         Services.prefs.setIntPref("navis.sitePermissions.policyVersion", 2);
+       }
+       if (Services.prefs.getIntPref("navis.sitePermissions.policyVersion", 0) < 3) {
+@@ -221,7 +221,12 @@ export async function query(window, operation, data = {}) {
+     case "site:clear": return clearData(browser, data.navigationToken);
+     case "site:permission": {
+       requireSiteRequest(browser, data.navigationToken);
+-      await setAndroidSitePermission(browser, data.kind, data.decision);
++      await setAndroidSitePermission(browser, data.kind, data.decision, data.originToken);
++      return siteInformation(browser);
++    }
++    case "site:stop-devices": {
++      requireSiteRequest(browser, data.navigationToken);
++      await stopAndroidSiteDevices(browser, data.kind);
+       return siteInformation(browser);
+     }
+     case "data:clear": {
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -9,7 +9,6 @@
+         "/desktop-embedder/modules/CertificateSecurity.sys.mjs",
+         "/desktop-embedder/modules/CertificateSecurityData.sys.mjs",
+         "/desktop-embedder/modules/DesktopAddressInput.sys.mjs",
+-        "/desktop-embedder/modules/DesktopDeviceUse.sys.mjs",
+         "/desktop-embedder/modules/NavisAndroidPermissions.sys.mjs",
+         "/desktop-embedder/modules/NavisAndroidSearch.sys.mjs",
+         "/desktop-embedder/modules/NavisSearchPolicy.sys.mjs",
+diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
+index be0464d3911f0a1eca1155d883895ea192f81c89..2fd16472cc0cc7d5e72d5d7bf7a0be5692a1fec4 100644
+--- a/netwerk/protocol/http/nsHttpChannel.cpp
++++ b/netwerk/protocol/http/nsHttpChannel.cpp
+@@ -11,7 +11,9 @@
+ #include "mozilla/Sprintf.h"
+ #include "mozilla/ToString.h"
+ #include "mozilla/dom/nsCSPContext.h"
++#ifdef MOZ_WEB_IDENTITY
+ #include "mozilla/dom/NavigatorLogin.h"
++#endif
+ #include "mozilla/glean/AntitrackingMetrics.h"
+ #include "mozilla/glean/NetwerkMetrics.h"
+ #include "mozilla/glean/NetwerkProtocolHttpMetrics.h"
+@@ -6806,6 +6808,7 @@ nsresult nsHttpChannel::AsyncProcessRedirection(uint32_t redirectType) {
+     }
+   }
+ 
++#ifdef MOZ_WEB_IDENTITY
+   // if we have a Set-Login header, we should try to handle it here
+   nsAutoCString setLogin;
+   if (NS_SUCCEEDED(mResponseHead->GetHeader(nsHttp::Set_Login, setLogin))) {
+@@ -6831,7 +6834,7 @@ nsresult nsHttpChannel::AsyncProcessRedirection(uint32_t redirectType) {
+       }
+     }
+   }
+-
++#endif
+   if (NS_WARN_IF(!mRedirectURI)) {
+     LOG(("Invalid redirect URI after performaing query string stripping"));
+     return NS_ERROR_FAILURE;
+diff --git a/toolkit/components/cleardata/ClearDataService.sys.mjs b/toolkit/components/cleardata/ClearDataService.sys.mjs
+index 2197e80f83938752e9fab006389d641338539934..4934d8073b4c007e7863cdb255eb08fefb7856d6 100644
+--- a/toolkit/components/cleardata/ClearDataService.sys.mjs
++++ b/toolkit/components/cleardata/ClearDataService.sys.mjs
+@@ -25,12 +25,14 @@ XPCOMUtils.defineLazyServiceGetter(
+   "@mozilla.org/tracking-db-service;1",
+   Ci.nsITrackingDBService
+ );
++#ifdef MOZ_WEB_IDENTITY
+ XPCOMUtils.defineLazyServiceGetter(
+   lazy,
+   "IdentityCredentialStorageService",
+   "@mozilla.org/browser/identity-credential-storage-service;1",
+   Ci.nsIIdentityCredentialStorageService
+ );
++#endif
+ XPCOMUtils.defineLazyServiceGetter(
+   lazy,
+   "bounceTrackingProtection",
+@@ -71,7 +73,7 @@ XPCOMUtils.defineLazyPreferenceGetter(
+  * the collector's promise resolves when all registered callbacks complete.
+  */
+ class PBMCleanupCollector {
+-  #promises = [];
++#literal   #promises = [];
+ 
+   addPendingCleanup() {
+     let { promise, resolve } = Promise.withResolvers();
+@@ -2050,6 +2052,7 @@ const PreflightCacheCleaner = {
+   },
+ };
+ 
++#ifdef MOZ_WEB_IDENTITY
+ const IdentityCredentialStorageCleaner = {
+   async deleteAll() {
+     if (
+@@ -2142,6 +2145,8 @@ const IdentityCredentialStorageCleaner = {
+     }
+   },
+ };
++#endif
++
+ 
+ const BounceTrackingProtectionStateCleaner = {
+   async deleteAll() {
+@@ -2461,10 +2466,13 @@ const FLAGS_MAP = [
+     cleaners: [PreflightCacheCleaner],
+   },
+ 
++#ifdef MOZ_WEB_IDENTITY
+   {
+     flag: Ci.nsIClearDataService.CLEAR_CREDENTIAL_MANAGER_STATE,
+     cleaners: [IdentityCredentialStorageCleaner],
+   },
++#endif
++
+ 
+   {
+     flag: Ci.nsIClearDataService.CLEAR_COOKIE_BANNER_EXCEPTION,
+diff --git a/toolkit/components/cleardata/moz.build b/toolkit/components/cleardata/moz.build
+index d8368cf6eca6e967f11843196d0912fbc68dbd64..c4892101fefba8fe68fe28710d189b19c2d3fa9c 100644
+--- a/toolkit/components/cleardata/moz.build
++++ b/toolkit/components/cleardata/moz.build
+@@ -15,7 +15,6 @@ XPIDL_MODULE = "toolkit_cleardata"
+ 
+ EXTRA_JS_MODULES += [
+     "ClearBySiteEntry.sys.mjs",
+-    "ClearDataService.sys.mjs",
+     "PrincipalsCollector.sys.mjs",
+     "ServiceWorkerCleanUp.sys.mjs",
+ ]
+@@ -36,3 +35,5 @@ with Files("**"):
+     BUG_COMPONENT = ("Toolkit", "Data Sanitization")
+ 
+ FINAL_LIBRARY = "xul"
++
++EXTRA_PP_JS_MODULES += ["ClearDataService.sys.mjs"]
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+index 399beff97fdd6500d4391484e138fb8302198bd7..7c9200e5ac64ab0dbc143b9adf964a20f492088f 100644
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -38,7 +38,6 @@ component_dirs = [
+     "contextualidentity",
+     "crashes",
+     "crashmonitor",
+-    "credentialmanagement",
+     "dap",
+     "doh",
+     "downloads",
+@@ -221,3 +220,6 @@ if CONFIG["NIGHTLY_BUILD"]:
+ UNIFIED_SOURCES += [
+     "/toolkit/components/antitracking/ContentBlockingAllowList.cpp",
+ ]
++
++if CONFIG["MOZ_WEB_IDENTITY"]:
++    DIRS += ["credentialmanagement"]
+diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
+--- a/toolkit/modules/AppConstants.sys.mjs
++++ b/toolkit/modules/AppConstants.sys.mjs
+@@ -225,6 +225,34 @@
+   true,
+ #else
+   false,
++#endif
++
++  MOZ_WEB_DEVICE_APIS:
++#ifdef MOZ_WEB_DEVICE_APIS
++    true,
++#else
++    false,
++#endif
++
++  MOZ_WEB_IDENTITY:
++#ifdef MOZ_WEB_IDENTITY
++    true,
++#else
++    false,
++#endif
++
++  MOZ_WEB_PAYMENTS:
++#ifdef MOZ_WEB_PAYMENTS
++    true,
++#else
++    false,
++#endif
++
++  MOZ_WEBXR:
++#ifdef MOZ_WEBXR
++    true,
++#else
++    false,
+ #endif
+ 
+   MOZ_WEB_PUSH:
+diff --git a/toolkit/moz.configure b/toolkit/moz.configure
+--- a/toolkit/moz.configure
++++ b/toolkit/moz.configure
+@@ -324,6 +324,70 @@
+ 
+ set_config("MOZ_EME_API", eme_api)
+ set_define("MOZ_EME_API", True, when=eme_api)
++
++
++option(
++    "--enable-web-device-apis",
++    default=True,
++    help="{Enable|Disable} Web MIDI and Web Serial",
++)
++
++
++@depends("--enable-web-device-apis")
++def web_device_apis(value):
++    return bool(value)
++
++
++set_config("MOZ_WEB_DEVICE_APIS", web_device_apis)
++set_define("MOZ_WEB_DEVICE_APIS", True, when=web_device_apis)
++
++
++option(
++    "--enable-web-identity",
++    default=True,
++    help="{Enable|Disable} federated identity and digital credentials",
++)
++
++
++@depends("--enable-web-identity")
++def web_identity(value):
++    return bool(value)
++
++
++set_config("MOZ_WEB_IDENTITY", web_identity)
++set_define("MOZ_WEB_IDENTITY", True, when=web_identity)
++
++
++option(
++    "--enable-web-payments",
++    default=True,
++    help="{Enable|Disable} the Payment Request runtime",
++)
++
++
++@depends("--enable-web-payments")
++def web_payments(value):
++    return bool(value)
++
++
++set_config("MOZ_WEB_PAYMENTS", web_payments)
++set_define("MOZ_WEB_PAYMENTS", True, when=web_payments)
++
++
++option(
++    "--enable-webxr",
++    default=True,
++    help="{Enable|Disable} WebXR and VR device runtimes",
++)
++
++
++@depends("--enable-webxr")
++def webxr(value):
++    return bool(value)
++
++
++set_config("MOZ_WEBXR", webxr)
++set_define("MOZ_WEBXR", True, when=webxr)
+ 
+ 
+ option(
+@@ -550,16 +614,16 @@
+ 
+ # midir-based Web MIDI support
+ # ==============================================================
+-@depends(target)
+-def midir_linux_support(target):
++@depends(target, web_device_apis)
++def midir_linux_support(target, web_device_apis):
+     return (
+-        target.kernel == "Linux" and target.os != "Android" and target.cpu != "riscv64"
+-    )
+-
+-
+-@depends(target, midir_linux_support)
+-def midir_support(target, midir_linux_support):
+-    if target.os in ("WINNT", "OSX") or midir_linux_support:
++        web_device_apis and target.kernel == "Linux" and target.os != "Android" and target.cpu != "riscv64"
++    )
++
++
++@depends(target, midir_linux_support, web_device_apis)
++def midir_support(target, midir_linux_support, web_device_apis):
++    if web_device_apis and (target.os in ("WINNT", "OSX") or midir_linux_support):
+         return True
+ 
+ 
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+index b823c8b9a93be4054db11b4612014b5830a5de42..7976ea616448589647923cb8e0fbb34a349f558e 100644
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -4382,9 +4382,11 @@ int XREMain::XRE_mainInit(bool* aExitFlag,
+     MOZ_ASSERT(ChaosMode::isActive(ChaosFeature::Any));
+   }
+ 
++#ifdef MOZ_WEBXR
+   if (CheckArgExists("fxr")) {
+     gFxREmbedded = true;
+   }
++#endif
+ 
+   if (ChaosMode::isActive(ChaosFeature::Any)) {
+     printf_stderr(
+diff --git a/toolkit/xre/nsEmbedFunctions.cpp b/toolkit/xre/nsEmbedFunctions.cpp
+index 8fd787a0b331a14b0b2336444b959f9527d83b8d..fea0e79e7248e0212ac2d4dbe14e28fd373610a9 100644
+--- a/toolkit/xre/nsEmbedFunctions.cpp
++++ b/toolkit/xre/nsEmbedFunctions.cpp
+@@ -122,8 +122,10 @@
+ #if defined(MOZ_X11)
+ #  include <X11/Xlib.h>
+ #endif
++#ifdef MOZ_WEBXR
+ 
+ #include "VRProcessChild.h"
++#endif
+ #include "nsTraceRefcnt.h"
+ 
+ using namespace mozilla;
+@@ -532,11 +534,12 @@ nsresult XRE_InitChildProcess(int aArgc, char* aArgv[],
+               std::move(*clientChannel), *parentPID, messageChannelId);
+           break;
+ 
++#ifdef MOZ_WEBXR
+         case GeckoProcessType_VR:
+           process = MakeUnique<gfx::VRProcessChild>(
+               std::move(*clientChannel), *parentPID, messageChannelId);
+           break;
+-
++#endif
+         case GeckoProcessType_RDD:
+           process = MakeUnique<RDDProcessImpl>(std::move(*clientChannel),
+                                                *parentPID, messageChannelId);
+diff --git a/tools/fuzzing/ipc/IPCFuzzController.cpp b/tools/fuzzing/ipc/IPCFuzzController.cpp
+index f9fae8e397fa45249c0125ffd4b59a616de13383..6c26c3d0cff4a30beb373dc01734da49183db613 100644
+--- a/tools/fuzzing/ipc/IPCFuzzController.cpp
++++ b/tools/fuzzing/ipc/IPCFuzzController.cpp
+@@ -73,7 +73,9 @@ IPCFuzzController::IPCFuzzController()
+   portNameToIndex["PImageBridge"] = 4;
+   portNameToIndex["PProcessHangMonitor"] = 5;
+   portNameToIndex["PProfiler"] = 6;
++#ifdef MOZ_WEBXR
+   portNameToIndex["PVRManager"] = 7;
++#endif
+   portNameToIndex["PCanvasManager"] = 8;
+   portNameToIndex["PRemoteLazyInputStream"] = 9;
+   portNameToIndex["PRemoteWorkerService"] = 10;
+diff --git a/widget/android/moz.build b/widget/android/moz.build
+index ad23c3c2525d0969434f613e381be8498e549a5f..a7c13635c25995e9f5fb6d704810e037e30d419c 100644
+--- a/widget/android/moz.build
++++ b/widget/android/moz.build
+@@ -62,7 +62,6 @@ classes_with_WrapForJNI += [
+     "GeckoSystemStateListener",
+     "GeckoThread",
+     "GeckoViewInputStream",
+-    "GeckoVRManager",
+     "GeckoVideoInfo",
+     "HardwareCodecCapabilityUtils",
+     "Image",
+@@ -87,6 +86,9 @@ classes_with_WrapForJNI += [
+     "XPCOMEventTarget",
+ ]
+ 
++if CONFIG["MOZ_WEBXR"]:
++    classes_with_WrapForJNI += ["GeckoVRManager"]
++
+ if not CONFIG["MOZ_NAVIS_ANDROID_RUNTIME"]:
+     classes_with_WrapForJNI += [
+         "GeckoRuntime",
+diff --git a/widget/android/nsAppShell.cpp b/widget/android/nsAppShell.cpp
+index bed4fc2179bde9137cdd2d2dd79f5056476d9f3c..63691e52e1a2b7561b227fe69368a29e1d627d35 100644
+--- a/widget/android/nsAppShell.cpp
++++ b/widget/android/nsAppShell.cpp
+@@ -72,7 +72,9 @@
+ #include "GeckoNetworkManager.h"
+ #include "GeckoProcessManager.h"
+ #include "GeckoSystemStateListener.h"
++#ifdef MOZ_WEBXR
+ #include "GeckoVRManager.h"
++#endif
+ #include "ImageDecoderSupport.h"
+ #include "JavaBuiltins.h"
+ #include "ScreenHelperAndroid.h"
+diff --git a/widget/gtk/GfxInfo.cpp b/widget/gtk/GfxInfo.cpp
+index dd98bc7e64e4d190da3969476f20f51c316d83c7..822f5808c880c1d47c743ed0b469e214f7c439fe 100644
+--- a/widget/gtk/GfxInfo.cpp
++++ b/widget/gtk/GfxInfo.cpp
+@@ -17,7 +17,9 @@
+ #include "mozilla/gfx/Logging.h"
+ #include "mozilla/SSE.h"
+ #include "mozilla/glean/GfxMetrics.h"
++#ifdef MOZ_WEBXR
+ #include "mozilla/XREAppData.h"
++#endif
+ #include "mozilla/ScopeExit.h"
+ #include "mozilla/GUniquePtr.h"
+ #include "mozilla/StaticPrefs_media.h"
+diff --git a/widget/nsIWidget.cpp b/widget/nsIWidget.cpp
+index 74fa56fa7c03f7ae034e4bced79ee04ff8698386..02caf427a4716329c75f0b3e756051d3ec274d21 100644
+--- a/widget/nsIWidget.cpp
++++ b/widget/nsIWidget.cpp
+@@ -81,7 +81,9 @@
+ #include "gfxConfig.h"
+ #include "gfxUtils.h"  // for ToDeviceColor
+ #include "mozilla/layers/CompositorSession.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "gfxConfig.h"
+ 
+ static mozilla::LazyLogModule sBaseWidgetLog("BaseWidget");
+@@ -1600,7 +1602,9 @@ void nsIWidget::CreateCompositor(int aWidth, int aHeight) {
+   MOZ_ASSERT(textureFactoryIdentifier.mParentBackend ==
+              LayersBackend::LAYERS_WR);
+   ImageBridgeChild::IdentifyCompositorTextureHost(textureFactoryIdentifier);
++#ifdef MOZ_WEBXR
+   gfx::VRManagerChild::IdentifyTextureHost(textureFactoryIdentifier);
++#endif
+ 
+   WindowUsesOMTC();
+ 
+diff --git a/widget/nsIWidget.h b/widget/nsIWidget.h
+index 8c7e64041c03286af66e2e7bbc373062ca23af36..7354c06bd26e6c054489ca7e76406446938fd39e 100644
+--- a/widget/nsIWidget.h
++++ b/widget/nsIWidget.h
+@@ -2311,9 +2311,11 @@ class nsIWidget : public nsSupportsWeakReference {
+       const nsTArray<mozilla::FontRange>& aFontRangeArray,
+       const bool aIsVertical, const LayoutDeviceIntPoint& aPoint) {}
+ 
++#ifdef MOZ_WEBXR
+   virtual void RequestFxrOutput() {
+     MOZ_ASSERT(false, "This function should only execute in Windows");
+   }
++#endif
+ 
+   /**
+    * NotifyCompositorScrollUpdate notify widget about an update to the
+diff --git a/widget/windows/CompositorWidgetParent.cpp b/widget/windows/CompositorWidgetParent.cpp
+index 17fe2a6e440cae9fd3e2c07fb37a6ca1ceb08acf..fa5917e96c2a474b324de570b8b2ad70470f54b8 100644
+--- a/widget/windows/CompositorWidgetParent.cpp
++++ b/widget/windows/CompositorWidgetParent.cpp
+@@ -14,7 +14,9 @@
+ #include "nsWindow.h"
+ #include "VsyncDispatcher.h"
+ #include "WinCompositorWindowThread.h"
++#ifdef MOZ_WEBXR
+ #include "VRShMem.h"
++#endif
+ #include "RemoteBackbuffer.h"
+ 
+ #include <ddraw.h>
+diff --git a/widget/windows/OSKVRManager.cpp b/widget/windows/OSKVRManager.cpp
+index d5d2ed09b74efafc98860be1bc768b41d1819b86..709c4466d2972710d65340e44a384360909f7f4c 100644
+--- a/widget/windows/OSKVRManager.cpp
++++ b/widget/windows/OSKVRManager.cpp
+@@ -5,7 +5,9 @@
+ #include "OSKVRManager.h"
+ 
+ #include "FxRWindowManager.h"
++#ifdef MOZ_WEBXR
+ #include "VRShMem.h"
++#endif
+ #include "moz_external_vr.h"
+ 
+ namespace mozilla {
+diff --git a/widget/windows/WinCompositorWidget.cpp b/widget/windows/WinCompositorWidget.cpp
+index 2ca8fbd0ad74e0a9ffe22d0f47f78828287db742..91ba99fa0f020acdd44dce695d3da3289c91e65b 100644
+--- a/widget/windows/WinCompositorWidget.cpp
++++ b/widget/windows/WinCompositorWidget.cpp
+@@ -14,7 +14,9 @@
+ #include "nsWindow.h"
+ #include "VsyncDispatcher.h"
+ #include "WinCompositorWindowThread.h"
++#ifdef MOZ_WEBXR
+ #include "VRShMem.h"
++#endif
+ 
+ #include <ddraw.h>
+ 
+@@ -93,6 +95,7 @@ void WinCompositorWidget::UpdateCompositorWndSizeIfNecessary() {
+   mLastCompositorWndSize = size;
+ }
+ 
++#ifdef MOZ_WEBXR
+ // Creates a new instance of FxROutputHandler so that this compositor widget
+ // can send its output to Firefox Reality for Desktop.
+ void WinCompositorWidget::RequestFxrOutput() {
+@@ -100,6 +103,7 @@ void WinCompositorWidget::RequestFxrOutput() {
+ 
+   mFxrHandler.reset(new FxROutputHandler());
+ }
++#endif
+ 
+ }  // namespace widget
+ }  // namespace mozilla
+diff --git a/widget/windows/WinCompositorWidget.h b/widget/windows/WinCompositorWidget.h
+index 55b9cb149d22943d73fe7dce0282b2bbcc441789..e33021cf68a7227afc82098725f86a31714ef696 100644
+--- a/widget/windows/WinCompositorWidget.h
++++ b/widget/windows/WinCompositorWidget.h
+@@ -12,7 +12,9 @@
+ #include "mozilla/layers/LayersTypes.h"
+ #include "mozilla/Mutex.h"
+ #include "mozilla/widget/WinCompositorWindowThread.h"
++#ifdef MOZ_WEBXR
+ #include "FxROutputHandler.h"
++#endif
+ #include "nsIWidget.h"
+ 
+ class nsWindow;
+@@ -68,9 +70,15 @@ class WinCompositorWidget : public CompositorWidget {
+   void DestroyCompositorWindow();
+   void UpdateCompositorWndSizeIfNecessary();
+ 
++#ifdef MOZ_WEBXR
+   void RequestFxrOutput();
++#endif
++#ifdef MOZ_WEBXR
+   bool HasFxrOutputHandler() const { return !!mFxrHandler; }
++#endif
++#ifdef MOZ_WEBXR
+   FxROutputHandler* GetFxrOutputHandler() const { return mFxrHandler.get(); }
++#endif
+ 
+   virtual bool GetWindowIsFullyOccluded() const = 0;
+ 
+@@ -96,7 +104,9 @@ class WinCompositorWidget : public CompositorWidget {
+   WinCompositorWnds mCompositorWnds;
+   LayoutDeviceIntSize mLastCompositorWndSize;
+ 
++#ifdef MOZ_WEBXR
+   UniquePtr<FxROutputHandler> mFxrHandler;
++#endif
+ };
+ 
+ }  // namespace mozilla::widget
+diff --git a/widget/windows/WinIMEHandler.cpp b/widget/windows/WinIMEHandler.cpp
+index 80df55312a93313fbf1150889f0389e9befcfac5..db4cf624cad7ec1f2d68170738f1504fdc984927 100644
+--- a/widget/windows/WinIMEHandler.cpp
++++ b/widget/windows/WinIMEHandler.cpp
+@@ -32,9 +32,13 @@
+ #include "powrprof.h"
+ #include "setupapi.h"
+ #include "cfgmgr32.h"
++#ifdef MOZ_WEBXR
+ 
+ #include "FxRWindowManager.h"
++#endif
++#ifdef MOZ_WEBXR
+ #include "moz_external_vr.h"
++#endif
+ 
+ const char* kOskEnabled = "ui.osk.enabled";
+ const char* kOskDetectPhysicalKeyboard = "ui.osk.detect_physical_keyboard";
+@@ -704,9 +708,12 @@ bool IMEHandler::NeedsSearchInputScope() {
+ // static
+ bool IMEHandler::IsOnScreenKeyboardSupported() {
+ #ifdef NIGHTLY_BUILD
++#ifdef MOZ_WEBXR
+   if (FxRWindowManager::GetInstance()->IsFxRWindow(sFocusedWindow)) {
+     return true;
+   }
++#endif
++
+ #endif  // NIGHTLY_BUILD
+   if (!Preferences::GetBool(kOskEnabled, true) ||
+       !IMEHandler::NeedOnScreenKeyboard()) {
+@@ -742,9 +749,12 @@ void IMEHandler::MaybeShowOnScreenKeyboard(nsWindow* aWindow,
+ // static
+ void IMEHandler::MaybeDismissOnScreenKeyboard(nsWindow* aWindow, Sync aSync) {
+ #ifdef NIGHTLY_BUILD
++#ifdef MOZ_WEBXR
+   if (FxRWindowManager::GetInstance()->IsFxRWindow(aWindow)) {
+     OSKVRManager::DismissOnScreenKeyboard();
+   }
++#endif
++
+ #endif  // NIGHTLY_BUILD
+   if (aSync == Sync::Yes) {
+     DismissOnScreenKeyboard(aWindow);
+@@ -973,10 +983,13 @@ bool IMEHandler::AutoInvokeOnScreenKeyboardInDesktopMode() {
+ // static
+ void IMEHandler::ShowOnScreenKeyboard(nsWindow* aWindow) {
+ #ifdef NIGHTLY_BUILD
++#ifdef MOZ_WEBXR
+   if (FxRWindowManager::GetInstance()->IsFxRWindow(sFocusedWindow)) {
+     OSKVRManager::ShowOnScreenKeyboard();
+     return;
+   }
++#endif
++
+ #endif  // NIGHTLY_BUILD
+ 
+   if (IsWin10AnniversaryUpdateOrLater()) {
+diff --git a/widget/windows/moz.build b/widget/windows/moz.build
+index 5f1beec8192086162c542218ee290e728543c82a..ff73a1f52be7f9362d9a92cac3ef230261716863 100644
+--- a/widget/windows/moz.build
++++ b/widget/windows/moz.build
+@@ -98,7 +98,6 @@ UNIFIED_SOURCES += [
+     "nsWindowTaskbarConcealer.cpp",
+     "nsWinGesture.cpp",
+     "OSKTabTipManager.cpp",
+-    "OSKVRManager.cpp",
+     "RemoteBackbuffer.cpp",
+     "ScreenHelperWin.cpp",
+     "SystemStatusBar.cpp",
+@@ -123,7 +122,6 @@ UNIFIED_SOURCES += [
+     "WinTaskbar.cpp",
+     "WinTextEventDispatcherListener.cpp",
+     "WinUtils.cpp",
+-    "WinWindowOcclusionTracker.cpp",
+ ]
+ 
+ # The following files cannot be built in unified mode because of name clashes.
+@@ -139,6 +137,7 @@ SOURCES += [
+     "WinCompositorWidget.cpp",
+     "WindowsSMTCProvider.cpp",
+     "WindowsUIUtils.cpp",
++    "WinWindowOcclusionTracker.cpp",
+ ]
+ 
+ # Needs INITGUID and we don't allow INITGUID in unified sources since bug 970429.
+@@ -245,3 +244,6 @@ if CONFIG["MOZ_WINDOWSAPPSDK_DIR"]:
+             "Microsoft.WindowsAppRuntime.Insights.Resource.dll",
+         )
+     ]
++
++if CONFIG["MOZ_WEBXR"]:
++    UNIFIED_SOURCES += ["OSKVRManager.cpp"]
+diff --git a/widget/windows/nsWindow.h b/widget/windows/nsWindow.h
+index c33787698f041a4e54666f98914a56b6a814b6b5..7ea4229d49aef34816ec5c0d7a9b13b64882d490 100644
+--- a/widget/windows/nsWindow.h
++++ b/widget/windows/nsWindow.h
+@@ -666,7 +666,9 @@ class nsWindow final : public nsIWidget {
+ 
+   void CreateCompositor() override;
+   void DestroyCompositor() override;
++#ifdef MOZ_WEBXR
+   void RequestFxrOutput() override;
++#endif
+ 
+   void RecreateDirectManipulationIfNeeded();
+   void ResizeDirectManipulationViewport();
+@@ -899,7 +901,9 @@ class nsWindow final : public nsIWidget {
+ 
+   // When true, used to indicate an async call to RequestFxrOutput to the GPU
+   // process after the Compositor is created
++#ifdef MOZ_WEBXR
+   bool mRequestFxrOutputPending = false;
++#endif
+ 
+   // A stack based class used in DispatchMouseEvent() to tell whether we should
+   // NOT open context menu when we receives WM_CONTEXTMENU after the
+diff --git a/widget/windows/nsWindowGfx.cpp b/widget/windows/nsWindowGfx.cpp
+index 9b4a93acd0042688b7528412d4248de7a619f94b..0cd697f42453d42d3333a31abc6919efa76e6853 100644
+--- a/widget/windows/nsWindowGfx.cpp
++++ b/widget/windows/nsWindowGfx.cpp
+@@ -385,9 +385,11 @@ void nsWindow::CreateCompositor() {
+ 
+   MaybeEnableWindowOcclusion(/* aEnable */ true);
+ 
++#ifdef MOZ_WEBXR
+   if (mRequestFxrOutputPending) {
+     GetRemoteRenderer()->SendRequestFxrOutput();
+   }
++#endif
+ }
+ 
+ void nsWindow::DestroyCompositor() {
+@@ -396,6 +398,7 @@ void nsWindow::DestroyCompositor() {
+   nsIWidget::DestroyCompositor();
+ }
+ 
++#ifdef MOZ_WEBXR
+ void nsWindow::RequestFxrOutput() {
+   if (GetRemoteRenderer() != nullptr) {
+     MOZ_CRASH("RequestFxrOutput should happen before Compositor is created.");
+@@ -405,6 +408,7 @@ void nsWindow::RequestFxrOutput() {
+     mRequestFxrOutputPending = true;
+   }
+ }
++#endif
+ 
+ LayoutDeviceIntSize nsWindowGfx::GetIconMetrics(IconSizeType aSizeType) {
+   int32_t width = ::GetSystemMetrics(sIconMetrics[aSizeType].xMetric);
+diff --git a/xpcom/base/nsMemoryReporterManager.cpp b/xpcom/base/nsMemoryReporterManager.cpp
+index 8d1120d0fb7c4a2d9ceea94582f16eecade737b9..1682d07704594847b6cfb45ca3ebe9a253a52074 100644
+--- a/xpcom/base/nsMemoryReporterManager.cpp
++++ b/xpcom/base/nsMemoryReporterManager.cpp
+@@ -24,7 +24,9 @@
+ #endif
+ #include "nsNetCID.h"
+ #include "nsThread.h"
++#ifdef MOZ_WEBXR
+ #include "VRProcessManager.h"
++#endif
+ #include "mozilla/MemoryReportingProcess.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/StaticPrefs_memory.h"
+@@ -1937,11 +1939,13 @@ nsresult nsMemoryReporterManager::StartGettingReports() {
+     }
+   }
+ 
++#ifdef MOZ_WEBXR
+   if (gfx::VRProcessManager* vr = gfx::VRProcessManager::Get()) {
+     if (RefPtr<MemoryReportingProcess> proc = vr->GetProcessMemoryReporter()) {
+       s->mChildrenPending.AppendElement(proc.forget());
+     }
+   }
++#endif
+ 
+   if (!IsRegistrationBlocked() && net::gIOService) {
+     if (RefPtr<MemoryReportingProcess> proc =
+diff --git a/xpcom/threads/MainThreadIdlePeriod.cpp b/xpcom/threads/MainThreadIdlePeriod.cpp
+index 75d2dc06f5b5c59c11874b48f71cd3f9cb7ed90e..4b88817377dd8a062dbd6ea76c6e970a3c7ba5a2 100644
+--- a/xpcom/threads/MainThreadIdlePeriod.cpp
++++ b/xpcom/threads/MainThreadIdlePeriod.cpp
+@@ -7,7 +7,9 @@
+ #include "mozilla/Preferences.h"
+ #include "mozilla/StaticPrefs_idle_period.h"
+ #include "mozilla/dom/Document.h"
++#ifdef MOZ_WEBXR
+ #include "VRManagerChild.h"
++#endif
+ #include "nsRefreshDriver.h"
+ #include "nsThreadUtils.h"
+ 
+@@ -37,9 +39,11 @@ MainThreadIdlePeriod::GetIdlePeriodHint(TimeStamp* aIdleDeadline) {
+ 
+   currentGuess = nsRefreshDriver::GetIdleDeadlineHint(
+       currentGuess, nsRefreshDriver::IdleCheck::AllVsyncListeners);
++#ifdef MOZ_WEBXR
+   if (XRE_IsContentProcess()) {
+     currentGuess = gfx::VRManagerChild::GetIdleDeadlineHint(currentGuess);
+   }
++#endif
+   currentGuess = NS_GetTimerDeadlineHintOnCurrentThread(currentGuess,
+                                                         kMaxTimerThreadBound);
+ 
+diff --git a/devtools/shared/loader/base-loader.sys.mjs b/devtools/shared/loader/base-loader.sys.mjs
+--- a/devtools/shared/loader/base-loader.sys.mjs
++++ b/devtools/shared/loader/base-loader.sys.mjs
+@@ -9,6 +9,7 @@
+   "nsIPrincipal"
+ )();
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+ 
+ const lazy = {};
+@@ -136,8 +137,7 @@
+       "Headers",
+       "InspectorCSSParser",
+       "InspectorUtils",
+-      "MIDIInputMap",
+-      "MIDIOutputMap",
++      ...(AppConstants.MOZ_WEB_DEVICE_APIS ? ["MIDIInputMap", "MIDIOutputMap"] : []),
+       "Node",
+       "TextDecoder",
+       "TextEncoder",

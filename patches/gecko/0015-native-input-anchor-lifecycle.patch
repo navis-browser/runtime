@@ -112,7 +112,7 @@ index 3537a9da11f8854d77e2669783e1e41e11f55c03..b4e7f1f97e1a7a7d44ba8c5f04614b8f
          break;
      }
 diff --git a/toolkit/actors/SelectChild.sys.mjs b/toolkit/actors/SelectChild.sys.mjs
-index f83f89ad8f5c40b0cae68eb398e5591c03820b80..17049bbd820251b3cec7a06b85b2b8ddf113aee8 100644
+index 5d026bcd546d8255b02c8274336a8883e925cf38..96b19b21e49c21a4f53896f31984d6c13fee46e6 100644
 --- a/toolkit/actors/SelectChild.sys.mjs
 +++ b/toolkit/actors/SelectChild.sys.mjs
 @@ -46,6 +46,7 @@ export var SelectContentHelper = function (aElement, aOptions, aActor) {
@@ -182,7 +182,7 @@ index f83f89ad8f5c40b0cae68eb398e5591c03820b80..17049bbd820251b3cec7a06b85b2b8dd
      let computedStyles = getComputedStyles(this.element);
      let options = this._buildOptionList();
      let defaultStyles = this.element.documentGlobal.getDefaultComputedStyle(
-@@ -329,6 +352,23 @@ SelectContentHelper.prototype = {
+@@ -335,6 +358,23 @@ SelectContentHelper.prototype = {
            this.uninit();
          }
          break;
@@ -207,7 +207,7 @@ index f83f89ad8f5c40b0cae68eb398e5591c03820b80..17049bbd820251b3cec7a06b85b2b8dd
          if (
            this.element === event.target &&
 diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
-index 9d11df1895980cbc70c6eae6564537965777a848..932acbcb2be848a9384dbe54cfb719f588aedb88 100644
+index 7c1b11fa21031392062f6f118e481a1da37e70c2..b54128fd06f5ccd7d2efb8a82464c13fbc0c76ab 100644
 --- a/widget/gtk/nsWindow.cpp
 +++ b/widget/gtk/nsWindow.cpp
 @@ -3207,6 +3207,15 @@ void nsWindow::OnContainerFocusInEvent(GdkEventFocus* aEvent) {

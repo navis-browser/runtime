@@ -1,0 +1,192 @@
+diff --git a/dom/ipc/BrowserParent.cpp b/dom/ipc/BrowserParent.cpp
+index 02c5a863a4c1ab408e870fa4d54e537d25c7c158..e8255dce00d17a82fccc7d1b175c64ec50596503 100644
+--- a/dom/ipc/BrowserParent.cpp
++++ b/dom/ipc/BrowserParent.cpp
+@@ -94,6 +94,10 @@
+ #include "nsIXULBrowserWindow.h"
+ #include "nsImportModule.h"
+ #include "nsLayoutUtils.h"
++#ifdef MOZ_DESKTOP_EMBEDDER
++#  include "nsMenuPopupFrame.h"
++#  include "nsXULPopupManager.h"
++#endif
+ #include "nsNetUtil.h"
+ #include "nsQueryActor.h"
+ #include "nsSHistory.h"
+@@ -1540,11 +1544,98 @@ void BrowserParent::MouseEnterIntoWidget() {
+   mIsMouseEnterIntoWidgetEventSuppressed = true;
+ }
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++uint64_t BrowserParent::sContextMenuMouseEventId = 0;
++
++static bool HasContextMenuForBrowser(BrowserParent& aBrowser) {
++  Element* owner = aBrowser.GetBrowsingContext()->Top()->GetEmbedderElement();
++  nsXULPopupManager* manager = nsXULPopupManager::GetInstance();
++  nsIFrame* popup = manager ? manager->GetTopPopup(PopupType::Menu) : nullptr;
++  return owner && popup &&
++         static_cast<nsMenuPopupFrame*>(popup)->IsContextMenu() &&
++         popup->GetContent()->OwnerDoc() == owner->OwnerDoc();
++}
++
++/* static */
++void BrowserParent::FlushContextMenuMouseExits(Document& aChromeDocument) {
++  if (!sLayerToBrowserParentTable) {
++    return;
++  }
++  AutoTArray<RefPtr<BrowserParent>, 4> pending;
++  RefPtr<BrowserParent> latest;
++  for (auto iter = sLayerToBrowserParentTable->Iter(); !iter.Done(); iter.Next()) {
++    RefPtr<BrowserParent> browser = do_QueryReferent(iter.Data());
++    if (!browser || (!browser->mContextMenuMouseExit &&
++                     !browser->mContextMenuMouseMove)) {
++      continue;
++    }
++    Element* owner = browser->GetBrowsingContext()->Top()->GetEmbedderElement();
++    if (owner && owner->OwnerDoc() == &aChromeDocument &&
++        !HasContextMenuForBrowser(*browser)) {
++      pending.AppendElement(browser);
++      if (!latest || browser->mContextMenuMouseEventId >
++                         latest->mContextMenuMouseEventId) {
++        latest = browser;
++      }
++    }
++  }
++  // Clear every frozen frame before resuming the last real pointer target.
++  // A root PresShell synthetic hit test alone cannot recover a precise APZ
++  // target inside an out-of-process iframe. Keep only the latest real event,
++  // not a history of moves through other frames under the open menu.
++  auto move = latest ? std::move(latest->mContextMenuMouseMove) : nullptr;
++  for (const auto& browser : pending) {
++    browser->mContextMenuMouseMove = nullptr;
++    browser->mContextMenuMouseEventId = 0;
++    if (auto event = std::move(browser->mContextMenuMouseExit)) {
++      browser->SendRealMouseEvent(*event);
++    }
++  }
++  if (move) {
++    if (move->mMessage == eMouseMove) {
++      latest->MouseEnterIntoWidget();
++    }
++    latest->SendRealMouseEvent(*move);
++  }
++}
++#endif
++
+ void BrowserParent::SendRealMouseEvent(WidgetMouseEvent& aMouseOrPointerEvent) {
+   if (mIsDestroyed) {
+     return;
+   }
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++  // A context menu owns pointer navigation even outside its popup widget.
++  // Keep content hover frozen, while allowing the parent's remote-target
++  // routing to leave this actor (including moves into another chrome window).
++  if (HasContextMenuForBrowser(*this)) {
++    if (aMouseOrPointerEvent.mMessage == eMouseExitFromWidget) {
++      mContextMenuMouseExit =
++          MakeUnique<WidgetMouseEvent>(aMouseOrPointerEvent);
++      if (aMouseOrPointerEvent.mReason == WidgetMouseEvent::eReal) {
++        mContextMenuMouseMove = nullptr;
++        mContextMenuMouseEventId = ++sContextMenuMouseEventId;
++        UnsetLastMouseRemoteTarget(this);
++      }
++      return;
++    }
++    if (aMouseOrPointerEvent.mMessage == eMouseMove ||
++        aMouseOrPointerEvent.mMessage == eMouseEnterIntoWidget) {
++      if (aMouseOrPointerEvent.mReason == WidgetMouseEvent::eReal) {
++        mContextMenuMouseMove =
++            MakeUnique<WidgetMouseEvent>(aMouseOrPointerEvent);
++        mContextMenuMouseEventId = ++sContextMenuMouseEventId;
++      }
++      return;
++    }
++  } else {
++    mContextMenuMouseExit = nullptr;
++    mContextMenuMouseMove = nullptr;
++    mContextMenuMouseEventId = 0;
++  }
++#endif
++
+   // XXXedgar, if the synthesized mouse events could deliver to the correct
+   // process directly (see
+   // https://bugzilla.mozilla.org/show_bug.cgi?id=1549355), we probably don't
+diff --git a/dom/ipc/BrowserParent.h b/dom/ipc/BrowserParent.h
+index b95ab6d6d271411f4260971dd70969801b525ad8..27fd782b7893aa9fa6bd134a33ef35c3cf692b54 100644
+--- a/dom/ipc/BrowserParent.h
++++ b/dom/ipc/BrowserParent.h
+@@ -65,6 +65,7 @@ namespace dom {
+ 
+ class CanonicalBrowsingContext;
+ class ContentParent;
++class Document;
+ class Element;
+ class DataTransfer;
+ class BrowserHost;
+@@ -118,6 +119,11 @@ class BrowserParent final : public PBrowserParent,
+ 
+   static BrowserParent* GetLastMouseRemoteTarget();
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++  // Release exits held while a context menu in this chrome document was open.
++  static void FlushContextMenuMouseExits(Document& aChromeDocument);
++#endif
++
+   static BrowserParent* GetFrom(nsFrameLoader* aFrameLoader);
+ 
+   static BrowserParent* GetFrom(PBrowserParent* aBrowserParent);
+@@ -1026,6 +1032,13 @@ class BrowserParent final : public PBrowserParent,
+   // time we fire a mouse event and the BrowserChild is ready.
+   bool mIsMouseEnterIntoWidgetEventSuppressed : 1;
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++  static uint64_t sContextMenuMouseEventId;
++  UniquePtr<WidgetMouseEvent> mContextMenuMouseExit;
++  UniquePtr<WidgetMouseEvent> mContextMenuMouseMove;
++  uint64_t mContextMenuMouseEventId = 0;
++#endif
++
+   // True after RecvLockNativePointer has been called and until
+   // UnlockNativePointer has been called.
+   bool mLockedNativePointer : 1;
+diff --git a/layout/xul/nsMenuPopupFrame.cpp b/layout/xul/nsMenuPopupFrame.cpp
+index 6293a170d379e05b1fa55248507bbae561f01d71..ba4c7d986e35f17e3ef128c5fa30d6de9d8db4bf 100644
+--- a/layout/xul/nsMenuPopupFrame.cpp
++++ b/layout/xul/nsMenuPopupFrame.cpp
+@@ -23,6 +23,9 @@
+ #include "mozilla/PresShell.h"
+ #include "mozilla/ReflowInput.h"
+ #include "mozilla/ScrollContainerFrame.h"
++#ifdef MOZ_DESKTOP_EMBEDDER
++#  include "mozilla/ScopeExit.h"
++#endif
+ #include "mozilla/Services.h"
+ #include "mozilla/dom/BrowserParent.h"
+ #include "mozilla/dom/Document.h"
+@@ -1078,6 +1081,25 @@ void nsMenuPopupFrame::HidePopup(bool aDeselectMenu, nsPopupState aNewState,
+   NS_ASSERTION(aNewState == ePopupClosed || aNewState == ePopupInvisible,
+                "popup being set to unexpected state");
+ 
++#ifdef MOZ_DESKTOP_EMBEDDER
++  // Invisible menus still own the pending command. Release page hover only
++  // after actual closure, including the invisible-to-closed fast path below.
++  RefPtr<Document> contextMenuDocument =
++      aNewState == ePopupClosed && mIsContextMenu && !aFromFrameDestruction
++          ? mContent->OwnerDoc()
++          : nullptr;
++  auto releasePageHover = MakeScopeExit([&] {
++    if (contextMenuDocument) {
++      dom::BrowserParent::FlushContextMenuMouseExits(*contextMenuDocument);
++      // Re-hit-test the current pointer after releasing the frozen exits.
++      // The pointer may have returned to content while this menu was open.
++      if (mozilla::PresShell* shell = contextMenuDocument->GetPresShell()) {
++        shell->SynthesizeMouseMove(false);
++      }
++    }
++  });
++#endif
++
+   ClearPopupShownDispatcher();
+ 
+   // don't hide the popup when it isn't open

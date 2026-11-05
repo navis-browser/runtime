@@ -1,5 +1,5 @@
 diff --git a/mobile/android/app/geckoview-prefs.js b/mobile/android/app/geckoview-prefs.js
-index 2f5b02eed2ff1ae6c10b79a1b797458a60684717..7e298f9555b31fbfbc1af81921fdf314c32af844 100644
+index 2f5b02eed2ff1ae6c10b79a1b797458a60684717..b166eb5f00cd1c6879b0f8059b08466eecea9159 100644
 --- a/mobile/android/app/geckoview-prefs.js
 +++ b/mobile/android/app/geckoview-prefs.js
 @@ -384,6 +384,13 @@ pref("xpinstall.signatures.required", true);
@@ -9,15 +9,61 @@ index 2f5b02eed2ff1ae6c10b79a1b797458a60684717..7e298f9555b31fbfbc1af81921fdf314
 +#ifdef MOZ_NAVIS_REMOTE_SETTINGS_POLICY
 +// Navis's compiled collection policy remains provider-signed and excludes
 +// preview buckets on Android just as it does on desktop.
-+pref("services.settings.server", "https://firefox.settings.services.mozilla.com/v1", locked);
++pref("services.settings.server", "data:,#navis-local-settings/v1", locked);
 +pref("services.settings.preview_enabled", false, locked);
 +#endif
 +
  // Pref to enable the IP protection feature
  pref("browser.ipProtection.enabled", true);
  pref("browser.ipProtection.guardian.endpoint", "https://vpn.mozilla.org/");
+diff --git a/services/settings/Attachments.sys.mjs b/services/settings/Attachments.sys.mjs
+index e266cb4e0ac4b0ff1e543e6ba82e2d9133b507bc..9de458d87373de8d1aef89671d821e84dbddc8be 100644
+--- a/services/settings/Attachments.sys.mjs
++++ b/services/settings/Attachments.sys.mjs
+@@ -181,6 +181,9 @@ export class Downloader {
+    * @returns {boolean} True if all attachments were processed successfully, false if failed, null if skipped.
+    */
+   async cacheAll(force = false) {
++    if (lazy.Utils.isLocalOnly) {
++      return null;
++    }
+     // If we're offline, don't try
+     if (lazy.Utils.isOffline) {
+       return null;
+@@ -342,6 +345,12 @@ export class Downloader {
+       avoidDownload = false,
+       cacheResult = true,
+     } = options || {};
++    if (lazy.Utils.isLocalOnly) {
++      avoidDownload = true;
++      fallbackToDump = true;
++      fallbackToCache = false;
++      cacheResult = false;
++    }
+     if (!attachmentId) {
+       // Check for pre-condition. This should not happen, but it is explicitly
+       // checked to avoid mixing up attachments, which could be dangerous.
+@@ -381,7 +390,7 @@ export class Downloader {
+     }
+ 
+     // Check if the requested attachment has already been cached.
+-    if (record) {
++    if (record && !lazy.Utils.isLocalOnly) {
+       if (await cacheInfo.isMatchingRequestedRecord(record)) {
+         try {
+           return { ...(await cacheInfo.getResult()), _source: "cache_match" };
+@@ -517,6 +526,9 @@ export class Downloader {
+    * @returns {ArrayBuffer} the file content.
+    */
+   async downloadAsBytes(record, options = {}) {
++    if (lazy.Utils.isLocalOnly) {
++      throw new Error("Remote Settings attachment downloads are disabled");
++    }
+     const {
+       attachment: { location, hash, size },
+     } = record;
 diff --git a/services/settings/RemoteSettingsClient.sys.mjs b/services/settings/RemoteSettingsClient.sys.mjs
-index f4f9b1c0bce97cb9fdf77cbdd9729ef181b3c365..cf1199699e0eaed90a3a64d4cd69acacddd4af24 100644
+index f84cdf9796925cd3f76acdda86f2a78d5e16bfbe..dcf51616f6c85f2e32016a9ea86f8d4fbbbaaa9e 100644
 --- a/services/settings/RemoteSettingsClient.sys.mjs
 +++ b/services/settings/RemoteSettingsClient.sys.mjs
 @@ -318,6 +318,8 @@ export class RemoteSettingsClient extends EventEmitter {
@@ -38,17 +84,22 @@ index f4f9b1c0bce97cb9fdf77cbdd9729ef181b3c365..cf1199699e0eaed90a3a64d4cd69acac
      this._verifier = null;
      this._syncRunning = false;
  
-@@ -405,6 +409,9 @@ export class RemoteSettingsClient extends EventEmitter {
+@@ -405,6 +409,14 @@ export class RemoteSettingsClient extends EventEmitter {
     *          the timestamp from the kinto collection fails.
     */
    async getLastModified() {
 +    if (this._disabled) {
 +      return -1;
 +    }
++    if (lazy.Utils.isLocalOnly) {
++      const { timestamp } = await lazy.SharedUtils.loadJSONDump(
++        this.bucketName, this.collectionName);
++      return timestamp ?? -1;
++    }
      let timestamp = -1;
      try {
        timestamp = await this.db.getLastModified();
-@@ -443,6 +450,10 @@ export class RemoteSettingsClient extends EventEmitter {
+@@ -443,6 +455,26 @@ export class RemoteSettingsClient extends EventEmitter {
     */
    // eslint-disable-next-line complexity
    async get(options = {}) {
@@ -56,10 +107,26 @@ index f4f9b1c0bce97cb9fdf77cbdd9729ef181b3c365..cf1199699e0eaed90a3a64d4cd69acac
 +      lazy.console.debug(`${this.identifier} disabled by embedder policy`);
 +      return [];
 +    }
++    if (lazy.Utils.isLocalOnly) {
++      // Packaged records remain authoritative even if an old profile contains
++      // a newer timestamp, a signature URL, or a forced-sync preference.
++      let { data } = await lazy.SharedUtils.loadJSONDump(
++        this.bucketName, this.collectionName);
++      if (!Array.isArray(data)) {
++        throw new Error(`Missing packaged settings: ${this.identifier}`);
++      }
++      if (options.filters) {
++        data = data.filter(record => lazy.Utils.filterObject(options.filters, record));
++      }
++      if (options.order) {
++        data = lazy.Utils.sortObjects(options.order, data);
++      }
++      return this._filterEntries(data);
++    }
      const {
        filters = {},
        order = "", // not sorted by default.
-@@ -483,6 +494,9 @@ export class RemoteSettingsClient extends EventEmitter {
+@@ -483,6 +515,9 @@ export class RemoteSettingsClient extends EventEmitter {
                ? await this._importJSONDump()
                : -1;
              if (importedFromDump < 0) {
@@ -69,7 +136,7 @@ index f4f9b1c0bce97cb9fdf77cbdd9729ef181b3c365..cf1199699e0eaed90a3a64d4cd69acac
                // There is no JSON dump to load, force a synchronization from the server.
                // We don't want the "sync" event to be sent, since some consumers use `.get()`
                // in "sync" callbacks. See Bug 1761953
-@@ -651,6 +665,12 @@ export class RemoteSettingsClient extends EventEmitter {
+@@ -651,6 +686,12 @@ export class RemoteSettingsClient extends EventEmitter {
     * @param {object} options See #maybeSync() options.
     */
    async sync(options) {
@@ -82,7 +149,7 @@ index f4f9b1c0bce97cb9fdf77cbdd9729ef181b3c365..cf1199699e0eaed90a3a64d4cd69acac
      if (lazy.Utils.shouldSkipRemoteActivity) {
        lazy.console.debug(`${this.identifier} Skip remote sync.`);
        return;
-@@ -696,6 +716,12 @@ export class RemoteSettingsClient extends EventEmitter {
+@@ -696,6 +737,12 @@ export class RemoteSettingsClient extends EventEmitter {
     */
    // eslint-disable-next-line complexity
    async maybeSync(expectedTimestamp, options = {}) {
@@ -95,6 +162,58 @@ index f4f9b1c0bce97cb9fdf77cbdd9729ef181b3c365..cf1199699e0eaed90a3a64d4cd69acac
      // Should the clients try to load JSON dump? (mainly disabled in tests)
      const {
        loadDump = lazy.Utils.LOAD_DUMPS,
+diff --git a/services/settings/Utils.sys.mjs b/services/settings/Utils.sys.mjs
+index 76f69ab74eba9f704b95a7e3c7b27c39a887bf5a..511a81bc7a2a360f5cbd4c7699ef3ee691d2fae3 100644
+--- a/services/settings/Utils.sys.mjs
++++ b/services/settings/Utils.sys.mjs
+@@ -98,7 +98,17 @@ function _isUndefined(value) {
+ const _cdnURLs = {};
+ 
+ export var Utils = {
++  // Application policy is compiled, not an editable profile preference. Tests
++  // can explicitly exercise this boundary without changing upstream suites.
++  get isLocalOnly() {
++    return AppConstants.MOZ_NAVIS_REMOTE_SETTINGS_POLICY &&
++      (!AppConstants.ENABLE_TESTS || Services.prefs.getBoolPref(
++        "services.settings.navis_enforce_local_only_in_tests", false));
++  },
+   get SERVER_URL() {
++    if (Utils.isLocalOnly) {
++      return "data:,#navis-local-settings/v1";
++    }
+     return lazy.allowServerURL
+       ? // eslint-disable-next-line mozilla/valid-lazy
+         lazy.gServerURL
+@@ -113,6 +123,9 @@ export var Utils = {
+   log,
+ 
+   get shouldSkipRemoteActivity() {
++    if (Utils.isLocalOnly) {
++      return true;
++    }
+     if (
+       (lazy.isRunningTests || Cu.isInAutomation) &&
+       this.SERVER_URL == "data:,#remote-settings-dummy/v1"
+@@ -235,6 +248,9 @@ export var Utils = {
+    * @returns a Response object
+    */
+   async fetch(input, init = {}) {
++    if (Utils.isLocalOnly) {
++      throw new Error("Remote Settings network is disabled by local application policy");
++    }
+     return new Promise(function (resolve, reject) {
+       const request = new ServiceRequest();
+       function fallbackOrReject(err) {
+@@ -315,6 +331,9 @@ export var Utils = {
+    * console.log(attachmentsURL);
+    */
+   async baseAttachmentsURL() {
++    if (Utils.isLocalOnly) {
++      throw new Error("Remote Settings attachments are local only");
++    }
+     if (!_cdnURLs[Utils.SERVER_URL]) {
+       const resp = await Utils.fetch(`${Utils.SERVER_URL}/`);
+       const serverInfo = await resp.json();
 diff --git a/services/settings/dumps/blocklists/moz.build b/services/settings/dumps/blocklists/moz.build
 index ab7754b06c8ac18ce74a8d516d8604045c8f936a..5ed70403e0a30aaa258b8a34233f874d6e890717 100644
 --- a/services/settings/dumps/blocklists/moz.build
@@ -352,7 +471,7 @@ index 6e92217dcbb337b08960f060c8bef08c9174b296..c230032bea28716879184457e0d456da
 +    security_state_dumps
 +)
 diff --git a/services/settings/remote-settings.sys.mjs b/services/settings/remote-settings.sys.mjs
-index b180cfc850ee36dcad3e2886c4bf3bb9d4b748e1..c6ebaa8a53a419ef81bd7736a1e46a4432441b6f 100644
+index b180cfc850ee36dcad3e2886c4bf3bb9d4b748e1..5b91794f01e21594487524fb980e87609089ea0d 100644
 --- a/services/settings/remote-settings.sys.mjs
 +++ b/services/settings/remote-settings.sys.mjs
 @@ -29,6 +29,10 @@ const PREF_SETTINGS_CLOCK_SKEW_SECONDS = "clock_skew_seconds";
@@ -495,6 +614,25 @@ index b180cfc850ee36dcad3e2886c4bf3bb9d4b748e1..c6ebaa8a53a419ef81bd7736a1e46a44
          if (pulled.includes(identifier)) {
            // The startup bundles contain both main and preview changesets.
            // Importing both increases complexity down the line, and brings no value.
+@@ -645,7 +732,7 @@ function remoteSettingsFunction() {
+    * @param {boolean?} options.localOnly (optional) If set to `true`, do not contact the server.
+    */
+   remoteSettings.inspect = async (options = {}) => {
+-    const { localOnly = false } = options;
++    const localOnly = lazy.Utils.isLocalOnly || options.localOnly === true;
+ 
+     let changes = [];
+     let serverTimestamp = null;
+@@ -744,6 +831,9 @@ function remoteSettingsFunction() {
+    * Startup function called from nsBrowserGlue.
+    */
+   remoteSettings.init = () => {
++    if (lazy.Utils.isLocalOnly) {
++      return;
++    }
+     lazy.console.info("Initialize Remote Settings");
+     // Hook the Push broadcast and RemoteSettings polling.
+     // When we start on a new profile there will be no ETag stored.
 diff --git a/services/settings/static-dumps/main/moz.build b/services/settings/static-dumps/main/moz.build
 index 5ff825b497e32c3f3ff2cb082cc69d16b3f28222..de6817b9923c7a856246526e2584091bf49abfde 100644
 --- a/services/settings/static-dumps/main/moz.build
@@ -693,24 +831,91 @@ index 0000000000000000000000000000000000000000..860df2419bf8805b02f0dccd2e44a58a
 +  await allowed.db.clear();
 +  RemoteSettings.enablePreviewMode(false);
 +});
+diff --git a/services/settings/test/unit/test_navis_local_settings.js b/services/settings/test/unit/test_navis_local_settings.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..25f41e33d16448cd78070d9d8b3784e77df0d8d3
+--- /dev/null
++++ b/services/settings/test/unit/test_navis_local_settings.js
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: CC0-1.0
++"use strict";
++
++const { Utils } = ChromeUtils.importESModule(
++  "resource://services-settings/Utils.sys.mjs");
++const { RemoteSettings } = ChromeUtils.importESModule(
++  "resource://services-settings/remote-settings.sys.mjs");
++const { SharedUtils } = ChromeUtils.importESModule(
++  "resource://services-settings/SharedUtils.sys.mjs");
++const { Downloader } = ChromeUtils.importESModule(
++  "resource://services-settings/Attachments.sys.mjs");
++
++add_setup(function () {
++  do_get_profile();
++  Services.prefs.setBoolPref("services.settings.navis_enforce_local_only_in_tests", true);
++  Services.prefs.setBoolPref("services.settings.navis_enforce_allowed_collections_in_tests", true);
++  Services.prefs.setStringPref("services.settings.navis_allowed_collections", "security-state/onecrl");
++  Services.prefs.setStringPref("services.settings.navis_sync_collections", "");
++  registerCleanupFunction(() => {
++    for (const name of ["navis_enforce_local_only_in_tests", "navis_enforce_allowed_collections_in_tests",
++                        "navis_allowed_collections", "navis_sync_collections"]) {
++      Services.prefs.clearUserPref(`services.settings.${name}`);
++    }
++  });
++});
++
++add_task(async function test_profile_data_and_forced_signature_fetch_cannot_override_package() {
++  const client = RemoteSettings("onecrl", { bucketName: "security-state" });
++  await client.db.clear();
++  await client.db.importChanges({ signature: { x5u: "https://should-not-connect.invalid/chain" } },
++    9999999999999, [{ id: "stale-profile-record", last_modified: 9999999999999 }]);
++  const { data, timestamp } = await SharedUtils.loadJSONDump("security-state", "onecrl");
++  Assert.deepEqual(await client.get({ forceSync: true, verifySignature: true }),
++    await client._filterEntries(data), "Only the application package supplies records");
++  Assert.equal(await client.getLastModified(), timestamp);
++  Assert.deepEqual(await RemoteSettings.pullStartupBundle(), []);
++  await RemoteSettings.pollChanges({ full: true });
++  await client.sync();
++  await client.maybeSync(9999999999999);
++  Assert.equal(await client.db.getLastModified(), 9999999999999,
++    "Offline operations do not mutate the old profile database");
++  await client.db.clear();
++});
++
++add_task(async function test_low_level_network_and_attachment_bundles_are_closed() {
++  Assert.ok(Utils.isLocalOnly);
++  Assert.ok(Utils.shouldSkipRemoteActivity);
++  await Assert.rejects(Utils.fetch("https://should-not-connect.invalid/"), /disabled/);
++  // Kinto stores this method as fetchFunc on its HTTP object. That receiver
++  // must not change application policy or allow transport construction.
++  const fetchCallback = Utils.fetch;
++  await Assert.rejects(fetchCallback("https://should-not-connect.invalid/"), /disabled/);
++  await Assert.rejects(fetchCallback.call({}, "https://should-not-connect.invalid/"), /disabled/);
++  await Assert.rejects(fetchCallback.call({ isLocalOnly: false },
++    "https://should-not-connect.invalid/"), /disabled/);
++  await Assert.rejects(Utils.baseAttachmentsURL(), /local only/);
++  const downloader = new Downloader("security-state", "onecrl");
++  Assert.equal(await downloader.cacheAll(true), null);
++  await Assert.rejects(downloader.downloadAsBytes({ id: "arbitrary" }), /disabled/);
++});
 diff --git a/services/settings/test/unit/xpcshell.toml b/services/settings/test/unit/xpcshell.toml
-index 731eb18e9a9da3f2f33b23134156e2ecbd2c57d1..a6188e784fd7c6213ed1e41454e9dc259efa81e0 100644
+index 731eb18e9a9da3f2f33b23134156e2ecbd2c57d1..007526a693af4cc1feaae62f539c49540a56c463 100644
 --- a/services/settings/test/unit/xpcshell.toml
 +++ b/services/settings/test/unit/xpcshell.toml
-@@ -13,6 +13,8 @@ skip-if = [
+@@ -13,6 +13,10 @@ skip-if = [
    "os == 'android'", # Bug 2042499
  ]
  
 +["test_navis_collection_policy.js"]
 +
++["test_navis_local_settings.js"]
++
  ["test_remote_settings.js"]
  skip-if = [
    "os == 'android'", # Bug 2042499
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index d03797358cce2339a33c2e292f599840653c90ca..0c73a3a91c3af521ca1cd3cf12b507a236d43bc9 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -147,6 +147,27 @@ export var AppConstants = Object.freeze({
+@@ -147,6 +147,27 @@
    false,
  #endif
  
@@ -738,7 +943,7 @@ index d03797358cce2339a33c2e292f599840653c90ca..0c73a3a91c3af521ca1cd3cf12b507a2
    ENABLE_TESTS:
  #ifdef ENABLE_TESTS
    true,
-@@ -167,6 +188,7 @@ export var AppConstants = Object.freeze({
+@@ -160,6 +181,7 @@
  #else
    false,
  #endif
@@ -760,10 +965,9 @@ index 4afc36d4b3e7ba543e2fe27237dde94110cb6ff9..d8784faf50935ef319ea155f48fe1595
  ):
      DEFINES[var] = CONFIG[var] or ""
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index 7ed3c01075d83c3a62edb111f5e5baa721033767..61603b91747d72c7419d73a24e6a8a886b0bef17 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
-@@ -53,6 +53,143 @@ set_config("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
+@@ -53,6 +53,143 @@
  set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
  imply_option(
      "MOZ_DESKTOP_EMBEDDER_HISTORY", True, when="--enable-desktop-embedder"

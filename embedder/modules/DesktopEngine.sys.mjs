@@ -3,12 +3,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { Downloads } from "resource://gre/modules/Downloads.sys.mjs";
+import { bindDesktopDocuments } from "resource://gre/modules/DesktopDocuments.sys.mjs";
+import { getDesktopPrinting } from "resource://gre/modules/DesktopPrinting.sys.mjs";
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+import { permissionFrames, permissionOrigins, resolvePermissionOrigin, stopPermissionMedia }
+  from "resource://gre/modules/SitePermissionOrigins.sys.mjs";
+import { permissionDecisions, normalizePermissionResponse } from "resource://gre/modules/DesktopPermissionPolicy.sys.mjs";
 import { DesktopExtensionTabs } from "resource://gre/modules/DesktopExtensionTabs.sys.mjs";
 import { DesktopExtensionMenus } from "resource://gre/modules/DesktopExtensionMenus.sys.mjs";
 import {
   DESKTOP_SEARCH_PROVIDERS,
   classifyAddressInput,
+  decodeDesktopAddressForDisplay,
   projectSelectionSearch,
 } from "resource://gre/modules/DesktopAddressInput.sys.mjs";
 import { NavisSearchService } from "resource://gre/modules/NavisSearchService.sys.mjs";
@@ -112,6 +118,7 @@ const FILL_CREDENTIAL = Symbol("fill-credential");
 const HANDLE_INTERNAL_PAGE_COMMAND = Symbol("handle-internal-page-command");
 const INSPECT_CONTEXT_TARGET = Symbol("inspect-context-target");
 const LIVE_ENGINE_SESSIONS = new Set();
+const REVOKE_PERMISSION = Symbol("revoke-permission");
 
 export const DESKTOP_EMBEDDER_API_VERSION = 2;
 
@@ -170,11 +177,13 @@ const CORE_NAVIGATION_UPDATE_METHODS = new Set([
 ]);
 
 const RUNTIME_CAPABILITIES = Object.freeze({
-  builtInExtensions: AppConstants.MOZ_WEBEXTENSIONS_RUNTIME,
+  builtInExtensions: true,
   developerTools: AppConstants.MOZ_DESKTOP_EMBEDDER_DEVTOOLS,
   jpegXL: AppConstants.MOZ_JXL,
   mediaCapture: AppConstants.MOZ_WEBRTC,
   peerConnection: AppConstants.MOZ_WEBRTC,
+  pdfViewer: true,
+  printing: true,
   passwordManager: true,
   persistentData: true,
   privateBrowsing: true,
@@ -183,7 +192,7 @@ const RUNTIME_CAPABILITIES = Object.freeze({
 });
 
 // The upstream convenience flag also invokes Push, EME and Cookie Banner
-// cleaners. Those capability graphs are deliberately absent from Navis 1.0,
+// cleaners. Those capability graphs are deliberately absent from Navis,
 // so the product composes the retained storage/security cleaners explicitly.
 const NAVIS_SITE_DATA_FLAGS = Object.freeze([
   Ci.nsIClearDataService.CLEAR_COOKIES,
@@ -209,12 +218,6 @@ const HISTORY_QUERY_TOPIC = "desktop-embedder-history-query";
 const HISTORY_TITLE_TOPIC = "desktop-embedder-history-title";
 const HISTORY_STATUS_TOPIC = "desktop-embedder-history-status";
 
-const PROMPT_DECISIONS = new Set([
-  "allow-session",
-  "allow-always",
-  "block",
-  "dismiss",
-]);
 const EXTENSION_PERMISSION_TIMEOUT_MS = 2 * 60 * 1000;
 const GENERIC_PROMPT_ACTIONS = new Set(["accept", "dismiss"]);
 const WEB_AUTHN_ACTIONS = Object.freeze({
@@ -290,6 +293,11 @@ const CONTENT_PERMISSIONS = new Map([
 const MEDIA_PERMISSION_KEYS = new Map([
   ["Camera", "camera"],
   ["Microphone", "microphone"],
+]);
+const SITE_PERMISSION_KINDS = new Map([
+  ...CONTENT_PERMISSIONS,
+  ["camera", { key: "camera", label: "camera", media: true }],
+  ["microphone", { key: "microphone", label: "microphone", media: true }],
 ]);
 
 let nextPromptId = 1;
@@ -940,7 +948,7 @@ function authenticatedWebPrincipal(browser) {
   const principal = browser?.contentPrincipal;
   if (
     !documentURI ||
-    !principal ||
+    !principal?.isContentPrincipal ||
     principal.isSystemPrincipal ||
     principal.addonId ||
     (!documentURI.schemeIs("http") && !documentURI.schemeIs("https"))
@@ -1894,6 +1902,7 @@ function freezeSessionState(state) {
     baseDomain: sessionBaseDomain(state.url),
     prompt: state.prompt ? Object.freeze({ ...state.prompt }) : null,
     media: Object.freeze({ ...state.media }),
+    devices: Object.freeze({ ...state.devices }),
     credentials: Object.freeze({
       origin: state.credentials.origin,
       items: Object.freeze(
@@ -2743,6 +2752,53 @@ export class EngineRuntime {
     return session;
   }
 
+  // The native window creator has already selected this chrome window and
+  // created the content actor. Adopt its initial document without navigation.
+  adoptInitialSession({ view, delegates = undefined } = {}) {
+    this.#assertOpen();
+    if (!(view instanceof EngineView) || view.session) {
+      throw new TypeError("Initial content requires an unbound EngineView");
+    }
+    const ownerWindow = view[GET_VIEW_WINDOW]();
+    if (!ownerWindow || ownerWindow.closed) {
+      throw new Error("Initial content requires an open host window");
+    }
+    const openWindowInfo = ownerWindow.docShell.treeOwner
+      .QueryInterface(Ci.nsIInterfaceRequestor)
+      .getInterface(Ci.nsIAppWindow).initialOpenWindowInfo;
+    if (!openWindowInfo) return null;
+    const context = this.#ensureWindow(ownerWindow);
+    if (context.initialSessionClaimed || context.sessions.size) {
+      throw new Error("The host's initial content has already been claimed");
+    }
+    if (!openWindowInfo.isRemote) {
+      throw new Error("Initial content requires a remote browser");
+    }
+    // Claim before callbacks: neither a nested creation nor a failed adoption
+    // may reuse the native actor. Native details never cross the public API.
+    context.initialSessionClaimed = true;
+    let session;
+    try {
+      session = this.createSession({ view, delegates });
+      if (!this.#sessions.has(session) || ownerWindow.closed) {
+        throw new Error("Initial Session was closed during creation");
+      }
+      const userContextId = userContextIdFrom(openWindowInfo, null);
+      const remoteType = ChromeUtils.predictRemoteTypeForURI(null, {
+        window: ownerWindow, userContextId,
+      });
+      if (!remoteType) throw new Error("Initial content has no remote process");
+      session[CREATE_BROWSER]({ openWindowInfo, userContextId, remoteType, skipLoad: true });
+      if (!this.#sessions.has(session) || ownerWindow.closed) {
+        throw new Error("Initial Session was closed during browser adoption");
+      }
+      return session;
+    } catch (error) {
+      session?.close();
+      throw error;
+    }
+  }
+
   activateSession(session) {
     this.#assertOpen();
     if (!this.#sessions.has(session)) {
@@ -3049,20 +3105,35 @@ export class EngineRuntime {
     return true;
   }
 
+  formatAddressForDisplay(value) {
+    this.#assertOpen();
+    if (typeof value !== "string") {
+      throw new TypeError("Address must be a string");
+    }
+    try {
+      const uri = Services.io.newURI(value);
+      return decodeDesktopAddressForDisplay(uri.displaySpec, uri.scheme);
+    } catch {
+      return value;
+    }
+  }
+
   copyAddressLink(value) {
     this.#assertOpen();
     if (typeof value !== "string" || !value) {
       return false;
     }
+    let uri;
     try {
-      const uri = Services.io.newURI(value);
+      uri = Services.io.newURI(value);
       if (!uri.schemeIs("http") && !uri.schemeIs("https")) {
         return false;
       }
+      uri = Services.io.newURI(projectDesktopCopiedLink(uri.asciiSpec));
     } catch {
       return false;
     }
-    return this.copyText(projectDesktopCopiedLink(value));
+    return this.copyText(uri.asciiSpec);
   }
 
   getSiteDataState(session) {
@@ -3101,6 +3172,89 @@ export class EngineRuntime {
       );
     }
     return Object.freeze({ origin: state.origin, host: state.host });
+  }
+
+  getSitePermissionState(session) {
+    this.#assertOpen();
+    if (!this.#sessions.has(session)) {
+      throw new TypeError("The Session does not belong to this Runtime");
+    }
+    const site = authenticatedWebPrincipal(session[GET_BROWSER]());
+    const origins = site ? permissionOrigins(session[GET_BROWSER]()) : [];
+    const permissions = origins.flatMap(scope => [...SITE_PERMISSION_KINDS]
+      .filter(([, permission]) =>
+        (!permission.media || this.capabilities.mediaCapture) &&
+        (!permission.pref || Services.prefs.getBoolPref(permission.pref, false)))
+      .map(([kind, { key, label, chooser }]) => {
+      const value = Services.perms.testExactPermissionFromPrincipal(scope.principal, key);
+      const stored = Services.perms.getPermissionObject(scope.principal, key, true);
+      return Object.freeze({
+        kind, label, origin: scope.origin, originToken: scope.token, embedded: scope.embedded,
+        state: value === Services.perms.ALLOW_ACTION ? "allow" :
+          value === Services.perms.DENY_ACTION ? "block" : "ask",
+        temporary: stored?.expireType === Services.perms.EXPIRE_SESSION,
+        decisions: Object.freeze(chooser ? ["ask", "block"] : ["ask", "allow", "block"]),
+      });
+    }));
+    return Object.freeze({
+      available: Boolean(origins.length), origin: site?.origin ?? "",
+      navigationId: session.state.navigationId,
+      permissions: Object.freeze(permissions),
+    });
+  }
+
+  async setSitePermission(session, { navigationId, originToken, kind, decision }) {
+    this.#assertOpen();
+    if (!this.#sessions.has(session)) {
+      throw new TypeError("The Session does not belong to this Runtime");
+    }
+    const site = resolvePermissionOrigin(session[GET_BROWSER](), originToken);
+    const permission = SITE_PERMISSION_KINDS.get(kind);
+    if (!site || session.state.navigationId !== navigationId || !permission ||
+        (permission.media && !this.capabilities.mediaCapture) ||
+        (permission.pref && !Services.prefs.getBoolPref(permission.pref, false)) ||
+        (permission.chooser && decision === "allow") ||
+        !["ask", "allow", "block"].includes(decision)) {
+      throw new TypeError("Invalid or stale site permission change");
+    }
+    const keys = [permission.key];
+    if (decision !== "allow" && ["camera", "microphone"].includes(kind)) {
+      keys.splice(0, 1, "camera", "microphone", "MediaManagerVideo");
+    }
+    for (const key of keys) {
+      Services.perms.removeFromPrincipal(site.principal, key);
+    }
+    if (decision !== "ask") {
+      Services.perms.addFromPrincipal(site.principal, permission.key,
+        decision === "allow" ? Services.perms.ALLOW_ACTION : Services.perms.DENY_ACTION,
+        session.state.private || site.principal.privateBrowsingId
+          ? Services.perms.EXPIRE_SESSION : Services.perms.EXPIRE_NEVER);
+    }
+    const revoked = [];
+    for (const peer of LIVE_ENGINE_SESSIONS) {
+      if (permissionFrames(peer[GET_BROWSER]()).some(window => window.documentPrincipal.equals(site.principal))) {
+        revoked.push(peer[REVOKE_PERMISSION](keys, decision !== "allow", site.principal));
+      }
+    }
+    const results = await Promise.allSettled(revoked);
+    const failures = results.filter(result => result.status === "rejected");
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Device revocation failed");
+    return this.getSitePermissionState(session);
+  }
+
+  async stopSiteDevices(session, { navigationId, kind }) {
+    this.#assertOpen();
+    if (!this.#sessions.has(session) || session.state.navigationId !== navigationId ||
+        !["camera", "microphone"].includes(kind)) {
+      throw new TypeError("Invalid or stale device stop");
+    }
+    const origins = permissionOrigins(session[GET_BROWSER]());
+    const results = await Promise.allSettled(origins.map(scope => this.setSitePermission(session, {
+      navigationId, originToken: scope.token, kind, decision: "ask",
+    })));
+    const failures = results.filter(result => result.status === "rejected");
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Device revocation failed");
+    return this.getSitePermissionState(session);
   }
 
   // Keeping the authenticated product-page router explicit makes its command
@@ -4178,6 +4332,11 @@ export class EngineRuntime {
     return context;
   }
 
+  configurePrinting({ ownerWindow, styleSheets = [] }) {
+    this.#ensureWindow(ownerWindow);
+    getDesktopPrinting(ownerWindow).configure({ styleSheets });
+  }
+
   #ensureParkingHost(context) {
     if (context.parkingHost?.isConnected) {
       return context.parkingHost;
@@ -4206,6 +4365,7 @@ export class EngineRuntime {
     }
     context.parkingHost?.remove();
     context.parkingHost = null;
+    getDesktopPrinting(ownerWindow).close();
     if (ownerWindow.browserDOMWindow === context.browserDOMWindow) {
       ownerWindow.browserDOMWindow = null;
     }
@@ -4275,9 +4435,6 @@ export class EngineRuntime {
   }
 
   async #initializeExtensions() {
-    if (!AppConstants.MOZ_WEBEXTENSIONS_RUNTIME) {
-      return;
-    }
     try {
       const { DesktopExtensionPermissionPrompts } = ChromeUtils.importESModule(
         "resource://gre/modules/DesktopExtensionPermissionPrompts.sys.mjs",
@@ -4511,6 +4668,9 @@ class DesktopBrowserDOMWindow {
     triggeringPrincipal,
     policyContainer,
   ) {
+    if (where === Ci.nsIBrowserDOMWindow.OPEN_PRINT_BROWSER) {
+      return this.#printClone(openWindowInfo)?.browsingContext || null;
+    }
     return this.#runtime[OPEN_FROM_GECKO]({
       ownerWindow: this.#window,
       where,
@@ -4523,6 +4683,9 @@ class DesktopBrowserDOMWindow {
   }
 
   createContentWindowInFrame(uri, params, where, flags, targetName) {
+    if (where === Ci.nsIBrowserDOMWindow.OPEN_PRINT_BROWSER) {
+      return this.#printClone(params.openWindowInfo);
+    }
     return this.#runtime[OPEN_FROM_GECKO]({
       ownerWindow: this.#window,
       where,
@@ -4583,6 +4746,17 @@ class DesktopBrowserDOMWindow {
 
   canClose() {
     return true;
+  }
+
+  #printClone(openWindowInfo) {
+    try {
+      return getDesktopPrinting(this.#window).clone(openWindowInfo);
+    } catch (error) {
+      openWindowInfo?.cancel();
+      console.error("Navis print request failed", error);
+      Components.returnCode = Cr.NS_ERROR_ABORT;
+      return null;
+    }
   }
 
   get tabCount() {
@@ -4781,6 +4955,7 @@ export class EngineSession {
   #mediaDelegate = null;
   #crashDelegate = null;
   #credentialActor = null;
+  #releaseDocuments = null;
   #requestNavigations = new WeakMap();
   #state;
 
@@ -4978,11 +5153,30 @@ export class EngineSession {
     validateDelegate(
       delegate,
       "PermissionDelegate",
-      ["onRequest", "onCanceled"],
+      ["onRequest", "onUpdated", "onCanceled"],
       ["onRequest"],
     );
+    if (delegate !== this.#permissionDelegate) {
+      this.#cancelMatchingPrompts(
+        entry => entry.delegateType === "permission", "delegate-changed",
+      );
+    }
     this.#permissionDelegate = delegate;
     return this;
+  }
+
+  async [REVOKE_PERMISSION](keys, stopActive, principal) {
+    this.#cancelMatchingPrompts(entry =>
+        entry.delegateType === "permission" && entry.descriptor.category !== "extension-permission" &&
+          entry.permissionPrincipal?.equals(principal) &&
+          entry.descriptor.permissions.some(label => keys.some(key =>
+            key === label || [...SITE_PERMISSION_KINDS.values()].some(value => value.key === key && value.label === label))),
+      "permission-changed",
+    );
+    if (!stopActive || !keys.some(key => key === "camera" || key === "microphone")) {
+      return;
+    }
+    await stopPermissionMedia(this.#browser, principal, "DesktopEmbedderWebRTC", "webrtc:StopSharing");
   }
 
   setPromptDelegate(delegate) {
@@ -5116,6 +5310,29 @@ export class EngineSession {
     return this.#performCoreNavigation("reload", null, () => {
       this.#browser.reload();
     });
+  }
+
+  print() {
+    this.#assertOpen();
+    if (this.#state.crashed || !this.#view) return false;
+    return getDesktopPrinting(this.#browser.ownerDocument.defaultView).start(this.#browser);
+  }
+
+  async openFile() {
+    this.#assertOpen();
+    if (this.#state.crashed || !this.#view) return false;
+    const browser = this.#browser;
+    const view = this.#view;
+    const picker = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
+    picker.init(browser.ownerDocument.defaultView.browsingContext, "Navis", Ci.nsIFilePicker.modeOpen);
+    picker.appendFilter("PDF", "*.pdf");
+    picker.appendFilters(Ci.nsIFilePicker.filterAll);
+    const result = await new Promise(resolve => picker.open(resolve));
+    if (result !== Ci.nsIFilePicker.returnOK || !picker.file ||
+        this.#closed || this.#state.crashed || this.#view !== view ||
+        this.#browser !== browser || !browser.isConnected) return false;
+    this.loadUri(Services.io.newFileURI(picker.file).spec);
+    return true;
   }
 
   stop() {
@@ -5299,9 +5516,7 @@ export class EngineSession {
 
     let normalizedResponse = response;
     if (pendingPrompt.delegateType === "permission") {
-      if (!PROMPT_DECISIONS.has(response)) {
-        throw new TypeError(`Unsupported permission decision: ${response}`);
-      }
+      normalizedResponse = normalizePermissionResponse(response, pendingPrompt.descriptor) ?? "dismiss";
     } else if (pendingPrompt.delegateType === "webAuthn") {
       normalizedResponse = normalizeWebAuthnResponse(
         response,
@@ -5785,6 +6000,8 @@ export class EngineSession {
     this.#assertOpen();
     const actorContextId = actor?.manager?.browsingContext?.id;
     if (
+      !actor?.manager?.isCurrentGlobal ||
+      actor.manager.rootFrameLoader?.ownerElement !== this.#browser ||
       !Number.isSafeInteger(actorContextId) ||
       actorContextId !== this.#browser.browsingContext?.id
     ) {
@@ -5799,6 +6016,9 @@ export class EngineSession {
       command: typeof data.command === "string" ? data.command : "",
       value: data.value,
     });
+    if (request.command === "internal:navigate") {
+      return this.#handleInternalPageNavigation(request);
+    }
     if (
       request.command === "diagnostics:get" &&
       (page.key === "support" || page.id === "settings")
@@ -5810,6 +6030,33 @@ export class EngineSession {
       );
     }
     return this.#runtime[HANDLE_INTERNAL_PAGE_COMMAND](this, page, request);
+  }
+
+  #handleInternalPageNavigation(request) {
+    const { url, disposition } = request.value || {};
+    if (typeof url !== "string" || url.length > 8192 ||
+        !["current", "background", "foreground", "window"].includes(disposition)) {
+      throw new TypeError("Invalid Navis internal-page navigation");
+    }
+    const uri = Services.io.newURI(url);
+    if (!resolveNavisInternalPageURI(uri)) {
+      throw new TypeError("The destination is not a registered Navis page");
+    }
+    let started = true;
+    if (disposition === "current") {
+      this.loadUri(uri.spec);
+    } else {
+      const where = {
+        background: Ci.nsIBrowserDOMWindow.OPEN_NEWTAB_BACKGROUND,
+        foreground: Ci.nsIBrowserDOMWindow.OPEN_NEWTAB_FOREGROUND,
+        window: Ci.nsIBrowserDOMWindow.OPEN_NEWWINDOW,
+      }[disposition];
+      started = Boolean(this.#runtime[OPEN_FROM_GECKO]({
+        ownerWindow: this.#browser.documentGlobal,
+        uri, where, flags: 0, openerBrowser: this.#browser,
+      }));
+    }
+    return Object.freeze({ pageKey: request.pageKey, outcome: started ? "navigation-started" : "blocked" });
   }
 
   #handleContentInteraction(actor, data) {
@@ -5989,13 +6236,13 @@ export class EngineSession {
     if (this.#closed || !browser) return;
     if (browser.isRemoteBrowser) {
       // Toolkit's BrowserElement actor forwards only top-level close requests.
-      // Its chrome-side CustomEvent is synthetic, so isTrusted is false here.
+      // Authenticate its browser target, not the chrome event's trust flag.
       if (event.target !== browser) return;
     } else if (!event.isTrusted ||
         event.target?.docShell?.browsingContext !== browser.browsingContext) {
       return;
     }
-    const ownerWindow = browser.ownerGlobal;
+    const ownerWindow = browser.documentGlobal;
     if (!ownerWindow || ownerWindow.closed) return;
     event.preventDefault();
     event.stopPropagation();
@@ -6008,6 +6255,7 @@ export class EngineSession {
   }
 
   #bindBrowser(browser) {
+    this.#releaseDocuments = bindDesktopDocuments(browser);
     browserPrivateModes.set(String(browser.browserId), this.#state.private);
     browser.desktopEmbedderContentPermissionPrompt = (request) => {
       this.#handleContentPermission(request);
@@ -6016,8 +6264,9 @@ export class EngineSession {
       request,
       respond,
       principal,
+      isCurrent,
     ) => {
-      this.#handleMediaPermission(request, respond, principal);
+      this.#handleMediaPermission(request, respond, principal, isCurrent);
     };
     browser.desktopEmbedderCancelWebRTCPermissionPrompt = (callID) => {
       this.#cancelMediaPrompt(callID);
@@ -6072,6 +6321,8 @@ export class EngineSession {
   }
 
   #unbindBrowser(browser) {
+    this.#releaseDocuments?.();
+    this.#releaseDocuments = null;
     browserPrivateModes.delete(String(browser.browserId));
     try {
       browser.removeProgressListener(this.#progressListener);
@@ -6199,7 +6450,8 @@ export class EngineSession {
         request.cancel();
         return;
       }
-      type = types.queryElementAt(0, Ci.nsIContentPermissionType).type;
+      const permissionType = types.queryElementAt(0, Ci.nsIContentPermissionType);
+      type = permissionType.type;
     } catch (error) {
       console.error(
         "Desktop embedder rejected an invalid permission request",
@@ -6210,7 +6462,7 @@ export class EngineSession {
     }
 
     const permission = CONTENT_PERMISSIONS.get(type);
-    if (!permission) {
+    if (!permission || (permission.pref && !Services.prefs.getBoolPref(permission.pref, false))) {
       console.warn(`Desktop embedder denied unsupported permission: ${type}`);
       request.cancel();
       return;
@@ -6227,7 +6479,7 @@ export class EngineSession {
       return;
     }
 
-    const existing = Services.perms.testPermissionFromPrincipal(
+    const existing = Services.perms.testExactPermissionFromPrincipal(
       principal,
       permission.key,
     );
@@ -6249,26 +6501,29 @@ export class EngineSession {
       category: "permission",
       kind: type,
       permissions: Object.freeze([permission.label]),
-      origin: principalOrigin(principal),
+      origin: principalOrigin(request.topLevelPrincipal || principal),
       frameOrigin: principalOrigin(request.principal),
       userGesture: request.hasValidTransientUserGestureActivation,
+      decisions: permissionDecisions(this.#state.private),
     });
 
     this.#enqueuePrompt({
       descriptor,
       delegateType: "permission",
+      permissionPrincipal: principal,
       notifyShown:
         typeof request.notifyShown === "function"
           ? () => request.notifyShown()
           : null,
-      respond: (decision) => {
+      respond: (response) => {
+        const decision = typeof response === "string" ? response : response.decision;
         if (decision === "allow-session" || decision === "allow-always") {
           Services.perms.addFromPrincipal(
             principal,
             permission.key,
             Services.perms.ALLOW_ACTION,
             decision === "allow-always"
-              ? Services.perms.EXPIRE_NEVER
+              && !this.#state.private ? Services.perms.EXPIRE_NEVER
               : Services.perms.EXPIRE_SESSION,
           );
           request.allow();
@@ -6278,7 +6533,7 @@ export class EngineSession {
               principal,
               permission.key,
               Services.perms.DENY_ACTION,
-              Services.perms.EXPIRE_NEVER,
+              this.#state.private ? Services.perms.EXPIRE_SESSION : Services.perms.EXPIRE_NEVER,
             );
           }
           request.cancel();
@@ -6537,12 +6792,12 @@ export class EngineSession {
     } catch {}
   }
 
-  #handleMediaPermission(request, respond, principal) {
+  #handleMediaPermission(request, respond, principal, isCurrent) {
     const permissionKeys = request.requestTypes.map((type) =>
       MEDIA_PERMISSION_KEYS.get(type),
     );
     if (
-      !request.secure ||
+      typeof isCurrent !== "function" || !isCurrent() || !request.secure ||
       !permissionKeys.length ||
       permissionKeys.some((key) => !key)
     ) {
@@ -6551,21 +6806,26 @@ export class EngineSession {
     }
 
     const existing = permissionKeys.map((key) =>
-      Services.perms.testPermissionFromPrincipal(principal, key),
+      Services.perms.testExactPermissionFromPrincipal(principal, key),
     );
     if (existing.includes(Services.perms.DENY_ACTION)) {
       respond({ allow: false });
       return;
     }
 
-    const devices = this.#selectMediaDevices(request);
-    if (!devices.length) {
+    const choices = Object.freeze(Object.fromEntries(permissionKeys.map(key => [
+      key,
+      Object.freeze((key === "camera" ? request.videoInputDevices : request.audioInputDevices)
+        .map((device, index) => Object.freeze({ id: String(index), label: device.name }))),
+    ])));
+    if (Object.values(choices).some(options => !options.length)) {
       respond({ allow: false });
       return;
     }
-    if (existing.every((action) => action === Services.perms.ALLOW_ACTION)) {
+    if (existing.every((action) => action === Services.perms.ALLOW_ACTION) &&
+        Object.values(choices).every(options => options.length === 1)) {
       this.#addMediaManagerVideoPermission(request, principal);
-      respond({ allow: true, devices });
+      respond({ allow: true, devices: this.#selectMediaDevices(request) });
       return;
     }
 
@@ -6577,6 +6837,8 @@ export class EngineSession {
       origin: request.origin,
       frameOrigin: request.frameOrigin,
       userGesture: request.isHandlingUserInput,
+      decisions: permissionDecisions(this.#state.private),
+      choices,
       devices: Object.freeze({
         camera: Object.freeze(
           request.videoInputDevices.map((device) => device.name),
@@ -6590,16 +6852,27 @@ export class EngineSession {
     this.#enqueuePrompt({
       descriptor,
       delegateType: "permission",
+      permissionPrincipal: principal,
       nativeId: request.callID,
       notifyShown: null,
-      respond: (decision) => {
+      respond: (response) => {
+        if (!isCurrent()) {
+          respond({ allow: false });
+          return;
+        }
+        const decision = typeof response === "string" ? response : response.decision;
         if (decision === "allow-session" || decision === "allow-always") {
+          const devices = this.#selectMediaDevices(request, response.choices);
+          if (devices.length !== permissionKeys.length) {
+            respond({ allow: false });
+            return;
+          }
           for (const key of permissionKeys) {
             Services.perms.addFromPrincipal(
               principal,
               key,
               Services.perms.ALLOW_ACTION,
-              decision === "allow-always"
+            decision === "allow-always" && !this.#state.private
                 ? Services.perms.EXPIRE_NEVER
                 : Services.perms.EXPIRE_SESSION,
             );
@@ -6613,7 +6886,7 @@ export class EngineSession {
                 principal,
                 key,
                 Services.perms.DENY_ACTION,
-                Services.perms.EXPIRE_NEVER,
+              this.#state.private ? Services.perms.EXPIRE_SESSION : Services.perms.EXPIRE_NEVER,
               );
             }
           }
@@ -6665,17 +6938,17 @@ export class EngineSession {
     });
   }
 
-  #selectMediaDevices(request) {
+  #selectMediaDevices(request, choices = {}) {
     const devices = [];
     if (request.requestTypes.includes("Camera")) {
-      const camera = request.videoInputDevices[0];
+      const camera = request.videoInputDevices[Number(choices.camera ?? 0)];
       if (!camera) {
         return [];
       }
       devices.push(camera.deviceIndex);
     }
     if (request.requestTypes.includes("Microphone")) {
-      const microphone = request.audioInputDevices[0];
+      const microphone = request.audioInputDevices[Number(choices.microphone ?? 0)];
       if (!microphone) {
         return [];
       }
@@ -6752,13 +7025,8 @@ export class EngineSession {
 
     Promise.resolve(decision).then(
       (resolvedDecision) => {
-        if (!PROMPT_DECISIONS.has(resolvedDecision)) {
-          console.error(
-            `PermissionDelegate returned an invalid decision: ${resolvedDecision}`,
-          );
-          resolvedDecision = "dismiss";
-        }
-        this.#resolvePrompt(promptEntry.descriptor.id, resolvedDecision);
+        this.#resolvePrompt(promptEntry.descriptor.id,
+          normalizePermissionResponse(resolvedDecision, promptEntry.descriptor) ?? "dismiss");
       },
       (error) => {
         console.error("PermissionDelegate decision rejected", error);
@@ -6888,16 +7156,22 @@ export class EngineSession {
   }
 
   #cancelQueuedPrompt(promptEntry, reason) {
-    const index = this.#prompts.indexOf(promptEntry);
-    if (index === -1) {
-      return;
+    this.#cancelMatchingPrompts(entry => entry === promptEntry, reason);
+  }
+
+  #cancelMatchingPrompts(matches, reason) {
+    const head = this.#prompts[0];
+    const canceled = this.#prompts.filter(matches);
+    this.#prompts = this.#prompts.filter(entry => !canceled.includes(entry));
+    for (const entry of canceled) {
+      try {
+        entry.cancel();
+      } catch {}
+      if (entry.delegateRequested) {
+        this.#notifyPromptCanceled(entry, reason);
+      }
     }
-    this.#prompts.splice(index, 1);
-    try {
-      promptEntry.cancel();
-    } catch {}
-    this.#notifyPromptCanceled(promptEntry, reason);
-    if (index === 0) {
+    if (head !== this.#prompts[0]) {
       this.#showNextPrompt();
     }
   }

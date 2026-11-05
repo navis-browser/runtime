@@ -445,10 +445,9 @@ index 8a8888542166bdee6bde1ed9d8bfd11cd544006b..c5c32853eed8b9feacdec96de137d496
     content/global/buildconfig.css
     content/global/colorpicker.html
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index edc7ef615334b00ce66fd9f5c88221176fca7e0d..d03797358cce2339a33c2e292f599840653c90ca 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -160,6 +160,13 @@ export var AppConstants = Object.freeze({
+@@ -153,6 +153,13 @@
  #else
    false,
  #endif

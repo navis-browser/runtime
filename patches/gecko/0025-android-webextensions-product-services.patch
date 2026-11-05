@@ -4888,7 +4888,7 @@ index f9d5d232ff0e0220b77a3ef11100edcbb04d35b0..eb76dc789232f463abb9734f9b0cac65
 +});
 +
 +function suppressPrivateCapture(browser) {
-+  // Navis 1.0 treats private sessions as a hard persistence boundary. Gecko
++  // Navis treats private sessions as a hard persistence boundary. Gecko
 +  // already disables automatic form fill in private content; this companion
 +  // gate prevents save/update UI and therefore prevents a private credential
 +  // from ever reaching the process-wide Navis storage peer.
@@ -5834,10 +5834,10 @@ index 0000000000000000000000000000000000000000..4bd3dd964fb210d9d603ee75491d14fb
 +});
 diff --git a/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs b/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a6fce5d3e7f99817ead99012310aa49077efc9b6
+index 0000000000000000000000000000000000000000..6dba76b1a0cb77448269b318dd13be89c882e548
 --- /dev/null
 +++ b/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,87 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -5848,6 +5848,12 @@ index 0000000000000000000000000000000000000000..a6fce5d3e7f99817ead99012310aa490
 +const { NavisAndroidExtensionTabTopology: topology } = ChromeUtils.importESModule(
 +  "resource://gre/modules/NavisAndroidExtensionTabTopology.sys.mjs"
 +);
++
++// Native certificate verification already uses the immutable OneCRL baseline.
++// Also initialize the normal storage consumer using the applicable upstream fix.
++const { initializeCertificateSecurity } = ChromeUtils.importESModule(
++  "resource://gre/modules/CertificateSecurity.sys.mjs");
++initializeCertificateSecurity();
 +
 +const chromeReady = new WeakSet();
 +let completion;
@@ -8456,6 +8462,18 @@ index 0000000000000000000000000000000000000000..7dc222c1978f9413e51a7725271f5fe4
 +    [...UNSUPPORTED_MANIFEST_KEYS].sort()
 +  ),
 +});
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -6,6 +6,8 @@
+     EXTRA_JS_MODULES += [
+         "/desktop-embedder/components/DesktopFaviconChild.sys.mjs",
+         "/desktop-embedder/components/DesktopFaviconParent.sys.mjs",
++        "/desktop-embedder/modules/CertificateSecurity.sys.mjs",
++        "/desktop-embedder/modules/CertificateSecurityData.sys.mjs",
+         "/desktop-embedder/modules/DesktopAddressInput.sys.mjs",
+         "/desktop-embedder/modules/NavisAndroidSearch.sys.mjs",
+         "/desktop-embedder/modules/NavisSearchPolicy.sys.mjs",
 diff --git a/toolkit/components/extensions/ExtensionShortcuts.sys.mjs b/toolkit/components/extensions/ExtensionShortcuts.sys.mjs
 index c000b1276ac1bd2465a59931a22b888ea9a591a4..cb0309bb1fbee2ceda7db8dbe1aedbfee00d4538 100644
 --- a/toolkit/components/extensions/ExtensionShortcuts.sys.mjs
@@ -8545,7 +8563,7 @@ index 5a9fb629576df27f40befee1038068060ecbcaa1..c4a76f80423a16fd88ac71ba520dafee
    ExtensionTelemetry: "resource://gre/modules/ExtensionTelemetry.sys.mjs",
  });
  
-+// Navis 1.0 has no account-backed extension sync service. Keep the namespace absent in every
++// Navis has no account-backed extension sync service. Keep the namespace absent in every
 +// extension process instead of exposing a local-only object with false cross-device semantics.
 +const navisDirectRuntime = Services.prefs.getBoolPref(
 +  "extensions.navisAndroid.directRuntime",
@@ -8598,7 +8616,7 @@ index 5a9fb629576df27f40befee1038068060ecbcaa1..c4a76f80423a16fd88ac71ba520dafee
          managed: {
            get(keys) {
 diff --git a/toolkit/components/extensions/parent/ext-management.js b/toolkit/components/extensions/parent/ext-management.js
-index 3409257f7d38e364a053237175995cc9a592849d..8fbbddad1ca4965fc3c78f7f5c266f21afd12fa1 100644
+index 3c4dcf396cfb99deae81ca3e33b0235a63f9df61..39bc6e702b8d2e90bf635e688c06c771ef22ebef 100644
 --- a/toolkit/components/extensions/parent/ext-management.js
 +++ b/toolkit/components/extensions/parent/ext-management.js
 @@ -14,6 +14,11 @@ ChromeUtils.defineESModuleGetters(this, {
@@ -8782,7 +8800,7 @@ index a72b7600c9190cea0ec2bf2d975d4fd608351c7d..05ea06294511d6ec16241aa9c7756f37
          managed: {
            async get(keys) {
 diff --git a/widget/android/nsWindow.cpp b/widget/android/nsWindow.cpp
-index 6a4317e72e8d82b8275bc52d349cee807c902752..b39dcef87f6d8c7600aed2768510e054e62353d8 100644
+index c75befcba5cf69106cb21b9c2e2fef292d87a2c2..c5537cf34d64a3f1f7194207170848c63af23124 100644
 --- a/widget/android/nsWindow.cpp
 +++ b/widget/android/nsWindow.cpp
 @@ -3095,6 +3095,15 @@ void* nsWindow::GetNativeData(uint32_t aDataType) {

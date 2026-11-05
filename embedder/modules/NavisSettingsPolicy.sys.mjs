@@ -17,6 +17,7 @@ export const NAVIS_SETTINGS_PREFS = Object.freeze({
   accent: "navis.appearance.accent",
   bookmarkBar: "navis.bookmarks.bar.mode",
   historyButton: "navis.history.button.visible",
+  showCertificateOrganization: "navis.appearance.showCertificateOrganization",
   askBeforeSaving: "navis.downloads.askBeforeSaving",
   deletePrivateOnExit: "navis.downloads.deletePrivateOnExit",
   openWhenComplete: "navis.downloads.openWhenComplete",
@@ -118,6 +119,7 @@ export function readAppearanceSettings(prefs) {
     // opening behavior. New writes use the toolbar-specific preference only.
     historyButton: prefs.getBoolPref(NAVIS_SETTINGS_PREFS.historyButton,
       prefs.getBoolPref("navis.history.sidebar.visible", false)),
+    showCertificateOrganization: prefs.getBoolPref(NAVIS_SETTINGS_PREFS.showCertificateOrganization, true),
   });
 }
 
@@ -136,7 +138,7 @@ export function setAppearanceSetting(prefs, key, value) {
     if (key === "bookmarkBar") {
       prefs.setBoolPref("navis.bookmarks.bar.visible", value !== "never");
     }
-  } else if (key === "historyButton" && typeof value === "boolean") {
+  } else if (["historyButton", "showCertificateOrganization"].includes(key) && typeof value === "boolean") {
     prefs.setBoolPref(NAVIS_SETTINGS_PREFS[key], value);
   } else {
     throw new TypeError("Invalid appearance setting");

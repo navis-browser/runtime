@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Excluded Web API regression</title>
+<pre id="result">Running…</pre>
+<script type="module">
+import "/excluded-web-apis-probe.js";
+const probe = globalThis.navisApiProbe;
+const frameToken = new URL(location.href).searchParams.get("frame");
+if (frameToken) {
+  parent.postMessage({ token: frameToken, result: probe() }, location.origin);
+} else {
+  const cleanup = [];
+  function bounded(task) {
+    let timer;
+    return Promise.race([task, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Context deadline exceeded")), 15000); })])
+      .finally(() => clearTimeout(timer));
+  }
+  async function run() {
+    const contexts = { window: probe() };
+    const frame = document.createElement("iframe");
+    const token = crypto.randomUUID();
+    contexts.iframe = await bounded(new Promise(resolve => {
+      const receive = event => {
+        if (event.source !== frame.contentWindow || event.origin !== location.origin || event.data?.token !== token) return;
+        window.removeEventListener("message", receive);
+        resolve(event.data.result);
+      };
+      cleanup.push(() => { window.removeEventListener("message", receive); frame.remove(); });
+      addEventListener("message", receive);
+      frame.src = `/excluded-web-apis?frame=${encodeURIComponent(token)}`;
+      document.body.append(frame);
+    }));
+    const dedicated = new Worker("/excluded-web-apis-worker.mjs", { type: "module" });
+    cleanup.push(() => dedicated.terminate());
+    contexts.dedicatedWorker = await bounded(new Promise((resolve, reject) => {
+      dedicated.onmessage = event => resolve(event.data);
+      dedicated.onerror = event => reject(Error(event.message));
+    }));
+    const shared = new SharedWorker("/excluded-web-apis-worker.mjs", { type: "module", name: token });
+    cleanup.push(() => shared.port.close());
+    contexts.sharedWorker = await bounded(new Promise((resolve, reject) => {
+      shared.port.onmessage = event => resolve(event.data);
+      shared.onerror = event => reject(Error(event.message));
+      shared.port.start();
+    }));
+    const registration = await bounded(navigator.serviceWorker.register("/excluded-web-apis-service-worker.js", { scope: "/excluded-web-api-fixture/" }));
+    cleanup.push(() => registration.unregister());
+    let active = registration.active;
+    if (!active) {
+      active = await bounded(new Promise((resolve, reject) => {
+        const worker = registration.installing || registration.waiting;
+        if (!worker) { reject(Error("ServiceWorker was not allocated")); return; }
+        worker.addEventListener("statechange", () => {
+          if (worker.state === "activated") resolve(worker);
+          else if (worker.state === "redundant") reject(Error("ServiceWorker installation failed"));
+        });
+        if (worker.state === "activated") resolve(worker);
+      }));
+    }
+    const channel = new MessageChannel();
+    cleanup.push(() => { channel.port1.close(); channel.port2.close(); });
+    contexts.serviceWorker = await bounded(new Promise(resolve => {
+      channel.port1.onmessage = event => resolve(event.data);
+      active.postMessage("probe", [channel.port2]);
+    }));
+    const retainedWindow = { webAuthn: "PublicKeyCredential" in window,
+      media: "mediaDevices" in navigator, peerConnection: "RTCPeerConnection" in window,
+      serviceWorker: "serviceWorker" in navigator };
+    return { passed: Object.values(contexts).every(value => value.secure && value.exposed.length === 0 && Object.values(value.retained).every(Boolean)) && Object.values(retainedWindow).every(Boolean), contexts, retainedWindow };
+  }
+  try { window.navisApiCut = await run(); }
+  catch (error) { window.navisApiCut = { passed: false, error: String(error) }; }
+  finally { for (const close of cleanup.reverse()) await close(); }
+  document.querySelector("#result").textContent = JSON.stringify(window.navisApiCut, null, 2);
+}
+</script>

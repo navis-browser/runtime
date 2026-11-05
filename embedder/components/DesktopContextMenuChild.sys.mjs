@@ -14,6 +14,11 @@ const MAX_SELECTION_LENGTH = 512;
 const MAX_SPELL_SUGGESTIONS = 5;
 const MAX_SPELL_SUGGESTION_LENGTH = 128;
 const OPENABLE_PROTOCOLS = new Set(["http:", "https:", "blob:"]);
+const ADDRESS_OPEN_COMMANDS = new Set([
+  "open-link-new-tab",
+  "open-image-new-tab",
+  "open-media-new-tab",
+]);
 const COPYABLE_PROTOCOLS = new Set([
   "http:",
   "https:",
@@ -36,6 +41,7 @@ function command(id, group, enabled = true) {
 export class DesktopContextMenuChild extends JSWindowActorChild {
   #token = 0;
   #target = null;
+  #document = null;
   #commands = new Map();
   #values = Object.freeze({});
   #spellChecker = null;
@@ -103,6 +109,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
     this.#clear(this.#token);
     const token = ++this.#token;
     this.#target = target;
+    this.#document = document;
     event.preventDefault();
     event.stopPropagation();
 
@@ -110,6 +117,8 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
     if (
       token !== this.#token ||
       this.#target !== target ||
+      this.contentWindow.document !== document ||
+      target.ownerDocument !== document ||
       !target.isConnected
     ) {
       spellcheck.checker?.uninit();
@@ -307,7 +316,16 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
 
     const { command: commandId } = message.data;
     const offered = this.#commands.get(commandId);
-    if (!offered?.enabled || !this.#target.isConnected) {
+    // Address commands use the facts captured when the menu opened. A hover
+    // handler may remove or adopt that node while the user chooses a command.
+    // Element operations still require the live target in its original document.
+    if (
+      !offered?.enabled ||
+      this.#document !== this.contentWindow.document ||
+      (!ADDRESS_OPEN_COMMANDS.has(commandId) &&
+        (!this.#target.isConnected ||
+          this.#target.ownerDocument !== this.#document))
+    ) {
       this.#clear(token);
       return false;
     }
@@ -328,12 +346,13 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
     this.#spellChecker?.uninit();
     this.#spellChecker = null;
     this.#target = null;
+    this.#document = null;
     this.#commands.clear();
     this.#values = Object.freeze({});
   }
 
   #execute(commandId, target, values) {
-    const document = target.ownerDocument;
+    const document = this.#document;
     if (/^spell-replace-[0-4]$/u.test(commandId)) {
       const index = Number(commandId.at(-1));
       const suggestion = values.spellSuggestions[index];
@@ -404,6 +423,7 @@ export class DesktopContextMenuChild extends JSWindowActorChild {
       return;
     }
     this.#target = null;
+    this.#document = null;
     this.#commands.clear();
     this.#values = Object.freeze({});
     this.#spellChecker?.uninit();

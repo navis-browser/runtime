@@ -1,0 +1,102 @@
+{
+  "source": "https://bugzilla.mozilla.org/show_bug.cgi?id=2083449",
+  "description": "Public compromised TLS intermediate certificate identities, including original and cross-sign paths. No leaf certificates or private keys.",
+  "certificates": [
+    {
+      "name": "dv-g3b-aaa",
+      "certificate_sha256": "45a883f349aedfd5f3a649b5498ffb121712ba8b448f3f2a91dbc5a766fcddbe",
+      "issuer": "MHsxCzAJBgNVBAYTAkdCMRswGQYDVQQIDBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoMEUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2VydmljZXM=",
+      "serial": "AKAk/fS6Zlx4XOSgIEg4WLc=",
+      "subject": "MD8xCzAJBgNVBAYTAk5MMRMwEQYDVQQKDAplTXVkaHJhIEJWMRswGQYDVQQDDBJFTSBEViBUTFMgQ0EgLSBHM0I=",
+      "spki_sha256": "6+1kdcLC2A/LGZ8/6N1uazzmC3frFdTkLD3sDG9bUQU="
+    },
+    {
+      "name": "dv-g3b",
+      "certificate_sha256": "42c4accd12c4f59597925e1a08a7a90102608543809308d50ec427e118ba1493",
+      "issuer": "MFYxCzAJBgNVBAYTAklOMSUwIwYDVQQKDBxlTXVkaHJhIFRlY2hub2xvZ2llcyBMaW1pdGVkMSAwHgYDVQQDDBdlbVNpZ24gUm9vdCBUTFMgQ0EgLSBHMw==",
+      "serial": "AKSu5njyM2K0wORgt3LyFA==",
+      "subject": "MD8xCzAJBgNVBAYTAk5MMRMwEQYDVQQKDAplTXVkaHJhIEJWMRswGQYDVQQDDBJFTSBEViBUTFMgQ0EgLSBHM0I=",
+      "spki_sha256": "6+1kdcLC2A/LGZ8/6N1uazzmC3frFdTkLD3sDG9bUQU="
+    },
+    {
+      "name": "dv-g3c-aaa",
+      "certificate_sha256": "62b7f9868263f72f6911fc78ceaf72c1979158b7368bf648683bb2aa39b02e72",
+      "issuer": "MHsxCzAJBgNVBAYTAkdCMRswGQYDVQQIDBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoMEUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2VydmljZXM=",
+      "serial": "AJHzR/Glt9OZYrleDuTimdE=",
+      "subject": "MEAxCzAJBgNVBAYTAlVTMRQwEgYDVQQKDAtlTXVkaHJhIEluYzEbMBkGA1UEAwwSRU0gRFYgVExTIENBIC0gRzND",
+      "spki_sha256": "Sd01PcK5GaN3BkURfQ5gwWEV59G8JZ7v5zSwDqQ0/l8="
+    },
+    {
+      "name": "dv-g3c",
+      "certificate_sha256": "0164d7ceae5bb909c272af151ff44b1177ae9b47d9424b94f1d9558c30934d19",
+      "issuer": "MFYxCzAJBgNVBAYTAklOMSUwIwYDVQQKDBxlTXVkaHJhIFRlY2hub2xvZ2llcyBMaW1pdGVkMSAwHgYDVQQDDBdlbVNpZ24gUm9vdCBUTFMgQ0EgLSBHMw==",
+      "serial": "WIsuPCu4zaE+GhIJJUMh",
+      "subject": "MEAxCzAJBgNVBAYTAlVTMRQwEgYDVQQKDAtlTXVkaHJhIEluYzEbMBkGA1UEAwwSRU0gRFYgVExTIENBIC0gRzND",
+      "spki_sha256": "Sd01PcK5GaN3BkURfQ5gwWEV59G8JZ7v5zSwDqQ0/l8="
+    },
+    {
+      "name": "ev-g3b-aaa",
+      "certificate_sha256": "579480aea166290bd3c643589e795fc0d0e54e86505d180f1dff99efd3199512",
+      "issuer": "MHsxCzAJBgNVBAYTAkdCMRswGQYDVQQIDBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoMEUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2VydmljZXM=",
+      "serial": "ANj4aF5PK9nYJAKoWhwetzE=",
+      "subject": "MD8xCzAJBgNVBAYTAk5MMRMwEQYDVQQKDAplTXVkaHJhIEJWMRswGQYDVQQDDBJFTSBFViBUTFMgQ0EgLSBHM0I=",
+      "spki_sha256": "4CVMf83CZeLw+KQo2rt1q0rgObSHLWL17lfwh31aikE="
+    },
+    {
+      "name": "ev-g3b",
+      "certificate_sha256": "e7568fe6e12331f4fd7de61da4c7559d0f8eb192a218d4741a3ba75184333838",
+      "issuer": "MFYxCzAJBgNVBAYTAklOMSUwIwYDVQQKDBxlTXVkaHJhIFRlY2hub2xvZ2llcyBMaW1pdGVkMSAwHgYDVQQDDBdlbVNpZ24gUm9vdCBUTFMgQ0EgLSBHMw==",
+      "serial": "AMfEHv6S2CXwXq6EGkqCwQ==",
+      "subject": "MD8xCzAJBgNVBAYTAk5MMRMwEQYDVQQKDAplTXVkaHJhIEJWMRswGQYDVQQDDBJFTSBFViBUTFMgQ0EgLSBHM0I=",
+      "spki_sha256": "4CVMf83CZeLw+KQo2rt1q0rgObSHLWL17lfwh31aikE="
+    },
+    {
+      "name": "ev-g3c-aaa",
+      "certificate_sha256": "fd9d5c2dbbd4995ab69b8d50c439d9527b00529199c2fd01b2174eb58f07021f",
+      "issuer": "MHsxCzAJBgNVBAYTAkdCMRswGQYDVQQIDBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoMEUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2VydmljZXM=",
+      "serial": "BfB4dS3s56G7hZXTAxZxcQ==",
+      "subject": "MEAxCzAJBgNVBAYTAlVTMRQwEgYDVQQKDAtlTXVkaHJhIEluYzEbMBkGA1UEAwwSRU0gRVYgVExTIENBIC0gRzND",
+      "spki_sha256": "XAZgorFkkQ2P9YnBjhRVLp4Owjfc7+LLc21BpIEfgaA="
+    },
+    {
+      "name": "ev-g3c",
+      "certificate_sha256": "432ec25f0d28de9006d97bf752f17bbb2cd41f669933fcb072d9a1148d0261f3",
+      "issuer": "MFYxCzAJBgNVBAYTAklOMSUwIwYDVQQKDBxlTXVkaHJhIFRlY2hub2xvZ2llcyBMaW1pdGVkMSAwHgYDVQQDDBdlbVNpZ24gUm9vdCBUTFMgQ0EgLSBHMw==",
+      "serial": "AIAJkopkEHYBrwX6LxnxCQ==",
+      "subject": "MEAxCzAJBgNVBAYTAlVTMRQwEgYDVQQKDAtlTXVkaHJhIEluYzEbMBkGA1UEAwwSRU0gRVYgVExTIENBIC0gRzND",
+      "spki_sha256": "XAZgorFkkQ2P9YnBjhRVLp4Owjfc7+LLc21BpIEfgaA="
+    },
+    {
+      "name": "ov-g3b-aaa",
+      "certificate_sha256": "5f1ded4dd590af74631290cf073b122a2aac6a1fa479778a0bd43579bd832699",
+      "issuer": "MHsxCzAJBgNVBAYTAkdCMRswGQYDVQQIDBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoMEUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2VydmljZXM=",
+      "serial": "AOlCI73pL5FOWrmsq/2sNxA=",
+      "subject": "MD8xCzAJBgNVBAYTAk5MMRMwEQYDVQQKDAplTXVkaHJhIEJWMRswGQYDVQQDDBJFTSBPViBUTFMgQ0EgLSBHM0I=",
+      "spki_sha256": "Q7/6GdbvZRRR9oQeAZkx6W9vLq7/KKtLbxzkV23icXs="
+    },
+    {
+      "name": "ov-g3b",
+      "certificate_sha256": "98b896625c0c230adeec3eb2cf6aad5001ecf9156a68644e82374ce5833bc25b",
+      "issuer": "MFYxCzAJBgNVBAYTAklOMSUwIwYDVQQKDBxlTXVkaHJhIFRlY2hub2xvZ2llcyBMaW1pdGVkMSAwHgYDVQQDDBdlbVNpZ24gUm9vdCBUTFMgQ0EgLSBHMw==",
+      "serial": "bK2jZ/scEACIEg6iAtVo",
+      "subject": "MD8xCzAJBgNVBAYTAk5MMRMwEQYDVQQKDAplTXVkaHJhIEJWMRswGQYDVQQDDBJFTSBPViBUTFMgQ0EgLSBHM0I=",
+      "spki_sha256": "Q7/6GdbvZRRR9oQeAZkx6W9vLq7/KKtLbxzkV23icXs="
+    },
+    {
+      "name": "ov-g3c-aaa",
+      "certificate_sha256": "7485b51c0ed192878fa1d2f948fb529ae1842cc5086c4b67f7be5b2039de9489",
+      "issuer": "MHsxCzAJBgNVBAYTAkdCMRswGQYDVQQIDBJHcmVhdGVyIE1hbmNoZXN0ZXIxEDAOBgNVBAcMB1NhbGZvcmQxGjAYBgNVBAoMEUNvbW9kbyBDQSBMaW1pdGVkMSEwHwYDVQQDDBhBQUEgQ2VydGlmaWNhdGUgU2VydmljZXM=",
+      "serial": "AI1aSBGTnvRH13ERzdmEmuk=",
+      "subject": "MEAxCzAJBgNVBAYTAlVTMRQwEgYDVQQKDAtlTXVkaHJhIEluYzEbMBkGA1UEAwwSRU0gT1YgVExTIENBIC0gRzND",
+      "spki_sha256": "Y+zv7kMdSVI7wRNsTnLQIGpHcIbK9gbNXPAlaGwQnPg="
+    },
+    {
+      "name": "ov-g3c",
+      "certificate_sha256": "cb6e15165ac802e9b3f993f16c25d41f4e81c21ebde71ae1b012ac00bf9c7c3f",
+      "issuer": "MFYxCzAJBgNVBAYTAklOMSUwIwYDVQQKDBxlTXVkaHJhIFRlY2hub2xvZ2llcyBMaW1pdGVkMSAwHgYDVQQDDBdlbVNpZ24gUm9vdCBUTFMgQ0EgLSBHMw==",
+      "serial": "KWkmwiejoVJjkrGUgqUE",
+      "subject": "MEAxCzAJBgNVBAYTAlVTMRQwEgYDVQQKDAtlTXVkaHJhIEluYzEbMBkGA1UEAwwSRU0gT1YgVExTIENBIC0gRzND",
+      "spki_sha256": "Y+zv7kMdSVI7wRNsTnLQIGpHcIbK9gbNXPAlaGwQnPg="
+    }
+  ]
+}

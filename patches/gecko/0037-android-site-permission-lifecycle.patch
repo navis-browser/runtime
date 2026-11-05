@@ -1,0 +1,443 @@
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+index 96a739f74ae5a8f0626fc05c04e9ed5c96af4868..4f478b99b6f9976f05de624bbea8039d5ab275cc 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -52,6 +52,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+   private static final String EVENT_LOCATION = "NavisAndroid:Location";
+   private static final String EVENT_TITLE = "NavisAndroid:Title";
+   private static final String EVENT_FAVICON = "NavisAndroid:Favicon";
++  private static final String EVENT_DEVICE_STATE = "NavisAndroid:DeviceState";
+   private static final String EVENT_LOADING = "NavisAndroid:Loading";
+   private static final String EVENT_LOAD_COMPLETE = "NavisAndroid:LoadComplete";
+   private static final String EVENT_SESSION_STATE = "NavisAndroid:SessionState";
+@@ -107,6 +108,8 @@ public final class NavisAndroidSession implements AutoCloseable {
+     /** A bounded PNG produced by Gecko for the current top-level document. */
+     default void onFaviconChanged(long sessionId, String pageUri, String png) {}
+ 
++    default void onDeviceUseChanged(long sessionId, boolean camera, boolean microphone, boolean serial) {}
++
+     void onLoadStarted(long sessionId, long generation, String uri);
+ 
+     /** Real top-level nsresult; unknown/cancelled is not a failed document. */
+@@ -352,6 +355,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+         EVENT_LOCATION,
+         EVENT_TITLE,
+         EVENT_FAVICON,
++        EVENT_DEVICE_STATE,
+         EVENT_LOADING,
+         EVENT_LOAD_COMPLETE,
+         EVENT_SESSION_STATE,
+@@ -867,6 +871,10 @@ public final class NavisAndroidSession implements AutoCloseable {
+         mDelegate.onSecurityChanged(
+             mSessionId, message.getInt("state", SECURITY_UNKNOWN));
+         break;
++      case EVENT_DEVICE_STATE:
++        mDelegate.onDeviceUseChanged(mSessionId, message.getBoolean("camera", false),
++            message.getBoolean("microphone", false), message.getBoolean("serial", false));
++        break;
+       case EVENT_FULLSCREEN:
+         final boolean fullscreen = message.getBoolean("enabled", false);
+         if (mFullscreen != fullscreen) {
+@@ -1512,6 +1520,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+         EVENT_LOCATION,
+         EVENT_TITLE,
+         EVENT_FAVICON,
++        EVENT_DEVICE_STATE,
+         EVENT_LOADING,
+         EVENT_LOAD_COMPLETE,
+         EVENT_SESSION_STATE,
+diff --git a/mobile/shared/actors/GeckoViewPermissionChild.sys.mjs b/mobile/shared/actors/GeckoViewPermissionChild.sys.mjs
+index 6ca281f084f4d5ad576d1d9b30d5f24d5723cfda..8f97fc3b516781b7275d672b8ed53fcc42b60b69 100644
+--- a/mobile/shared/actors/GeckoViewPermissionChild.sys.mjs
++++ b/mobile/shared/actors/GeckoViewPermissionChild.sys.mjs
+@@ -5,6 +5,15 @@
+ import { GeckoViewActorChild } from "resource://gre/modules/GeckoViewActorChild.sys.mjs";
+ 
+ export class GeckoViewPermissionChild extends GeckoViewActorChild {
++  receiveMessage(message) {
++    if (message.name === "Navis:StopMedia") {
++      Services.obs.notifyObservers(null, "getUserMedia:revoke",
++        String(this.contentWindow.windowUtils.currentInnerWindowID));
++      return true;
++    }
++    return super.receiveMessage(message);
++  }
++
+   getMediaPermission(aPermission) {
+     return this.sendQuery("GeckoView:MediaPermission", {
+       ...aPermission,
+diff --git a/mobile/shared/actors/GeckoViewPermissionParent.sys.mjs b/mobile/shared/actors/GeckoViewPermissionParent.sys.mjs
+index 294db7c113aa9bc43302d3fdee390e92686ea2b5..7b55352fc688297a8916da6f98ab1a153c865143 100644
+--- a/mobile/shared/actors/GeckoViewPermissionParent.sys.mjs
++++ b/mobile/shared/actors/GeckoViewPermissionParent.sys.mjs
+@@ -5,6 +5,20 @@
+ import { GeckoViewUtils } from "resource://gre/modules/GeckoViewUtils.sys.mjs";
+ import { GeckoViewActorParent } from "resource://gre/modules/GeckoViewActorParent.sys.mjs";
+ 
++const mediaByTop = new WeakMap();
++
++function publishMedia(top, windowId, devices) {
++  let frames = mediaByTop.get(top);
++  if (!frames) { frames = new Map(); mediaByTop.set(top, frames); }
++  if (devices) frames.set(windowId, devices);
++  else frames.delete(windowId);
++  const active = [...frames.values()].flat();
++  top.embedderElement?.navisAndroidMediaStateChanged?.({
++    camera: active.some(device => device.type === "camera" && device.status === "recording"),
++    microphone: active.some(device => device.type === "microphone" && device.status === "recording"),
++  });
++}
++
+ export class GeckoViewPermissionParent extends GeckoViewActorParent {
+   _appPermissions = {};
+ 
+@@ -61,15 +75,46 @@ export class GeckoViewPermissionParent extends GeckoViewActorParent {
+         return this.addCameraPermission();
+       }
+       case "GeckoView:MediaPermission": {
++        const principal = this.manager.documentPrincipal;
++        const window = this.manager;
++        const navis = Boolean(this.browsingContext.top.embedderElement?.navisAndroidMediaStateChanged);
++        const permissions = navis ? ChromeUtils.importESModule(
++          "resource://gre/modules/NavisAndroidPermissions.sys.mjs"
++        ) : null;
++        const epoch = permissions?.androidPermissionEpoch(principal);
++        const blocked = () => [["camera", aMessage.data.video], ["microphone", aMessage.data.audio]]
++          .some(([kind, devices]) => devices?.length &&
++            Services.perms.testExactPermissionFromPrincipal(principal, kind) === Services.perms.DENY_ACTION);
++        if (navis && (!principal?.isContentPrincipal || blocked())) return null;
+         return this.eventDispatcher.sendRequestForResult(
+           "GeckoView:MediaPermission",
+           {
+             ...aMessage.data,
+             uri: this.manager.documentURI?.spec ?? "",
+           }
+-        );
++        ).then(response => {
++          if (navis && (this.browsingContext.currentWindowGlobal !== window || blocked() ||
++              permissions.androidPermissionEpoch(principal) !== epoch)) return null;
++          if (navis && response) {
++            if (!["block", "allow-session"].includes(response.navisDecision)) return null;
++            const allow = response.navisDecision === "allow-session";
++            for (const [kind, devices] of [["camera", aMessage.data.video], ["microphone", aMessage.data.audio]]) {
++              if (!devices?.length) continue;
++              Services.perms.addFromPrincipal(principal, kind,
++                allow ? Services.perms.ALLOW_ACTION : Services.perms.DENY_ACTION,
++                allow || principal.privateBrowsingId ? Services.perms.EXPIRE_SESSION : Services.perms.EXPIRE_NEVER);
++            }
++            if (!allow) return null;
++          }
++          return response;
++        });
+       }
+       case "GeckoView:MediaRecordingStatusChanged": {
++        if (this.browsingContext.top.embedderElement?.navisAndroidMediaStateChanged) {
++          publishMedia(this.browsingContext.top, this.manager.innerWindowId,
++            Array.isArray(aMessage.data.devices) ? aMessage.data.devices : []);
++          return null;
++        }
+         return this.eventDispatcher.sendRequest(
+           "GeckoView:MediaRecordingStatusChanged",
+           aMessage.data
+@@ -79,6 +124,13 @@ export class GeckoViewPermissionParent extends GeckoViewActorParent {
+ 
+     return super.receiveMessage(aMessage);
+   }
++
++  didDestroy() {
++    if (this.browsingContext.top.embedderElement?.navisAndroidMediaStateChanged) {
++      publishMedia(this.browsingContext.top, this.manager.innerWindowId, null);
++    }
++    super.didDestroy?.();
++  }
+ }
+ 
+ const { debug, warn } = GeckoViewUtils.initLogging("GeckoViewPermissionParent");
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -66,7 +66,7 @@
+ ];
+ 
+ const PRODUCT_QUERIES = new Set([
+-  "product:initialize", "site:get", "site:clear", "data:clear",
++  "product:initialize", "site:get", "site:clear", "site:permission", "data:clear",
+   "links:set", "links:copy", "prefs:flush", "session:can-close", "support:get",
+   "processes:get", "processes:end", "credits:get", "appearance:set",
+   "search:get", "search:default", "search:upsert", "search:remove", "search:move",
+@@ -88,6 +88,7 @@
+ let fullscreenActive = false;
+ let shuttingDown = false;
+ let targetBridge;
++let unregisterPermissions;
+ let targetDispatcher;
+ let devToolsHost;
+ let responsiveTarget;
+@@ -1203,6 +1204,13 @@
+     },
+   };
+   window.navisAndroidTarget = targetBridge;
++  const { registerAndroidPermissions } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidPermissions.sys.mjs"
++  );
++  unregisterPermissions = registerAndroidPermissions(browser, {
++    cancel: () => targetBridge?.cancelPermissions(),
++    publish: state => dispatcher?.dispatch("NavisAndroid:DeviceState", state),
++  });
+   window.browser = browser;
+   window.browserDOMWindow = browserDOMWindow;
+   NavisAndroidCommandRegistry.registerHost(window, {
+@@ -1268,6 +1276,8 @@
+   NavisAndroidCommandRegistry.unregisterHost(window);
+   window.tab?.close();
+   targetBridge?.cancelAll();
++  unregisterPermissions?.();
++  unregisterPermissions = null;
+   NavisAndroidLoginLifecycle.detach(browser);
+   targetBridge = null;
+   targetDispatcher = null;
+diff --git a/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs b/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs
+index 4c19ccad4585b59bee272488d42b1715d28a7cd9..4d0856c09b8559c94add660abc19a902a06a122f 100644
+--- a/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewPermission.sys.mjs
+@@ -149,8 +149,10 @@ export class GeckoViewPermission {
+       return { allow: false };
+     }
+ 
++    const navisRuntime = AppConstants.MOZ_NAVIS_CORE && AppConstants.platform === "android";
++    const permissionKey = navisRuntime && perm.type === "geolocation" ? "geo" : perm.type;
+     const principal =
+-      perm.type === "storage-access"
++      navisRuntime || perm.type === "storage-access"
+         ? aRequest.principal
+         : aRequest.topLevelPrincipal;
+ 
+@@ -158,18 +160,31 @@ export class GeckoViewPermission {
+       ? aRequest.window
+       : aRequest.element.documentGlobal;
+ 
+-    const actor = window.browsingContext.currentWindowGlobal.getActor(
++    const context = navisRuntime && aRequest.element
++      ? aRequest.element.browsingContext : window.browsingContext;
++    const global = context.currentWindowGlobal;
++    const actor = global.getActor(
+       "GeckoViewPermission"
+     );
++    const navisPermissions = navisRuntime ? ChromeUtils.importESModule(
++      "resource://gre/modules/NavisAndroidPermissions.sys.mjs"
++    ) : null;
++    const permissionEpoch = navisPermissions?.androidPermissionEpoch(principal);
+ 
+     const requestId = Services.uuid.generateUUID().toString().slice(1, -1);
+     this.#pendingShownRequests.set(requestId, aRequest);
+ 
+-    const navisRuntime = AppConstants.MOZ_NAVIS_CORE && AppConstants.platform === "android";
+     let navisDecision = "dismiss";
+     let allowOrDeny;
+     try {
+-      const response = await actor.getContentPermission({
++      const stored = navisRuntime && perm.type !== "storage-access"
++        ? Services.perms.testExactPermissionFromPrincipal(principal, permissionKey) : 0;
++      const existing = navisRuntime
++        ? Services.perms.getPermissionObject(principal, permissionKey, true) : null;
++      const response = stored === Services.perms.ALLOW_ACTION
++        ? { navisDecision: existing?.expireType === Services.perms.EXPIRE_SESSION ? "allow-session" : "allow-always" }
++        : stored === Services.perms.DENY_ACTION ? { navisDecision: "block" }
++        : await actor.getContentPermission({
+         uri: principal.URI.displaySpec,
+         thirdPartyOrigin: aRequest.principal.origin,
+         principal: lazy.E10SUtils.serializePrincipal(principal),
+@@ -180,6 +195,8 @@ export class GeckoViewPermission {
+         requestId,
+       });
+ 
++      if (navisRuntime && context.currentWindowGlobal !== global) return { allow: false };
++
+       if (navisRuntime) {
+         navisDecision = ["allow-session", "allow-always", "block", "dismiss"].includes(response?.navisDecision)
+           ? response.navisDecision : "dismiss";
+@@ -210,6 +227,11 @@ export class GeckoViewPermission {
+       this.#pendingShownRequests.delete(requestId);
+     }
+ 
++    if (navisRuntime && (context.currentWindowGlobal !== global ||
++        navisPermissions.androidPermissionEpoch(principal) !== permissionEpoch)) {
++      return { allow: false };
++    }
++
+     // Manually release the target request here to facilitate garbage collection.
+     aRequest = undefined;
+ 
+@@ -226,7 +248,7 @@ export class GeckoViewPermission {
+     if (!navisRuntime || navisDecision !== "dismiss") {
+       Services.perms.addFromPrincipal(
+         principal,
+-        perm.type,
++        permissionKey,
+         allowOrDeny,
+         navisRuntime && (principal.privateBrowsingId !== 0 || navisDecision === "allow-session")
+           ? Services.perms.EXPIRE_SESSION : Services.perms.EXPIRE_NEVER
+diff --git a/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs b/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
+index 328fde71ccaddf606614cab0c63fcd28b97ef860..37119306f3dce97b095d19ba8345acd1bceb796b 100644
+--- a/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidGeckoProducer.sys.mjs
+@@ -351,18 +351,24 @@ export function createNavisGeckoEventDispatcher({
+             privateMode: privateMode(browser),
+             // NavisAndroidSession transports these as JSON strings so no
+             // Gecko Java object graph crosses the direct seam.
+-            videoSources: JSON.stringify(video),
+-            audioSources: JSON.stringify(audio),
++            videoSources: JSON.stringify(video.map((source, index) => ({ id: String(index), label: source.label ?? source.name ?? "" }))),
++            audioSources: JSON.stringify(audio.map((source, index) => ({ id: String(index), label: source.label ?? source.name ?? "" }))),
+           })
+           .then(result => {
+             if (!result?.allow) {
++              return result?.decision === "block" ? { navisDecision: "block" } : null;
++            }
++            const selected = (sources, id) => sources.find((_, index) => String(index) === id);
++            const videoSource = selected(video, result.video);
++            const audioSource = selected(audio, result.audio);
++            if ((video.length ? !videoSource : result.video != null) ||
++                (audio.length ? !audioSource : result.audio != null)) {
+               return null;
+             }
+-            // The current product target accepts/denies the complete request.
+-            // Select the first engine-provided source, never an invented ID.
+             return {
+-              video: video[0]?.rawId ?? video[0]?.id,
+-              audio: audio[0]?.rawId ?? audio[0]?.id,
++              video: videoSource?.rawId ?? videoSource?.id,
++              audio: audioSource?.rawId ?? audioSource?.id,
++              navisDecision: "allow-session",
+             };
+           });
+       }
+diff --git a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+index b9e2d8217e77488404451689fb4922ae420845a9..61aa3f7a5347df98df08283fa139f11da9c7c60a 100644
+--- a/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs
+@@ -13,6 +13,8 @@ import { setAppearanceSetting }
+   from "resource://gre/modules/navis/NavisSettingsPolicy.sys.mjs";
+ import { initializeAndroidSearch, queryAndroidSearch }
+   from "resource://gre/modules/NavisAndroidSearch.sys.mjs";
++import { androidSitePermissions, setAndroidSitePermission, revokeAndroidPermissions, revokeAllAndroidPermissions }
++  from "resource://gre/modules/NavisAndroidPermissions.sys.mjs";
+ 
+ const processManagers = new WeakMap();
+ function processManager(window) {
+@@ -127,6 +129,7 @@ function siteInformation(browser, issueClearToken = true) {
+   return {
+     kind, builtInExtension, navigationToken, origin: web?.origin ?? "", host: web?.host ?? "",
+     canClearData: issueClearToken && Boolean(web),
++    ...androidSitePermissions(browser),
+     certificate: certificate(read(info, "serverCert", null)),
+     certificateChain: [...chain].slice(0, 16).map(certificate).filter(Boolean),
+     protocol: ["SSL 3", "TLS 1.0", "TLS 1.1", "TLS 1.2", "TLS 1.3"][read(info, "protocolVersion", -1)] ?? "",
+@@ -137,7 +140,7 @@ function siteInformation(browser, issueClearToken = true) {
+   };
+ }
+ 
+-async function clearData(browser, token) {
++function requireSiteRequest(browser, token) {
+   const request = siteRequests.get(browser);
+   const web = webIdentity(browser);
+   if (!web || !request || request.token !== token ||
+@@ -147,11 +150,17 @@ async function clearData(browser, token) {
+     throw new Error("The site-information request is no longer current");
+   }
+   siteRequests.delete(browser);
++  return web;
++}
++
++async function clearData(browser, token) {
++  const web = requireSiteRequest(browser, token);
+   const failures = await new Promise(resolve => Services.clearData.deleteDataFromPrincipal(
+     web.principal, true, SITE_DATA_FLAGS, resolve,
+   ));
+   if (failures) throw new Error("Some site data could not be cleared");
+   clearWebPermissions(web.principal);
++  await revokeAndroidPermissions(web.principal, ["camera", "microphone", "serial", "midi", "midi-sysex"], true);
+   return { cleared: true, origin: web.principal.originNoSuffix,
+     privateMode: web.principal.privateBrowsingId !== 0 };
+ }
+@@ -182,6 +191,20 @@ export async function query(window, operation, data = {}) {
+         clearWebPermissions(null, ["geolocation", "desktop-notification", "persistent-storage", "xr"]);
+         Services.prefs.setIntPref("navis.sitePermissions.policyVersion", 2);
+       }
++      if (Services.prefs.getIntPref("navis.sitePermissions.policyVersion", 0) < 3) {
++        // Preserve native, successfully completed location decisions under the
++        // engine's actual permission key. The old Android UI cache is no longer
++        // consulted: it could record a grant before OS consent completed.
++        for (const permission of [...Services.perms.all]) {
++          if (permission.type !== "geolocation" || !permission.principal.isContentPrincipal) continue;
++          if (!Services.perms.getPermissionObject(permission.principal, "geo", true)) {
++            Services.perms.addFromPrincipal(permission.principal, "geo", permission.capability,
++              permission.expireType, permission.expireTime);
++          }
++          Services.perms.removePermission(permission);
++        }
++        Services.prefs.setIntPref("navis.sitePermissions.policyVersion", 3);
++      }
+       const search = await initializeAndroidSearch(data.searchLegacy);
+       const locale = Services.prefs.getStringPref("intl.locale.requested", "en-US");
+       Services.locale.requestedLocales = [locale === "zh-CN" ? "zh-CN" : "en-US"];
+@@ -196,10 +219,16 @@ export async function query(window, operation, data = {}) {
+       return siteInformation(browser, data.issueClearToken);
+     }
+     case "site:clear": return clearData(browser, data.navigationToken);
++    case "site:permission": {
++      requireSiteRequest(browser, data.navigationToken);
++      await setAndroidSitePermission(browser, data.kind, data.decision);
++      return siteInformation(browser);
++    }
+     case "data:clear": {
+       const failures = await new Promise(resolve => Services.clearData.deleteData(SITE_DATA_FLAGS, resolve));
+       if (failures) throw new Error("Some site data could not be cleared");
+       clearWebPermissions();
++      await revokeAllAndroidPermissions();
+       return { cleared: true };
+     }
+     case "links:set": {
+diff --git a/mobile/shared/modules/navis/NavisAndroidTargetBridge.sys.mjs b/mobile/shared/modules/navis/NavisAndroidTargetBridge.sys.mjs
+index 4ee668df63601b95cbf4de5e0e8050302c5c3864..e079df30b758e3e0ba8e8dc3cdff0f512c2168af 100644
+--- a/mobile/shared/modules/navis/NavisAndroidTargetBridge.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidTargetBridge.sys.mjs
+@@ -71,6 +71,7 @@ export function createNavisTargetBridge(dispatcher, isLive) {
+       resolve: resolveRequest,
+       reject: rejectRequest,
+       key: payload?.promptId ?? null,
++      event,
+       requestId,
+     });
+     dispatcher
+@@ -90,6 +91,13 @@ export function createNavisTargetBridge(dispatcher, isLive) {
+     cancel,
+     cancelByKey,
+     cancelAll,
++    cancelPermissions: () => {
++      for (const [id, request] of [...pending]) {
++        if (["NavisAndroid:SitePermission", "NavisAndroid:MediaPermission"].includes(request.event)) {
++          cancel(id, "Site permission changed");
++        }
++      }
++    },
+     prompt: payload => request("NavisAndroid:Prompt", payload),
+     sitePermission: payload => request("NavisAndroid:SitePermission", payload),
+     mediaPermission: payload => request("NavisAndroid:MediaPermission", payload),
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -9,10 +9,13 @@
+         "/desktop-embedder/modules/CertificateSecurity.sys.mjs",
+         "/desktop-embedder/modules/CertificateSecurityData.sys.mjs",
+         "/desktop-embedder/modules/DesktopAddressInput.sys.mjs",
++        "/desktop-embedder/modules/DesktopDeviceUse.sys.mjs",
++        "/desktop-embedder/modules/NavisAndroidPermissions.sys.mjs",
+         "/desktop-embedder/modules/NavisAndroidSearch.sys.mjs",
+         "/desktop-embedder/modules/NavisSearchPolicy.sys.mjs",
+         "/desktop-embedder/modules/NavisSearchService.sys.mjs",
+         "/desktop-embedder/modules/NavisSuggestionPolicy.sys.mjs",
++        "/desktop-embedder/modules/SitePermissionOrigins.sys.mjs",
+         "NavisAndroidClosedTabs.sys.mjs",
+         "NavisAndroidDevTools.sys.mjs",
+         "NavisAndroidFavicon.sys.mjs",

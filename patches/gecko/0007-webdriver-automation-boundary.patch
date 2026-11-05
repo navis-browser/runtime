@@ -206,7 +206,7 @@ index ec9dff56266413bcdd8064c9910129fdf6eda219..98347690591c0a061554d2750ed30758
          }
  
 diff --git a/remote/components/RemoteAgent.sys.mjs b/remote/components/RemoteAgent.sys.mjs
-index 2d006b20794b5448884e62a4e317f397b47d53a1..a9e5d09af81387c2fb1c26592245c67bc83b0073 100644
+index b024cc8cb47a33ef448c482d88d09974d022ce02..005b7cddec8ca07c374b1de41c6dec930cfde43a 100644
 --- a/remote/components/RemoteAgent.sys.mjs
 +++ b/remote/components/RemoteAgent.sys.mjs
 @@ -2,6 +2,8 @@
@@ -218,7 +218,7 @@ index 2d006b20794b5448884e62a4e317f397b47d53a1..a9e5d09af81387c2fb1c26592245c67b
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -43,7 +45,13 @@ class RemoteAgentParentProcess {
+@@ -46,7 +48,13 @@ class RemoteAgentParentProcess {
    constructor() {
      this.#allowHosts = null;
      this.#allowOrigins = null;
@@ -233,7 +233,7 @@ index 2d006b20794b5448884e62a4e317f397b47d53a1..a9e5d09af81387c2fb1c26592245c67b
      this.#browserStartupFinished = lazy.Deferred();
      this.#enabled = false;
  
-@@ -94,6 +102,13 @@ class RemoteAgentParentProcess {
+@@ -97,6 +105,13 @@ class RemoteAgentParentProcess {
    }
  
    set allowSystemAccess(value) {
@@ -887,23 +887,22 @@ index 54e29430c8ffce6ff39f3a5b446bf63050aaafdb..a72b7600c9190cea0ec2bf2d975d4fd6
      let extensionPolicy = Services.policies.getExtensionPolicy(extensionId);
      if (extensionPolicy) {
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index e2a4606e9a0466d0d97bd8d474acc937b78aa4b6..1f73af0bcfead523ec3263d9e94d9e7cb009ff34 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -147,6 +147,13 @@ export var AppConstants = Object.freeze({
+@@ -146,6 +146,13 @@
+ #else
    false,
  #endif
- 
++
 +  ENABLE_TESTS:
 +#ifdef ENABLE_TESTS
 +  true,
 +#else
 +  false,
 +#endif
-+
-   MOZ_WEBEXTENSIONS_RUNTIME:
- #ifdef MOZ_WEBEXTENSIONS_RUNTIME
-   true,
+   DEBUG: @MOZ_DEBUG_BOOL@,
+ 
+   ASAN: @MOZ_ASAN_BOOL@,
 diff --git a/toolkit/toolkit.mozbuild b/toolkit/toolkit.mozbuild
 index 3f3b968de17411e52dadd47c0fe7fa5804ab9bcd..4a4788c50a262379e5eac50681bbf8803bc088b1 100644
 --- a/toolkit/toolkit.mozbuild

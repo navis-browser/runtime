@@ -297,7 +297,7 @@ index ab008a13b4a6a31b18d5587e93e1ff589693cdac..2c0f4803acb8bdd5f77099265a9ef383
        this.isDisabledByPolicy() ||
        AppConstants.MOZ_APP_NAME == "thunderbird"
 diff --git a/dom/base/ChromeUtils.h b/dom/base/ChromeUtils.h
-index 7196b90d7e63bbad6aaa4df73f63e7d437d0f5a6..bcb5d24660cefa38c7f0f5b2914d766e16ce0452 100644
+index 6e293cd27f60a0d614f31059eb283195b43e0398..ea1d1b0ac7e79b5ab94a413a1713ed8650e32a90 100644
 --- a/dom/base/ChromeUtils.h
 +++ b/dom/base/ChromeUtils.h
 @@ -40,6 +40,7 @@ struct WindowActorOptions;
@@ -309,7 +309,7 @@ index 7196b90d7e63bbad6aaa4df73f63e7d437d0f5a6..bcb5d24660cefa38c7f0f5b2914d766e
    // Implemented in devtools/shared/heapsnapshot/HeapSnapshot.cpp
    static void SaveHeapSnapshotShared(GlobalObject& global,
 diff --git a/dom/chrome-webidl/ChromeUtils.webidl b/dom/chrome-webidl/ChromeUtils.webidl
-index 51da857cb4731e6e2d6f3a0dc499d65266a14212..3883ca67e5ebc8d67dddf269621eafc58096d404 100644
+index 2a9e755efdd9967bbb16e57b9470570326d6cb5b..64c714b927edf09cbccd8b292d72f56f6321668d 100644
 --- a/dom/chrome-webidl/ChromeUtils.webidl
 +++ b/dom/chrome-webidl/ChromeUtils.webidl
 @@ -119,6 +119,7 @@ dictionary ClearResourceCacheOptions {
@@ -320,7 +320,7 @@ index 51da857cb4731e6e2d6f3a0dc499d65266a14212..3883ca67e5ebc8d67dddf269621eafc5
    /**
     * Get the |NodeId| for the given JS Object.
     * |NodeId| is the identifier of |JS::ubi::Node|.
-@@ -1252,6 +1253,7 @@ dictionary ImportESModuleOptionsDictionary {
+@@ -1267,6 +1268,7 @@ dictionary ImportESModuleOptionsDictionary {
   * set of globals, the root has an edge to each global, and an edge for each
   * incoming JS reference to the selected Zones.
   */
@@ -353,10 +353,10 @@ index e55b7cb78e4f87cfc41bb4958c683c6dd54e1bd3..6b416c6cdc6032908c5331f3b10ba96b
  
    bool DeallocPHeapSnapshotTempFileHelperChild(
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 9b88a8ec494ff925591d6ac0d792c5dbc761a9fa..eb19173f3e26a8335fd4e28feef7ccab0fb17df4 100644
+index f31e14844406701e74dd053fbbf67fc2449b1094..a561fda8a743ec76220b202ffe72dffed4eaa8d1 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
-@@ -4576,6 +4576,7 @@ bool ContentParent::DeallocPHalParent(hal_sandbox::PHalParent* aHal) {
+@@ -4590,6 +4590,7 @@ bool ContentParent::DeallocPHalParent(hal_sandbox::PHalParent* aHal) {
    return true;
  }
  
@@ -365,7 +365,7 @@ index 9b88a8ec494ff925591d6ac0d792c5dbc761a9fa..eb19173f3e26a8335fd4e28feef7ccab
  ContentParent::AllocPHeapSnapshotTempFileHelperParent() {
    return devtools::HeapSnapshotTempFileHelperParent::Create();
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index a83a025e7c1125e07ae7606b1aa147dd5c359304..bcfd0d19d0e06fb8aa523d876735d9aa086b532c 100644
+index a37934bf36069b6e211574d868665006a634aaae..d3452c785e4015bf68375b43714c1903ca4ae497 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
 @@ -529,6 +529,7 @@ class ContentParent final : public PContentParent,
@@ -376,7 +376,7 @@ index a83a025e7c1125e07ae7606b1aa147dd5c359304..bcfd0d19d0e06fb8aa523d876735d9aa
    PHeapSnapshotTempFileHelperParent* AllocPHeapSnapshotTempFileHelperParent();
  #endif
  
-@@ -921,6 +922,7 @@ class ContentParent final : public PContentParent,
+@@ -923,6 +924,7 @@ class ContentParent final : public PContentParent,
  
    bool DeallocPHalParent(PHalParent*);
  
@@ -385,7 +385,7 @@ index a83a025e7c1125e07ae7606b1aa147dd5c359304..bcfd0d19d0e06fb8aa523d876735d9aa
        PHeapSnapshotTempFileHelperParent*);
  #endif
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index a6979e42afd8e37010bf846153e0a7b238ca0657..ef1951109602f40225dd2d1b45b3c0d4dc7a6699 100644
+index d1d230695200d68549eb70c0ac4bccb3b7cb37a5..040c1d9da96bb74b2d1e7dd4e62b2e28d5222cae 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
 @@ -15,6 +15,7 @@ include protocol PExtensions;
@@ -396,7 +396,7 @@ index a6979e42afd8e37010bf846153e0a7b238ca0657..ef1951109602f40225dd2d1b45b3c0d4
  include protocol PHeapSnapshotTempFileHelper;
  #endif
  include protocol PProcessHangMonitor;
-@@ -513,6 +514,7 @@ sync protocol PContent
+@@ -514,6 +515,7 @@ sync protocol PContent
      manages PExternalHelperApp;
      manages PHal;
      manages PHandlerService;
@@ -404,7 +404,7 @@ index a6979e42afd8e37010bf846153e0a7b238ca0657..ef1951109602f40225dd2d1b45b3c0d4
      manages PHeapSnapshotTempFileHelper;
  #endif
      manages PRemotePrintJob;
-@@ -1157,6 +1159,7 @@ parent:
+@@ -1158,6 +1160,7 @@ parent:
  
      [Nested=inside_cpow] async PHal();
  
@@ -1229,10 +1229,9 @@ index 97f695334a1f342fd1d37b41aec0ab161bdf0d5d..6fa0d0a5eea2c6dba8e0852fc7ba9ddd
  -focus-brand-name = Firefox Focus
  -relay-brand-name = Firefox Relay
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index 0c73a3a91c3af521ca1cd3cf12b507a236d43bc9..307a8298cd5cbbafb1fb53eceb6ed149d025669f 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -168,6 +168,13 @@ export var AppConstants = Object.freeze({
+@@ -168,6 +168,13 @@
    Object.freeze([]),
  #endif
  
@@ -1247,10 +1246,9 @@ index 0c73a3a91c3af521ca1cd3cf12b507a236d43bc9..307a8298cd5cbbafb1fb53eceb6ed149
  #ifdef ENABLE_TESTS
    true,
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index 61603b91747d72c7419d73a24e6a8a886b0bef17..5783f29491bc6986ee62750934632dd208703f2e 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
-@@ -51,6 +51,38 @@ option(
+@@ -51,6 +51,38 @@
  )
  set_config("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
  set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")

@@ -1,5 +1,5 @@
 # Current Linux implementation graph for Core/Platform iteration. The
-# WebExtensions runtime is retained only for Navis's immutable built-in uBO.
+# WebExtensions supports reviewed built-ins and signed user-selected local XPI files.
 ac_add_options --enable-project=navis
 ac_add_options --disable-tests
 ac_add_options --disable-release
@@ -8,16 +8,17 @@ ac_add_options --disable-updater
 ac_add_options --disable-local-ml
 ac_add_options --disable-eme-api
 ac_add_options --disable-web-push
+ac_add_options --disable-web-device-apis
+ac_add_options --disable-web-identity
+ac_add_options --disable-web-payments
+ac_add_options --disable-webxr
 ac_add_options --disable-safe-browsing
 ac_add_options --enable-webdriver
-ac_add_options --disable-printing
 ac_add_options --disable-ctypes
 ac_add_options --disable-backgroundtasks
 ac_add_options --enable-desktop-embedder
 ac_add_options --enable-desktop-embedder-devtools
-ac_add_options --enable-webextensions-runtime
 ac_add_options --disable-observability-runtime
-ac_add_options --disable-webrtc
 ac_add_options --host=x86_64-unknown-linux-gnu
 ac_add_options --target=x86_64-unknown-linux-gnu
 

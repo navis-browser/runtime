@@ -1,5 +1,5 @@
 diff --git a/dom/base/Navigator.cpp b/dom/base/Navigator.cpp
-index f59671c4532d544b891ecae338fa99d06b5a93f1..757ca3f38cfc9a38d476d520ae368f4dc2568bf3 100644
+index ccade920d7fc10edcd05cd6623731f8f940de1c9..e9ce5827dd74f20cc65d0c75f45107a9662e14c1 100644
 --- a/dom/base/Navigator.cpp
 +++ b/dom/base/Navigator.cpp
 @@ -111,8 +111,10 @@
@@ -38,7 +38,7 @@ index f59671c4532d544b891ecae338fa99d06b5a93f1..757ca3f38cfc9a38d476d520ae368f4d
  
    if (mGamepadServiceTest) {
      mGamepadServiceTest->Shutdown();
-@@ -2215,6 +2221,7 @@ nsresult Navigator::GetUserAgent(nsPIDOMWindowInner* aWindow,
+@@ -2220,6 +2226,7 @@ nsresult Navigator::GetUserAgent(nsPIDOMWindowInner* aWindow,
    return NS_OK;
  }
  
@@ -46,7 +46,7 @@ index f59671c4532d544b891ecae338fa99d06b5a93f1..757ca3f38cfc9a38d476d520ae368f4d
  static nsCString RequestKeySystemAccessLogString(
      const nsAString& aKeySystem,
      const Sequence<MediaKeySystemConfiguration>& aConfigs,
-@@ -2274,6 +2281,7 @@ Navigator::GetOrCreateMediaKeySystemAccessManager() {
+@@ -2279,6 +2286,7 @@ Navigator::GetOrCreateMediaKeySystemAccessManager() {
    }
    return mMediaKeySystemAccessManager;
  }
@@ -586,7 +586,7 @@ index 548bdd427a78234fb414102b5b99a15be599c628..9297e39534f59a951613fb78d8a01e14
  }
  
 diff --git a/dom/media/mediaelement/HTMLMediaElement.cpp b/dom/media/mediaelement/HTMLMediaElement.cpp
-index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f10195cf48 100644
+index 6cd37c384c13b21466a396015b44762ae6b5e02f..95d46bab7d63ff1dd7889c93a37bbd290bdcc064 100644
 --- a/dom/media/mediaelement/HTMLMediaElement.cpp
 +++ b/dom/media/mediaelement/HTMLMediaElement.cpp
 @@ -54,7 +54,9 @@
@@ -624,7 +624,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
      glean::media::error.Get(getErrorTypeLabel(), encryptedLabel).Add();
    }
  
-@@ -2196,12 +2204,16 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(HTMLMediaElement,
+@@ -2196,13 +2204,17 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(HTMLMediaElement,
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAudioTrackList)
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mVideoTrackList)
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMediaStreamTrackListener)
@@ -634,6 +634,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
 +#endif
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSelectedVideoStreamTrack)
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPendingPlayPromises)
+   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPendingPlayPromisesRunners)
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSeekDOMPromise)
 +#ifdef MOZ_EME_API
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSetMediaKeysDOMPromise)
@@ -641,7 +642,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mEventBlocker)
  NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
  
-@@ -2250,12 +2262,16 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLMediaElement,
+@@ -2251,13 +2263,17 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLMediaElement,
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mAudioTrackList)
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mVideoTrackList)
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mMediaStreamTrackListener)
@@ -651,6 +652,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
 +#endif
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mSelectedVideoStreamTrack)
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mPendingPlayPromises)
+   NS_IMPL_CYCLE_COLLECTION_UNLINK(mPendingPlayPromisesRunners)
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mSeekDOMPromise)
 +#ifdef MOZ_EME_API
    NS_IMPL_CYCLE_COLLECTION_UNLINK(mSetMediaKeysDOMPromise)
@@ -658,7 +660,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    if (tmp->mMediaControlKeyListener) {
      tmp->mMediaControlKeyListener->Shutdown();
    }
-@@ -2301,9 +2317,11 @@ already_AddRefed<Promise> HTMLMediaElement::MozRequestDebugInfo(
+@@ -2303,9 +2319,11 @@ already_AddRefed<Promise> HTMLMediaElement::MozRequestDebugInfo(
      return nullptr;
    }
    auto result = MakeUnique<dom::HTMLMediaElementDebugInfo>();
@@ -670,7 +672,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    if (mVideoFrameContainer) {
      result->mCompositorDroppedFrames =
          mVideoFrameContainer->GetDroppedImageCount();
-@@ -4907,7 +4925,9 @@ HTMLMediaElement::~HTMLMediaElement() {
+@@ -4915,7 +4933,9 @@ HTMLMediaElement::~HTMLMediaElement() {
    }
    UnregisterActivityObserver();
  
@@ -680,7 +682,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    mAllowedToPlayPromise.RejectIfExists(NS_ERROR_FAILURE, __func__);
  
    if (mDecoder) {
-@@ -5824,6 +5844,7 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
+@@ -5832,6 +5852,7 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
      mDecoder->SetSink(mSink.second);
    }
  
@@ -688,7 +690,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    if (mMediaKeys) {
      if (mMediaKeys->GetCDMProxy()) {
        mDecoder->SetCDMProxy(mMediaKeys->GetCDMProxy());
-@@ -5833,6 +5854,7 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
+@@ -5841,6 +5862,7 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
        return NS_ERROR_FAILURE;
      }
    }
@@ -696,7 +698,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  
    if (mChannelLoader) {
      mChannelLoader->Done();
-@@ -6316,7 +6338,6 @@ void HTMLMediaElement::PlaybackEnded() {
+@@ -6326,7 +6348,6 @@ void HTMLMediaElement::PlaybackEnded() {
        return;
      }
    }
@@ -704,7 +706,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    FireTimeUpdate(TimeupdateType::eMandatory);
  
    if (!mPaused) {
-@@ -7319,6 +7340,7 @@ void HTMLMediaElement::NotifyOwnerDocumentActivityChanged() {
+@@ -7332,6 +7353,7 @@ void HTMLMediaElement::NotifyOwnerDocumentActivityChanged() {
    SuspendOrResumeElement(shouldSuspend);
  
    // If the owning document has become inactive we should shutdown the CDM.
@@ -712,7 +714,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    if (!OwnerDoc()->IsCurrentActiveDocument() && mMediaKeys) {
      // We don't shutdown MediaKeys here because it also listens for document
      // activity and will take care of shutting down itself.
-@@ -7328,6 +7350,7 @@ void HTMLMediaElement::NotifyOwnerDocumentActivityChanged() {
+@@ -7341,6 +7363,7 @@ void HTMLMediaElement::NotifyOwnerDocumentActivityChanged() {
        ShutdownDecoder();
      }
    }
@@ -720,7 +722,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  
    AddRemoveSelfReference();
  }
-@@ -7717,6 +7740,7 @@ void HTMLMediaElement::OnVisibilityChange(Visibility aNewVisibility) {
+@@ -7731,6 +7754,7 @@ void HTMLMediaElement::OnVisibilityChange(Visibility aNewVisibility) {
    NotifyDecoderActivityChanges();
  }
  
@@ -728,7 +730,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  MediaKeys* HTMLMediaElement::GetMediaKeys() const { return mMediaKeys; }
  
  bool HTMLMediaElement::ContainsRestrictedContent() const {
-@@ -7903,6 +7927,9 @@ void HTMLMediaElement::ResetSetMediaKeysTempVariables() {
+@@ -7917,6 +7941,9 @@ void HTMLMediaElement::ResetSetMediaKeysTempVariables() {
    mAttachingMediaKey = false;
    mIncomingMediaKeys = nullptr;
  }
@@ -738,7 +740,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  
  bool HTMLMediaElement::MozAudioCaptured() const {
    ReportToConsole(nsIScriptError::warningFlag,
-@@ -7914,6 +7941,7 @@ bool HTMLMediaElement::MozAudioCaptured() const {
+@@ -7928,6 +7955,7 @@ bool HTMLMediaElement::MozAudioCaptured() const {
    return mAudioCaptured;
  }
  
@@ -746,7 +748,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  already_AddRefed<Promise> HTMLMediaElement::SetMediaKeys(
      mozilla::dom::MediaKeys* aMediaKeys, ErrorResult& aRv) {
    LOG(LogLevel::Debug, ("{} SetMediaKeys({}) mMediaKeys={} mDecoder={}",
-@@ -7987,9 +8015,11 @@ EventHandlerNonNull* HTMLMediaElement::GetOnwaitingforkey() {
+@@ -8001,9 +8029,11 @@ EventHandlerNonNull* HTMLMediaElement::GetOnwaitingforkey() {
  void HTMLMediaElement::SetOnwaitingforkey(EventHandlerNonNull* aCallback) {
    EventTarget::SetEventHandler(nsGkAtoms::onwaitingforkey, aCallback);
  }
@@ -758,7 +760,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    LOG(LogLevel::Debug,
        ("{} DispatchEncrypted initDataType='{}'", fmt::ptr(this),
         NS_ConvertUTF16toUTF8(aInitDataType).get()));
-@@ -8015,6 +8045,7 @@ void HTMLMediaElement::DispatchEncrypted(const nsTArray<uint8_t>& aInitData,
+@@ -8029,6 +8059,7 @@ void HTMLMediaElement::DispatchEncrypted(const nsTArray<uint8_t>& aInitData,
      nsPrintfCString markerName{"%p:encrypted", this};
      PROFILER_MARKER_UNTYPED(markerName, MEDIA_PLAYBACK);
    }
@@ -766,7 +768,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  }
  
  bool HTMLMediaElement::IsEventAttributeNameInternal(nsAtom* aName) {
-@@ -8023,6 +8054,7 @@ bool HTMLMediaElement::IsEventAttributeNameInternal(nsAtom* aName) {
+@@ -8037,6 +8068,7 @@ bool HTMLMediaElement::IsEventAttributeNameInternal(nsAtom* aName) {
  }
  
  void HTMLMediaElement::NotifyWaitingForKey() {
@@ -774,7 +776,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    LOG(LogLevel::Debug, ("{}, NotifyWaitingForKey()", fmt::ptr(this)));
  
    // http://w3c.github.io/encrypted-media/#wait-for-key
-@@ -8038,6 +8070,7 @@ void HTMLMediaElement::NotifyWaitingForKey() {
+@@ -8052,6 +8084,7 @@ void HTMLMediaElement::NotifyWaitingForKey() {
      // affect mReadyState.
      mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
    }
@@ -782,7 +784,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  }
  
  AudioTrackList* HTMLMediaElement::AudioTracks() { return mAudioTrackList; }
-@@ -8321,6 +8354,7 @@ void HTMLMediaElement::AsyncRejectPendingPlayPromises(nsresult aError) {
+@@ -8335,6 +8368,7 @@ void HTMLMediaElement::AsyncRejectPendingPlayPromises(nsresult aError) {
  }
  
  void HTMLMediaElement::GetEMEInfo(dom::EMEDebugInfo& aInfo) {
@@ -790,7 +792,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
    MOZ_ASSERT(NS_IsMainThread(),
               "MediaKeys expects to be interacted with on main thread!");
    if (!mMediaKeys) {
-@@ -8328,6 +8362,7 @@ void HTMLMediaElement::GetEMEInfo(dom::EMEDebugInfo& aInfo) {
+@@ -8342,6 +8376,7 @@ void HTMLMediaElement::GetEMEInfo(dom::EMEDebugInfo& aInfo) {
    }
    mMediaKeys->GetKeySystem(aInfo.mKeySystem);
    mMediaKeys->GetSessionsInfo(aInfo.mSessionsInfo);
@@ -798,7 +800,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  }
  
  void HTMLMediaElement::NotifyDecoderActivityChanges() const {
-@@ -8355,12 +8390,16 @@ bool HTMLMediaElement::IsAudible() const {
+@@ -8369,12 +8404,16 @@ bool HTMLMediaElement::IsAudible() const {
  }
  
  Maybe<nsAutoString> HTMLMediaElement::GetKeySystem() const {
@@ -815,7 +817,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  }
  
  void HTMLMediaElement::ConstructMediaTracks(const MediaInfo* aInfo) {
-@@ -8741,7 +8780,7 @@ void HTMLMediaElement::MaybeMarkSHEntryAsUserInteracted() {
+@@ -8755,7 +8794,7 @@ void HTMLMediaElement::MaybeMarkSHEntryAsUserInteracted() {
    }
  }
  
@@ -825,7 +827,7 @@ index dbc753689a20b8eba26282555479fa305e0d9c03..2d6fa6f95169fe0f8317361cd89b99f1
  
  CDMProxy* HTMLMediaElement::GetCDMProxy() const {
 diff --git a/dom/media/mediaelement/HTMLMediaElement.h b/dom/media/mediaelement/HTMLMediaElement.h
-index 74ec5b5edfb9b25ba5fe24a00a54b6f59affb800..6524bd8b6e543b2116922d81eb460df3a25c7211 100644
+index c77089bdd088318815f17f2fdee7527b492a69b4..c140af6bb8484070031b5ffca8cf6b24ef8bc50a 100644
 --- a/dom/media/mediaelement/HTMLMediaElement.h
 +++ b/dom/media/mediaelement/HTMLMediaElement.h
 @@ -7,6 +7,7 @@
@@ -1174,7 +1176,7 @@ index 4a27236733fcd79da04e8f3bb3efe7312840e0d9..815c3e5f8dad7ccacc78850a0af6fb40
    RefPtr<MediaDrmRemoteCDMParent> mCDM;
  #endif
 diff --git a/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp b/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
-index 325c1e2149fbd401155e91dd34bb434897adb83a..51727d209bd1e592ac5f2684f4602147589419c9 100644
+index b4d5549b13fc21b2bc52490c3206b0d19195fe10..cf731f207dd3ab0d0fa811a35c4e76d614ef6189 100644
 --- a/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
 +++ b/dom/media/platforms/ffmpeg/FFmpegVideoDecoder.cpp
 @@ -117,7 +117,9 @@
@@ -1197,7 +1199,7 @@ index 325c1e2149fbd401155e91dd34bb434897adb83a..51727d209bd1e592ac5f2684f4602147
    // We only support decrypt and decode with MediaCodec.
    if (mCDM) {
      FFMPEG_LOG("CDM requires platform decoder");
-@@ -1558,7 +1560,8 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::DoDecode(
+@@ -1563,7 +1565,8 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::DoDecode(
          aId, flag);
    });
  
@@ -1207,7 +1209,7 @@ index 325c1e2149fbd401155e91dd34bb434897adb83a..51727d209bd1e592ac5f2684f4602147
    MediaResult ret = MaybeAttachCryptoInfo(aSample, packet);
    if (NS_FAILED(ret)) {
      return ret;
-@@ -3123,7 +3126,7 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::InitMediaCodecDecoder() {
+@@ -3142,7 +3145,7 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::InitMediaCodecDecoder() {
      return ret;
    }
  
@@ -1239,14 +1241,15 @@ index fe31248d9642359b88d3d5ca2d1ff13fca88a49e..9b335ac90760722190b67071353c6745
              // per-origin MediaDRM provisioning. This includes keys that
              // were only used by enumerateDevices and never for DRM;
 diff --git a/dom/webidl/HTMLMediaElement.webidl b/dom/webidl/HTMLMediaElement.webidl
-index 1f006e397220e4c37f44c3b225f0688ce3fb36d9..122f2806d1cefefe2249d12d0f8e8ea1549f4764 100644
+index 1f006e397220e4c37f44c3b225f0688ce3fb36d9..c3333b238f4ae3c4d988a74e589ee0d942f8df05 100644
 --- a/dom/webidl/HTMLMediaElement.webidl
 +++ b/dom/webidl/HTMLMediaElement.webidl
-@@ -53,7 +53,9 @@ interface HTMLMediaElement : HTMLElement {
+@@ -52,8 +52,10 @@ interface HTMLMediaElement : HTMLElement {
+   readonly attribute unrestricted double duration;
    [Func="IsChromeOrUAWidget"]
    undefined updateCueDisplay();
-   [ChromeOnly]
 +#ifdef MOZ_EME_API
+   [ChromeOnly]
    readonly attribute boolean isEncrypted;
 +#endif
    // TODO: Bug 847376 - readonly attribute any startDate;
@@ -1420,10 +1423,9 @@ index d29855cd47cc2aea53c2024c23c8301fd67a92a5..485b13d64892c10ff2556d103d8e7349
  interface mixin NavigatorConcurrentHardware {
    readonly attribute unsigned long long hardwareConcurrency;
 diff --git a/dom/webidl/moz.build b/dom/webidl/moz.build
-index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd60028861543f72 100644
 --- a/dom/webidl/moz.build
 +++ b/dom/webidl/moz.build
-@@ -419,8 +419,13 @@ GENERATED_WEBIDL_FILES = [
+@@ -419,8 +419,13 @@
  ]
  
  PREPROCESSED_WEBIDL_FILES = [
@@ -1437,7 +1439,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "Window.webidl",
  ]
  
-@@ -708,7 +713,6 @@ WEBIDL_FILES = [
+@@ -708,7 +713,6 @@
      "HTMLLinkElement.webidl",
      "HTMLMapElement.webidl",
      "HTMLMarqueeElement.webidl",
@@ -1445,7 +1447,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "HTMLMenuElement.webidl",
      "HTMLMetaElement.webidl",
      "HTMLMeterElement.webidl",
-@@ -783,7 +787,6 @@ WEBIDL_FILES = [
+@@ -783,7 +787,6 @@
      "LockManager.webidl",
      "LoginStatus.webidl",
      "MathMLElement.webidl",
@@ -1453,7 +1455,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "MediaDebugInfo.webidl",
      "MediaDeviceInfo.webidl",
      "MediaDevices.webidl",
-@@ -840,7 +843,6 @@ WEBIDL_FILES = [
+@@ -840,7 +843,6 @@
      "NavigationPrecommitController.webidl",
      "NavigationPreloadManager.webidl",
      "NavigationTransition.webidl",
@@ -1461,7 +1463,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "NetErrorInfo.webidl",
      "NetworkInformation.webidl",
      "NetworkOptions.webidl",
-@@ -881,7 +883,6 @@ WEBIDL_FILES = [
+@@ -881,7 +883,6 @@
      "PerformanceServerTiming.webidl",
      "PerformanceTiming.webidl",
      "PeriodicWave.webidl",
@@ -1469,7 +1471,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "PermissionStatus.webidl",
      "PictureInPictureWindow.webidl",
      "Plugin.webidl",
-@@ -891,12 +892,6 @@ WEBIDL_FILES = [
+@@ -891,12 +892,6 @@
      "PrivateAttribution.webidl",
      "ProcessingInstruction.webidl",
      "Promise.webidl",
@@ -1482,7 +1484,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "QueuingStrategy.webidl",
      "RadioNodeList.webidl",
      "Range.webidl",
-@@ -1310,7 +1305,6 @@ GENERATED_EVENTS_WEBIDL_FILES = [
+@@ -1308,7 +1303,6 @@
      "PositionStateEvent.webidl",
      "ProgressEvent.webidl",
      "PromiseRejectionEvent.webidl",
@@ -1490,7 +1492,7 @@ index 483f6697a0373b3c9e87a94ab40be2e841575ba1..c4d694290923e85eb702df0fcd600288
      "SecurityPolicyViolationEvent.webidl",
      "SubmitEvent.webidl",
      "TaskPriorityChangeEvent.webidl",
-@@ -1339,6 +1333,11 @@ if CONFIG["MOZ_WEBRTC"]:
+@@ -1337,6 +1331,11 @@
          "RTCTransformEvent.webidl",
      ]
  
@@ -1560,13 +1562,14 @@ index 28b165e10fd3f2baa9fd3da3d630fca3388f176a..4afc36d4b3e7ba543e2fe27237dde941
          "subprocess",
      ]
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index f33d971378050efedf1fe7f2f377a3aadbd02e5b..7ed3c01075d83c3a62edb111f5e5baa721033767 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
-@@ -90,6 +90,54 @@ set_config("MOZ_WEBEXTENSIONS_RUNTIME", webextensions_runtime)
- set_define("MOZ_WEBEXTENSIONS_RUNTIME", True, when=webextensions_runtime)
+@@ -68,6 +68,54 @@
+ set_config("MOZ_OBSERVABILITY_RUNTIME", observability_runtime)
+ set_define("MOZ_OBSERVABILITY_RUNTIME", True, when=observability_runtime)
  
- 
++
++
 +option(
 +    "--enable-eme-api",
 +    default=True,
@@ -1613,12 +1616,10 @@ index f33d971378050efedf1fe7f2f377a3aadbd02e5b..7ed3c01075d83c3a62edb111f5e5baa7
 +
 +set_config("MOZ_SAFE_BROWSING", safe_browsing)
 +set_define("MOZ_SAFE_BROWSING", True, when=safe_browsing)
-+
-+
+ 
+ 
  option(
-     env="MOZ_STUB_INSTALLER",
-     help="Produce a stub installer",
-@@ -977,9 +1025,9 @@ def eme_choices(target, wmf):
+@@ -957,9 +1005,9 @@
  
  
  # Widevine is enabled by default in desktop browser builds.
@@ -1631,7 +1632,7 @@ index f33d971378050efedf1fe7f2f377a3aadbd02e5b..7ed3c01075d83c3a62edb111f5e5baa7
          return choices
  
  
-@@ -993,8 +1041,12 @@ option(
+@@ -973,8 +1021,12 @@
  )
  
  
@@ -1647,10 +1648,9 @@ index f33d971378050efedf1fe7f2f377a3aadbd02e5b..7ed3c01075d83c3a62edb111f5e5baa7
  
  
 diff --git a/toolkit/mozapps/extensions/extensions.manifest b/toolkit/mozapps/extensions/extensions.manifest
-index 3810a9eab853ff5c42a4ee0e7c64996e114d7edb..03e470e05603554228401b2cc1b2a7d83bbdbbe3 100644
 --- a/toolkit/mozapps/extensions/extensions.manifest
 +++ b/toolkit/mozapps/extensions/extensions.manifest
-@@ -9,7 +9,9 @@ category update-timer addonManager @mozilla.org/addons/integration;1,getService,
+@@ -7,7 +7,9 @@
  #endif
  #ifndef MOZ_THUNDERBIRD
  #ifndef MOZ_WIDGET_ANDROID
@@ -1661,10 +1661,9 @@ index 3810a9eab853ff5c42a4ee0e7c64996e114d7edb..03e470e05603554228401b2cc1b2a7d8
  category addon-provider-module ModelHubProvider resource://gre/modules/addons/ModelHubProvider.sys.mjs
  #endif
 diff --git a/toolkit/mozapps/extensions/internal/moz.build b/toolkit/mozapps/extensions/internal/moz.build
-index d3fb7105e677e57b84af1d885225a157b088e21e..462bff3920f80d3375a292ffa9eea9963678b513 100644
 --- a/toolkit/mozapps/extensions/internal/moz.build
 +++ b/toolkit/mozapps/extensions/internal/moz.build
-@@ -25,6 +25,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] != "android":
+@@ -24,6 +24,9 @@
          "SitePermsAddonProvider.sys.mjs",
      ]
  

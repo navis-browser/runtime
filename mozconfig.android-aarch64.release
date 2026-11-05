@@ -1,0 +1,42 @@
+# Navis Android aarch64 release-candidate graph. This profile shares the
+# product capability boundary with desktop while selecting the Navis-owned
+# Android runtime over pinned Gecko engine primitives. WebRTC/media capture is
+# enabled here; Web Push is an explicit product cut because Navis has no
+# supported remote or local Push provider. It is intentionally
+# incremental and sccache-backed. The candidate wrapper verifies its complete
+# source freeze and keeps Debug and Release object graphs separate.
+
+export MOZ_REQUIRE_SIGNING=1
+
+ac_add_options --enable-project=mobile/android
+ac_add_options --host=x86_64-unknown-linux-gnu
+ac_add_options --target=aarch64-linux-android
+ac_add_options --with-android-sdk="$ANDROID_SDK_ROOT"
+ac_add_options --with-android-ndk="$ANDROID_NDK_ROOT"
+ac_add_options --with-navis-product-version-file-path=navis/config
+ac_add_options --with-navis-remote-settings-policy=navis/config/navis-remote-settings-policy.json
+ac_add_options --enable-android-subproject=navis
+ac_add_options --enable-navis-core
+ac_add_options --disable-tests
+ac_add_options --enable-release
+ac_add_options --disable-debug
+ac_add_options --enable-optimize
+ac_add_options --disable-crashreporter
+ac_add_options --disable-updater
+ac_add_options --disable-local-ml
+ac_add_options --disable-eme-api
+ac_add_options --disable-web-push
+ac_add_options --disable-web-device-apis
+ac_add_options --disable-web-identity
+ac_add_options --disable-web-payments
+ac_add_options --disable-webxr
+ac_add_options --disable-safe-browsing
+ac_add_options --disable-observability-runtime
+ac_add_options --disable-cargo-incremental
+ac_add_options --with-ccache=sccache
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-navis-android-aarch64-release
+# Candidate builds must fail for an explicit clobber decision instead of
+# silently deleting the reviewed incremental graph.
+mk_add_options AUTOCLOBBER=
+mk_add_options MOZ_MAKE_FLAGS="-j16"

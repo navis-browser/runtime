@@ -7,7 +7,7 @@ const file = "mobile/shared/components/extensions/ext-search.js";
 let source = fs.readFileSync(new URL(`../gecko/${file}`, import.meta.url), "utf8");
 if (!source.includes("NavisSearchService.snapshot")) {
   // Exercise the source-of-record port without mutating the generated Gecko checkout.
-  const patch = fs.readFileSync(new URL("../patches/gecko/0037-navis-offline-search-service.patch", import.meta.url), "utf8");
+  const patch = fs.readFileSync(new URL("../patches/gecko/0035-navis-offline-search-service.patch", import.meta.url), "utf8");
   const section = patch.split("diff --git ").find(part => part.startsWith(`a/${file} b/${file}\n`));
   for (const hunk of section.split(/^@@ .* @@\n/mu).slice(1)) {
     const lines = hunk.trimEnd().split("\n");

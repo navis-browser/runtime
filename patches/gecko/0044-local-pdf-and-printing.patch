@@ -1,0 +1,740 @@
+diff --git a/dom/ipc/moz.build b/dom/ipc/moz.build
+index 0e49f0b98ff3f0dd2de39a7bf1e97036d6bd0f81..5cda15baba2f43ca809dfb252646ad132f5ed84f 100644
+--- a/dom/ipc/moz.build
++++ b/dom/ipc/moz.build
+@@ -200,7 +200,7 @@ IPDL_SOURCES += [
+     "WindowGlobalTypes.ipdlh",
+ ]
+ 
+-if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
++if CONFIG["MOZ_DESKTOP_EMBEDDER"] and not CONFIG["NS_PRINTING"]:
+     IPDL_SOURCES += [
+         "../../toolkit/components/printingui/ipc/PPrintingTypes.ipdlh",
+     ]
+diff --git a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+index db7014612f3b203b0b176dde76595563543f472b..ccf99d7636b42c68bf48fe78a90a8ec069641aa0 100644
+--- a/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
++++ b/mobile/android/geckoview/src/main/java/org/mozilla/gecko/navis/NavisAndroidSession.java
+@@ -93,6 +93,13 @@ public final class NavisAndroidSession implements AutoCloseable {
+   public interface Delegate {
+     void onNativeWindowReady(long sessionId);
+ 
++    default void onPrintRequested(long sessionId) {}
++
++    default void onDocumentResponse(long sessionId, boolean privateMode,
++        org.mozilla.geckoview.WebResponse response) {
++      try { if (response.body != null) response.body.close(); } catch (java.io.IOException ignored) {}
++    }
++
+     void onHostReady(long sessionId);
+ 
+     void onLocationChanged(
+@@ -351,6 +358,8 @@ public final class NavisAndroidSession implements AutoCloseable {
+     mDispatcher.registerUiThreadListener(
+         mEventListener,
+         EVENT_HOST_READY,
++        "NavisAndroid:Print",
++        "NavisAndroid:SavePDF",
+         EVENT_POPUP_CLOSE,
+         EVENT_LOCATION,
+         EVENT_TITLE,
+@@ -784,6 +793,12 @@ public final class NavisAndroidSession implements AutoCloseable {
+     }
+ 
+     switch (event) {
++      case "NavisAndroid:Print":
++        mDelegate.onPrintRequested(mSessionId);
++        break;
++      case "NavisAndroid:SavePDF":
++        savePdf(message, callback);
++        break;
+       case EVENT_POPUP_CLOSE:
+         handlePopupCloseRequest(message);
+         break;
+@@ -1408,6 +1423,7 @@ public final class NavisAndroidSession implements AutoCloseable {
+   }
+ 
+   private void transitionToClosed() {
++    if (mPrintDocument != null) mPrintDocument.close();
+     if (mClosed) {
+       return;
+     }
+@@ -1516,6 +1532,8 @@ public final class NavisAndroidSession implements AutoCloseable {
+     mDispatcher.unregisterUiThreadListener(
+         mEventListener,
+         EVENT_HOST_READY,
++        "NavisAndroid:Print",
++        "NavisAndroid:SavePDF",
+         EVENT_POPUP_CLOSE,
+         EVENT_LOCATION,
+         EVENT_TITLE,
+@@ -1557,6 +1575,133 @@ public final class NavisAndroidSession implements AutoCloseable {
+     }
+   }
+ 
++  /** Native identities remain inside this private Java document transport. */
++  public final class PrintDocument implements AutoCloseable {
++    public final String title;
++    private final String token;
++    private final long sourceWindow;
++    private final long printWindow;
++    private final java.util.Set<java.io.InputStream> streams = new java.util.HashSet<>();
++    private boolean closed;
++
++    private PrintDocument(final String json) throws org.json.JSONException {
++      final org.json.JSONObject data = new org.json.JSONObject(json);
++      token = data.getString("token");
++      sourceWindow = data.getLong("sourceWindow");
++      printWindow = data.getLong("printWindow");
++      title = data.optString("title", "Navis");
++      if (token.length() > 64 || sourceWindow <= 0 || printWindow <= 0 || title.length() > 200) {
++        throw new IllegalArgumentException("Invalid document lease");
++      }
++    }
++
++    public CompletionStage<java.io.InputStream> render(
++        final int width, final int height, final int left, final int top,
++        final int right, final int bottom, final boolean color, final int[] ranges) {
++      ThreadUtils.assertOnUiThread();
++      final CompletableFuture<java.io.InputStream> future = new CompletableFuture<>();
++      if (closed || mClosed || mPrintDocument != this || !mHostReady) {
++        future.completeExceptionally(new IllegalStateException("Print document closed"));
++        return future;
++      }
++      final org.mozilla.geckoview.GeckoResult<java.io.InputStream> result =
++          new org.mozilla.geckoview.GeckoResult<>();
++      result.withHandler(mUiHandler).accept(stream -> {
++        if (closed || mClosed || mPrintDocument != this) {
++          try { stream.close(); } catch (java.io.IOException ignored) {}
++          future.completeExceptionally(new IllegalStateException("Print document closed"));
++          return;
++        }
++        final java.io.InputStream owned = new java.io.FilterInputStream(stream) {
++          @Override public void close() throws java.io.IOException {
++            synchronized (streams) { streams.remove(this); }
++            super.close();
++          }
++        };
++        synchronized (streams) { streams.add(owned); }
++        future.complete(owned);
++      }, future::completeExceptionally);
++      mWindow.printToPdf(result, sourceWindow, printWindow, width, height,
++          left, top, right, bottom, color, ranges);
++      return future;
++    }
++
++    @Override public void close() {
++      ThreadUtils.assertOnUiThread();
++      if (closed) return;
++      closed = true;
++      synchronized (streams) {
++        for (final java.io.InputStream stream : new java.util.ArrayList<>(streams)) {
++          try { stream.close(); } catch (java.io.IOException ignored) {}
++        }
++        streams.clear();
++      }
++      if (mPrintDocument == this) mPrintDocument = null;
++      if (!mClosed && mHostReady) {
++        querySession("document:finish", "{\"token\":\"" + token + "\"}");
++      }
++    }
++  }
++
++  private PrintDocument mPrintDocument;
++  private boolean mPrintBeginning;
++
++  public CompletionStage<PrintDocument> beginPrint() {
++    ThreadUtils.assertOnUiThread();
++    ensureNotClosed();
++    if (mPrintDocument != null || mPrintBeginning) {
++      final CompletableFuture<PrintDocument> failed = new CompletableFuture<>();
++      failed.completeExceptionally(new IllegalStateException("Document print already in progress"));
++      return failed;
++    }
++    mPrintBeginning = true;
++    return querySession("document:begin", "{}").thenApply(json -> {
++      try {
++        if (mClosed) throw new IllegalStateException("Print session closed");
++        mPrintDocument = new PrintDocument(json);
++        return mPrintDocument;
++      } catch (final org.json.JSONException error) {
++        throw new IllegalArgumentException("Invalid document lease", error);
++      }
++    }).whenComplete((document, error) -> { mPrintBeginning = false; });
++  }
++
++  private void savePdf(final GeckoBundle message, final EventCallback callback) {
++    final String url = message.getString("blobUrl", "");
++    final String original = message.getString("originalUrl", "");
++    final String name = message.getString("filename", "document.pdf");
++    if (!url.startsWith("blob:") || url.length() > 65536 ||
++        original.length() > 65536 || name.length() > 240) {
++      if (callback != null) callback.sendError("Invalid PDF response");
++      return;
++    }
++    new org.mozilla.geckoview.NavisAndroidWebExecutor()
++        .fetch(new org.mozilla.geckoview.WebRequest(url))
++        .withHandler(mUiHandler).accept(response -> {
++          if (mClosed) {
++            try { if (response.body != null) response.body.close(); } catch (java.io.IOException ignored) {}
++            if (callback != null) callback.sendError("Document session closed");
++            return;
++          }
++          final org.mozilla.geckoview.WebResponse download =
++              new org.mozilla.geckoview.WebResponse.Builder(original)
++                  .statusCode(response.statusCode == 0 ? 200 : response.statusCode)
++                  .body(response.body)
++                  .skipConfirmation(false)
++                  .addHeader("Content-Type", name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")
++                      ? "application/pdf" : "application/octet-stream")
++                  .addHeader("Content-Disposition", "attachment; filename=\"" + name.replace('"', '_') + "\"")
++                  .build();
++          try {
++            mDelegate.onDocumentResponse(mSessionId, mPrivateMode, download);
++            if (callback != null) callback.sendSuccess(true);
++          } catch (final Throwable error) {
++            try { if (download.body != null) download.body.close(); } catch (java.io.IOException ignored) {}
++            if (callback != null) callback.sendError("PDF download handoff failed");
++          }
++        }, error -> { if (callback != null) callback.sendError("Could not read PDF response"); });
++  }
++
+   private static final class NativeWindow extends JNIObject {
+     @SuppressWarnings("unused")
+     private final NavisAndroidSession mOwner;
+@@ -1580,6 +1725,11 @@ public final class NavisAndroidSession implements AutoCloseable {
+     @WrapForJNI(dispatchTo = "proxy", stubName = "Close")
+     private native void close();
+ 
++    @WrapForJNI(dispatchTo = "proxy", stubName = "PrintToPdf")
++    private native void printToPdf(org.mozilla.geckoview.GeckoResult<java.io.InputStream> result,
++        long sourceWindow, long printWindow, int width, int height, int left,
++        int top, int right, int bottom, boolean color, int[] ranges);
++
+     @WrapForJNI(calledFrom = "gecko")
+     private void onNativeWindowReady() {
+       mOwner.onNativeWindowReady();
+diff --git a/mobile/shared/chrome/navis/host.js b/mobile/shared/chrome/navis/host.js
+--- a/mobile/shared/chrome/navis/host.js
++++ b/mobile/shared/chrome/navis/host.js
+@@ -75,6 +75,7 @@
+   "session:capture-closed",
+   "session:restore-result",
+   "login:authorize-save",
++  "document:begin", "document:finish",
+ ]);
+ 
+ const MAX_SESSION_STATE_CHARS = 1024 * 1024;
+@@ -82,6 +83,7 @@
+ const NEW_WINDOW_TIMEOUT_MS = 10_000;
+ 
+ let browser;
++let documents;
+ let dispatcher;
+ let contentCrashPending;
+ let fullscreenRequest;
+@@ -182,6 +184,9 @@
+               typeof data?.payload !== "string" ||
+               data.payload.length > (data.operation === "product:initialize" ? 512 * 1024 : 65536)) {
+             throw new TypeError("Unknown or invalid Navis product query");
++          }
++          if (documents?.handles(data.operation)) {
++            return documents.query(data.operation, JSON.parse(data.payload));
+           }
+           if (data.operation === "product:initialize") {
+             const { ensureNavisAndroidLocales } = ChromeUtils.importESModule(
+@@ -623,6 +628,9 @@
+   },
+ 
+   createContentWindow(uri, openWindowInfo, where) {
++    if (where === Ci.nsIBrowserDOMWindow.OPEN_PRINT_BROWSER) {
++      return this.createPrintClone(openWindowInfo)?.browsingContext || null;
++    }
+     const promise = requestNewSession(uri, openWindowInfo, null);
+     const isNewTab = [
+       Ci.nsIBrowserDOMWindow.OPEN_NEWTAB,
+@@ -642,9 +650,7 @@
+ 
+   createContentWindowInFrame(uri, params, where, _flags, name) {
+     if (where === Ci.nsIBrowserDOMWindow.OPEN_PRINT_BROWSER) {
+-      cancelOpenWindowInfo(params.openWindowInfo);
+-      Components.returnCode = Cr.NS_ERROR_ABORT;
+-      return null;
++      return this.createPrintClone(params.openWindowInfo);
+     }
+     const targetBrowser = waitSynchronously(
+       "createContentWindowInFrame",
+@@ -654,6 +660,16 @@
+       Components.returnCode = Cr.NS_ERROR_ABORT;
+     }
+     return targetBrowser;
++  },
++
++  createPrintClone(openWindowInfo) {
++    try { return documents.clone(openWindowInfo); }
++    catch (error) {
++      cancelOpenWindowInfo(openWindowInfo);
++      Components.returnCode = Cr.NS_ERROR_ABORT;
++      console.error("Navis print request failed", error);
++      return null;
++    }
+   },
+ 
+   async openURIAsync(
+@@ -1223,6 +1239,9 @@
+   });
+   Services.obs.notifyObservers(window, "navis-android-window-created");
+   document.documentElement.appendChild(responsiveTarget?.container || browser);
++  const { createAndroidDocuments } = ChromeUtils.importESModule(
++    "resource://gre/modules/NavisAndroidDocuments.sys.mjs");
++  documents = createAndroidDocuments(window, browser, dispatcher);
+   browser.preserveLayers(true);
+   browser.docShellIsActive = true;
+ 
+@@ -1258,6 +1277,8 @@
+     return;
+   }
+   shuttingDown = true;
++  documents?.close();
++  documents = null;
+   if (devToolsHost) {
+     devToolsHost.close();
+     devToolsHost = null;
+diff --git a/mobile/shared/chrome/navis/jar.mn b/mobile/shared/chrome/navis/jar.mn
+index b1f61aa3bb4eb52adfcc0d214f03992d09400159..9080db73fde4614da2983bf8456d6c6d24264841 100644
+--- a/mobile/shared/chrome/navis/jar.mn
++++ b/mobile/shared/chrome/navis/jar.mn
+@@ -4,8 +4,11 @@
+ 
+ navis-android.jar:
+ % content navis-android %content/
++% resource navis-pdf-style %content/
+ 
+   content/host.xhtml
+   content/host.js
+   content/host.css
+   content/responsive.css
++  content/document-tokens.css (/navis/chrome/content/document-tokens.css)
++  content/pdf-reader.css (/navis/chrome/content/pdf-reader.css)
+diff --git a/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs b/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
+index 6dba76b1a0cb77448269b318dd13be89c882e548..ab2232472ad397d64a8720759e1ba1305abb7833 100644
+--- a/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
++++ b/mobile/shared/modules/navis/NavisAndroidStartup.sys.mjs
+@@ -14,6 +14,9 @@ const { NavisAndroidExtensionTabTopology: topology } = ChromeUtils.importESModul
+ const { initializeCertificateSecurity } = ChromeUtils.importESModule(
+   "resource://gre/modules/CertificateSecurity.sys.mjs");
+ initializeCertificateSecurity();
++const { initializeNavisPDF } = ChromeUtils.importESModule(
++  "resource://gre/modules/NavisDocuments.sys.mjs");
++initializeNavisPDF();
+ 
+ const chromeReady = new WeakSet();
+ let completion;
+diff --git a/mobile/shared/modules/navis/moz.build b/mobile/shared/modules/navis/moz.build
+--- a/mobile/shared/modules/navis/moz.build
++++ b/mobile/shared/modules/navis/moz.build
+@@ -9,8 +9,11 @@
+         "/desktop-embedder/modules/CertificateSecurity.sys.mjs",
+         "/desktop-embedder/modules/CertificateSecurityData.sys.mjs",
+         "/desktop-embedder/modules/DesktopAddressInput.sys.mjs",
++        "/desktop-embedder/modules/NavisAndroidDocuments.sys.mjs",
+         "/desktop-embedder/modules/NavisAndroidPermissions.sys.mjs",
+         "/desktop-embedder/modules/NavisAndroidSearch.sys.mjs",
++        "/desktop-embedder/modules/NavisDocuments.sys.mjs",
++        "/desktop-embedder/modules/NavisPdfjsChild.sys.mjs",
+         "/desktop-embedder/modules/NavisSearchPolicy.sys.mjs",
+         "/desktop-embedder/modules/NavisSearchService.sys.mjs",
+         "/desktop-embedder/modules/NavisSuggestionPolicy.sys.mjs",
+diff --git a/toolkit/components/moz.build b/toolkit/components/moz.build
+index 7c9200e5ac64ab0dbc143b9adf964a20f492088f..18d93dd56f2ded5bc9ee767c1ec5115075db22bc 100644
+--- a/toolkit/components/moz.build
++++ b/toolkit/components/moz.build
+@@ -118,7 +118,6 @@ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+         "forgetaboutsite",
+         "pageextractor",
+         "passwordmgr",
+-        "pdfjs",
+         "qrcode",
+         "reader",
+         "reportbrokensite",
+@@ -167,6 +166,8 @@ if CONFIG["BUILD_CTYPES"]:
+ 
+ if CONFIG["MOZ_DESKTOP_EMBEDDER"]:
+     DIRS += ["autocomplete", "captivedetect"]
++    if CONFIG["NS_PRINTING"]:
++        DIRS += ["printingui"]
+ else:
+     DIRS += ["autocomplete", "printingui", "satchel", "captivedetect"]
+ 
+diff --git a/toolkit/components/pdfjs/PdfJsOverridePrefs.js b/toolkit/components/pdfjs/PdfJsOverridePrefs.js
+index 913512d6d5842bbdab36760e8964343e0d4ec590..cc5ffca49ff2326b49f29b6f93e77f5d408b456e 100644
+--- a/toolkit/components/pdfjs/PdfJsOverridePrefs.js
++++ b/toolkit/components/pdfjs/PdfJsOverridePrefs.js
+@@ -41,3 +41,19 @@
+ 
+ pref("pdfjs.enableOptimizedPartialRendering", true);
+ pref("pdfjs.enableSelectionRendering", false);
++
++// Navis restores local document processing without service/model downloads.
++#if defined(MOZ_DESKTOP_EMBEDDER) || defined(MOZ_NAVIS_CORE)
++pref("pdfjs.annotationEditorMode", 0);
++pref("pdfjs.enableAltText", false, locked);
++pref("pdfjs.enableAltTextModelDownload", false, locked);
++pref("pdfjs.enableGuessAltText", false, locked);
++pref("pdfjs.enableNewAltTextWhenAddingImage", false, locked);
++pref("pdfjs.enableSignatureEditor", false, locked);
++pref("pdfjs.enableComment", false, locked);
++pref("pdfjs.enableMerge", false, locked);
++pref("pdfjs.enableSplitMerge", false, locked);
++pref("pdfjs.enableNewBadge", false, locked);
++pref("pdfjs.altTextLearnMoreUrl", "", locked);
++pref("pdfjs.commentLearnMoreUrl", "", locked);
++#endif
+diff --git a/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs b/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
+index 4d76863c122d0a80c6749e5f2ec36405a68c531d..52d07bc13d3bb2b1ad6f06d5b1d44e6a9f15c3f4 100644
+--- a/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
++++ b/toolkit/components/pdfjs/content/PdfStreamConverter.sys.mjs
+@@ -89,7 +89,8 @@ function getDOMWindow(aChannel, aPrincipal) {
+ function getActor(window) {
+   try {
+     const actorName =
+-      AppConstants.platform === "android" ? "GeckoViewPdfjs" : "Pdfjs";
++      AppConstants.platform === "android" && !AppConstants.MOZ_NAVIS_CORE
++        ? "GeckoViewPdfjs" : "Pdfjs";
+     return window.windowGlobalChild.getActor(actorName);
+   } catch (ex) {
+     return null;
+@@ -426,7 +427,8 @@ class ChromeActions {
+ 
+   supportsIntegratedFind() {
+     // Integrated find is only supported when we're not in a frame
+-    return this.domWindow.windowGlobalChild.browsingContext.parent === null;
++    return !AppConstants.MOZ_DESKTOP_EMBEDDER && !AppConstants.MOZ_NAVIS_CORE &&
++      this.domWindow.windowGlobalChild.browsingContext.parent === null;
+   }
+ 
+   supportsDownloading() {
+@@ -477,7 +479,7 @@ class ChromeActions {
+   }
+ 
+   isMobile() {
+-    return AppConstants.platform === "android";
++    return AppConstants.platform === "android" && !AppConstants.MOZ_NAVIS_CORE;
+   }
+ 
+   async getNimbusExperimentData() {
+@@ -1239,7 +1241,9 @@ PdfStreamConverter.prototype = {
+       aRequest.setResponseHeader("Link", "", false);
+     }
+ 
+-    lazy.PdfJsTelemetryContent.onViewerIsUsed();
++    if (!AppConstants.MOZ_DESKTOP_EMBEDDER && !AppConstants.MOZ_NAVIS_CORE) {
++      lazy.PdfJsTelemetryContent.onViewerIsUsed();
++    }
+ 
+     // The document will be loaded via the stream converter as html,
+     // but since we may have come here via a download or attachment
+diff --git a/toolkit/components/pdfjs/jar.mn b/toolkit/components/pdfjs/jar.mn
+index 2b5a220dbe4fcc5218da8583332ad4d9f5df26c7..c20fff2bba5c6f834f7327ed1fc19169d035d569 100644
+--- a/toolkit/components/pdfjs/jar.mn
++++ b/toolkit/components/pdfjs/jar.mn
+@@ -2,7 +2,9 @@ pdfjs.jar:
+ % resource pdf.js %content/
+  content/PdfJs.sys.mjs (content/PdfJs.sys.mjs)
+  content/PdfJsNetwork.sys.mjs (content/PdfJsNetwork.sys.mjs)
++#if !defined(MOZ_DESKTOP_EMBEDDER) && !defined(MOZ_NAVIS_CORE)
+  content/PdfJsTelemetry.sys.mjs (content/PdfJsTelemetry.sys.mjs)
++#endif
+  content/PdfSandbox.sys.mjs (content/PdfSandbox.sys.mjs)
+  content/PdfStreamConverter.sys.mjs (content/PdfStreamConverter.sys.mjs)
+  content/build/	(content/build/*)
+@@ -16,7 +18,7 @@ pdfjs.jar:
+  content/web/wasm/jbig2.wasm (content/web/wasm/jbig2.wasm)
+  content/web/wasm/jbig2_nowasm_fallback.js (content/web/wasm/jbig2_nowasm_fallback.js)
+  content/web/iccs/ (content/web/iccs/*.icc)
+-#ifdef ANDROID
++#if defined(ANDROID) && !defined(MOZ_NAVIS_CORE)
+  content/GeckoViewPdfjsParent.sys.mjs (content/GeckoViewPdfjsParent.sys.mjs)
+  content/GeckoViewPdfjsChild.sys.mjs (content/GeckoViewPdfjsChild.sys.mjs)
+  content/web/viewer.html (content/web/viewer-geckoview.html)
+@@ -24,10 +26,12 @@ pdfjs.jar:
+  content/web/viewer.mjs (content/web/viewer-geckoview.mjs)
+  content/web/images/gv-toolbarButton-download.svg	(content/web/images/gv-toolbarButton-download.svg)
+ #else
++#if !defined(MOZ_DESKTOP_EMBEDDER) && !defined(MOZ_NAVIS_CORE)
+  content/PdfJsAIFeature.sys.mjs (content/PdfJsAIFeature.sys.mjs)
+  content/PdfjsParent.sys.mjs (content/PdfjsParent.sys.mjs)
+- content/PdfjsChild.sys.mjs (content/PdfjsChild.sys.mjs)
+  content/PdfjsContextMenu.sys.mjs (content/PdfjsContextMenu.sys.mjs)
++#endif
++ content/PdfjsChild.sys.mjs (content/PdfjsChild.sys.mjs)
+  content/web/viewer.html (content/web/viewer.html)
+  content/web/viewer.css (content/web/viewer.css)
+  content/web/viewer.mjs (content/web/viewer.mjs)
+diff --git a/toolkit/components/printing/content/print.js b/toolkit/components/printing/content/print.js
+index d9204f28178bd62eb354041226a74164151ed0e5..0a40fa210364e6272b153cda986396d77fb68d61 100644
+--- a/toolkit/components/printing/content/print.js
++++ b/toolkit/components/printing/content/print.js
+@@ -163,7 +163,9 @@ var PrintEventHandler = {
+   _noPreviewUpdateSettings: new Set(["numCopies", "printDuplex"]),
+ 
+   async init() {
+-    Glean.printing.previewOpenedTm.add(1);
++    if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      Glean.printing.previewOpenedTm.add(1);
++    }
+ 
+     this.printPreviewEl =
+       ourBrowser.parentElement.querySelector("print-preview");
+@@ -298,14 +300,18 @@ var PrintEventHandler = {
+       // system dialog the title will be used to generate the prepopulated
+       // filename in the file picker.
+       settings.title = this.activeTitle;
+-      Glean.printing.dialogOpenedViaPreviewTm.add(1);
++      if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++        Glean.printing.dialogOpenedViaPreviewTm.add(1);
++      }
+       const doPrint = await this._showPrintDialog(
+         window,
+         this.hasSelection,
+         settings
+       );
+       if (!doPrint) {
+-        Glean.printing.dialogViaPreviewCancelledTm.add(1);
++        if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++          Glean.printing.dialogViaPreviewCancelledTm.add(1);
++        }
+         window.close();
+         return;
+       }
+@@ -447,7 +453,9 @@ var PrintEventHandler = {
+   },
+ 
+   cancelPrint() {
+-    Glean.printing.previewCancelledTm.add(1);
++    if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      Glean.printing.previewCancelledTm.add(1);
++    }
+     window.close();
+   },
+ 
+@@ -622,7 +630,9 @@ var PrintEventHandler = {
+   async onUserSettingsChange(changedSettings = {}) {
+     let previewableChange = false;
+     for (let [setting, value] of Object.entries(changedSettings)) {
+-      Glean.printing.settingsChanged[setting].add(1);
++      if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++        Glean.printing.settingsChanged[setting].add(1);
++      }
+       // Update the list of user-changed settings, which we attempt to maintain
+       // across printer changes.
+       this._userChangedSettings[setting] = value;
+@@ -1055,7 +1065,9 @@ var PrintEventHandler = {
+ 
+   reportPrintingError(aMessage) {
+     logger.debug("reportPrintingError:", aMessage);
+-    Glean.printing.error[aMessage].add(1);
++    if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      Glean.printing.error[aMessage].add(1);
++    }
+   },
+ 
+   /**
+diff --git a/toolkit/components/printing/content/printUtils.js b/toolkit/components/printing/content/printUtils.js
+index c3e6c6e153500567f2c966a945ba17021790e17b..64866d331d8d9a3e09f9e89d765a07dc6f4b35b2 100644
+--- a/toolkit/components/printing/content/printUtils.js
++++ b/toolkit/components/printing/content/printUtils.js
+@@ -479,7 +479,9 @@ var PrintUtils = {
+       msg
+     );
+ 
+-    Glean.printing.error[this._getErrorCodeForNSResult(nsresult)].add(1);
++    if (AppConstants.MOZ_OBSERVABILITY_RUNTIME) {
++      Glean.printing.error[this._getErrorCodeForNSResult(nsresult)].add(1);
++    }
+   },
+ 
+   getPrintSettings(aPrinterName, aDefaultsOnly, aAllowPseudoPrinter = true) {
+@@ -673,7 +675,7 @@ class PrintPreview extends MozElements.BaseControl {
+     // The view resets to the top of the document on update bug 1686737.
+     browser.setAttribute("current-page", 1);
+     this.paginator.observePreviewBrowser(browser);
+-    await document.l10n.translateElements([browser]);
++    await (PrintUtils.l10n || document.l10n).translateElements([browser]);
+ 
+     this.stack.removeAttribute("rendering");
+ 
+@@ -798,7 +800,7 @@ class PrintPreview extends MozElements.BaseControl {
+       browser.setAttribute("flex", "1");
+       browser.setAttribute("printpreview", "true");
+       browser.setAttribute("nodefaultsrc", "true");
+-      document.l10n.setAttributes(browser, "printui-preview-label");
++      (PrintUtils.l10n || document.l10n).setAttributes(browser, "printui-preview-label");
+ 
+       this.stack.insertBefore(browser, this.paginator);
+ 
+diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
+--- a/toolkit/modules/ActorManagerParent.sys.mjs
++++ b/toolkit/modules/ActorManagerParent.sys.mjs
+@@ -851,8 +851,6 @@
+     "PictureInPicture",
+     "PictureInPictureLauncher",
+     "PictureInPictureToggle",
+-    "Printing",
+-    "PrintingSelection",
+     "ReportBrokenSite",
+     "Thumbnails",
+     "Translations",
+diff --git a/widget/android/NavisAndroidSupport.cpp b/widget/android/NavisAndroidSupport.cpp
+index 74aa8502d363336436507d2a2a2e94b931e0f774..8e7756d7208b29fa5d997841bff36578a810ba4c 100644
+--- a/widget/android/NavisAndroidSupport.cpp
++++ b/widget/android/NavisAndroidSupport.cpp
+@@ -3,6 +3,19 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "NavisAndroidSupport.h"
++#include <algorithm>
++#include "GeckoViewOutputStream.h"
++#include "JavaExceptions.h"
++#include "mozilla/dom/CanonicalBrowsingContext.h"
++#include "mozilla/dom/Document.h"
++#include "mozilla/dom/Element.h"
++#include "mozilla/dom/WindowGlobalParent.h"
++#include "mozilla/java/GeckoInputStreamWrappers.h"
++#include "mozilla/java/GeckoResultWrappers.h"
++#include "nsGkAtoms.h"
++#include "nsIDocShellTreeOwner.h"
++#include "nsIPrintSettings.h"
++#include "nsIPrintSettingsService.h"
+ 
+ #include "AndroidBridge.h"
+ #include "AndroidUiThread.h"
+@@ -313,6 +326,113 @@ void NavisAndroidWindowSupport::Close() {
+   mPeer = nullptr;
+ }
+ 
++void NavisAndroidWindowSupport::PrintToPdf(
++    jni::Object::Param aResult, int64_t aSourceWindow, int64_t aPrintWindow,
++    int32_t aWidth, int32_t aHeight, int32_t aLeft, int32_t aTop,
++    int32_t aRight, int32_t aBottom, bool aColor, jni::IntArray::Param aRanges) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!aResult) {
++    return;
++  }
++  auto result = java::GeckoResult::Ref::From(aResult);
++  auto fail = [&result](const char* aMessage) {
++    result->CompleteExceptionally(
++        java::sdk::IllegalStateException::New(aMessage).Cast<jni::Throwable>());
++  };
++  if (!mDOMWindow || !mDOMWindow->GetDoc() || !aRanges ||
++      aWidth < 256 || aHeight < 256 || aWidth > 200000 || aHeight > 200000 ||
++      aLeft < 0 || aTop < 0 || aRight < 0 || aBottom < 0 ||
++      aLeft >= aWidth || aRight >= aWidth || aTop >= aHeight ||
++      aBottom >= aHeight || aLeft + aRight >= aWidth ||
++      aTop + aBottom >= aHeight || aRanges->Length() > 2048) {
++    fail("Invalid or closed print document");
++    return;
++  }
++  nsCOMPtr<nsIDocShellTreeOwner> treeOwner = mDOMWindow->GetTreeOwner();
++  RefPtr<dom::BrowsingContext> primary;
++  if (!treeOwner || NS_FAILED(treeOwner->GetPrimaryContentBrowsingContext(
++                        getter_AddRefs(primary))) || !primary) {
++    fail("Print source is unavailable");
++    return;
++  }
++  RefPtr<dom::WindowGlobalParent> source =
++      dom::WindowGlobalParent::GetByInnerWindowId(aSourceWindow);
++  RefPtr<dom::WindowGlobalParent> document =
++      dom::WindowGlobalParent::GetByInnerWindowId(aPrintWindow);
++  if (!source || !document ||
++      primary->Canonical()->GetCurrentWindowGlobal() != source ||
++      document->GetBrowsingContext()->GetCurrentWindowGlobal() != document) {
++    fail("Print source changed");
++    return;
++  }
++  RefPtr<dom::CanonicalBrowsingContext> context = document->GetBrowsingContext();
++  if (context != primary) {
++    dom::Element* element = context->GetEmbedderElement();
++    nsAutoString id;
++    if (element) {
++      element->GetAttr(kNameSpaceID_None, nsGkAtoms::id, id);
++    }
++    if (!context->IsTop() || !element || element->OwnerDoc() != mDOMWindow->GetDoc() ||
++        !id.EqualsLiteral("navis-print-clone")) {
++      fail("Print document belongs to another window");
++      return;
++    }
++  }
++  nsTArray<int32_t> ranges = aRanges->GetElements();
++  if (ranges.Length() % 2) {
++    fail("Invalid print ranges");
++    return;
++  }
++  int32_t previous = 0;
++  for (size_t i = 0; i < ranges.Length(); i += 2) {
++    if (ranges[i] <= previous || ranges[i + 1] < ranges[i] ||
++        ranges[i + 1] > 1000000) {
++      fail("Invalid print ranges");
++      return;
++    }
++    previous = ranges[i + 1];
++  }
++  nsCOMPtr<nsIPrintSettingsService> service =
++      do_GetService("@mozilla.org/gfx/printsettings-service;1");
++  nsCOMPtr<nsIPrintSettings> settings;
++  if (!service || NS_FAILED(service->CreateNewPrintSettings(getter_AddRefs(settings)))) {
++    fail("Print settings are unavailable");
++    return;
++  }
++  auto stream = java::GeckoInputStream::New(nullptr);
++  auto output = MakeRefPtr<GeckoViewOutputStream>(stream);
++  settings->SetPrinterName(u"Mozilla Save to PDF"_ns);
++  settings->SetOutputDestination(nsIPrintSettings::kOutputDestinationStream);
++  settings->SetOutputFormat(nsIPrintSettings::kOutputFormatPDF);
++  settings->SetOutputStream(output);
++  settings->SetPrintSilent(true);
++  settings->SetPaperSizeUnit(nsIPrintSettings::kPaperSizeInches);
++  settings->SetPaperWidth(std::min(aWidth, aHeight) / 1000.0);
++  settings->SetPaperHeight(std::max(aWidth, aHeight) / 1000.0);
++  settings->SetOrientation(aWidth > aHeight ? nsIPrintSettings::kLandscapeOrientation
++                                         : nsIPrintSettings::kPortraitOrientation);
++  settings->SetMarginLeft(aLeft / 1000.0);
++  settings->SetMarginTop(aTop / 1000.0);
++  settings->SetMarginRight(aRight / 1000.0);
++  settings->SetMarginBottom(aBottom / 1000.0);
++  settings->SetPrintInColor(aColor);
++  settings->SetPageRanges(ranges);
++  settings->SetHeaderStrLeft(EmptyString());
++  settings->SetHeaderStrCenter(EmptyString());
++  settings->SetHeaderStrRight(EmptyString());
++  settings->SetFooterStrLeft(EmptyString());
++  settings->SetFooterStrCenter(EmptyString());
++  settings->SetFooterStrRight(EmptyString());
++  RefPtr<dom::CanonicalBrowsingContext::PrintPromise> printing = context->Print(settings);
++  result->Complete(stream);
++  printing->Then(GetCurrentSerialEventTarget(), __func__,
++      [stream](const dom::CanonicalBrowsingContext::PrintPromise::ResolveOrRejectValue& value) {
++        if (value.IsReject()) {
++          stream->WriteError();
++        }
++      });
++}
++
+ void NavisAndroidWindowSupport::PassExternalResponse(
+     java::WebResponse::Param aResponse) {
+   if (!aResponse) {
+diff --git a/widget/android/NavisAndroidSupport.h b/widget/android/NavisAndroidSupport.h
+index 938d2c7f177c068d2624b1dfff736945edfd7cc3..a9254aaf12315d1f33223484f2512d645df3bafd 100644
+--- a/widget/android/NavisAndroidSupport.h
++++ b/widget/android/NavisAndroidSupport.h
+@@ -109,6 +109,10 @@ class NavisAndroidWindowSupport final
+                    jni::Object::Param aDispatcher, int64_t aSessionId,
+                    bool aPrivateMode, jni::String::Param aWindowToken);
+   void Close();
++  void PrintToPdf(jni::Object::Param aResult, int64_t aSourceWindow,
++                  int64_t aPrintWindow, int32_t aWidth, int32_t aHeight,
++                  int32_t aLeft, int32_t aTop, int32_t aRight, int32_t aBottom,
++                  bool aColor, jni::IntArray::Param aRanges);
+   /** Transfers the original external-helper response body to the product peer. */
+   void PassExternalResponse(java::WebResponse::Param aResponse);
+ 

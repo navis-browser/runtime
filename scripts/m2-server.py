@@ -530,6 +530,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         request = urllib.parse.urlsplit(self.path)
         path = request.path
+        api_fixtures = {
+            "/excluded-web-apis": ("excluded-web-apis.html", "text/html; charset=utf-8"),
+            "/excluded-web-apis-probe.js": ("excluded-web-apis-probe.js", "application/javascript"),
+            "/excluded-web-apis-worker.mjs": ("excluded-web-apis-worker.mjs", "application/javascript"),
+            "/excluded-web-apis-service-worker.js": ("excluded-web-apis-service-worker.js", "application/javascript"),
+        }
+        if path in api_fixtures:
+            name, content_type = api_fixtures[path]
+            body = (ROOT / "tests/m2-site" / name).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Service-Worker-Allowed", "/excluded-web-api-fixture/")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         query = urllib.parse.parse_qs(request.query)
 
         if path == "/blocker-fixture":

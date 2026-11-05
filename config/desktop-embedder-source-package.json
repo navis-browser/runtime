@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "package_name": "desktop-gecko-embedder",
-  "version": "0.8.1",
+  "version": "0.8.3",
   "source_api_version": 2,
   "upstream_pin": "vendor/gecko.json",
   "semantic_ports": "config/gecko-semantic-ports.json",
@@ -111,6 +111,62 @@
     {
       "path": "config/runtime-api.json",
       "role": "runtime-source-api-version"
+    },
+    {
+      "path": "tests/test_policy_info_inheritance.py",
+      "role": "document-permissions-policy-regression"
+    },
+    {
+      "path": "tests/policy-info-inheritance.cpp",
+      "role": "document-permissions-policy-regression"
+    },
+    {
+      "path": "tests/test_object_container_policy.py",
+      "role": "document-permissions-policy-regression"
+    },
+    {
+      "path": "tests/object-container-policy.cpp",
+      "role": "document-permissions-policy-regression"
+    },
+    {
+      "path": "tests/initial-window-session.mjs",
+      "role": "initial-window-regression"
+    },
+    {
+      "path": "tests/desktop-context-menu.mjs",
+      "role": "context-menu-regression"
+    },
+    {
+      "path": "tests/context-menu-hover.cpp",
+      "role": "context-menu-regression"
+    },
+    {
+      "path": "tests/test_context_menu_hover.py",
+      "role": "context-menu-regression"
+    },
+    {
+      "path": "config/certificate-security-data.json",
+      "role": "reviewed-certificate-data-provenance"
+    },
+    {
+      "path": "scripts/generate-certificate-security.py",
+      "role": "offline-certificate-resource-generator"
+    },
+    {
+      "path": "tests/address-display.mjs",
+      "role": "address-display-regression"
+    },
+    {
+      "path": "tests/pdf-document-boundary.mjs",
+      "role": "local-document-security-regression"
+    },
+    {
+      "path": "tests/desktop-printing.mjs",
+      "role": "local-print-host-lifecycle-regression"
+    },
+    {
+      "path": "tests/android-documents.mjs",
+      "role": "private-document-lease-regression"
     }
   ],
   "forbidden_archive_prefixes": [

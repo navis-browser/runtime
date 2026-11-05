@@ -1,8 +1,8 @@
 diff --git a/build/moz.configure/update-programs.configure b/build/moz.configure/update-programs.configure
-index 5a4f2fbd7fd833f2beab1e4e37f37503e74fafbb..a3dce16547c8353dad7485d93ea40ecf616f415f 100644
+index ec5344f6321ab45fe20d54836126f92c8090adb3..1e2479c6e63dace664a373f1da13a07d9e61c5fe 100644
 --- a/build/moz.configure/update-programs.configure
 +++ b/build/moz.configure/update-programs.configure
-@@ -250,11 +250,15 @@ set_config("MOZ_DEFAULT_BROWSER_AGENT", default_agent_flag)
+@@ -277,11 +277,15 @@ set_config("MOZ_DEFAULT_BROWSER_AGENT", default_agent_flag)
  # notifications to persist when the application is not running and relaunch as
  # necessary.
  # ==============================================================================

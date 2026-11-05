@@ -6,7 +6,26 @@ function browserForActor(actor) {
   return actor.browsingContext.top.embedderElement;
 }
 
+const captureStates = new WeakMap();
+
+function publishCaptureState(context) {
+  const state = { camera: false, microphone: false, screen: false };
+  for (const capture of captureStates.get(context)?.values() ?? []) {
+    for (const key of Object.keys(state)) state[key] ||= capture[key];
+  }
+  context.embedderElement?.desktopEmbedderMediaStateChanged?.(Object.freeze(state));
+}
+
 export class DesktopEmbedderWebRTCParent extends JSWindowActorParent {
+  #context = null;
+  #windowId = null;
+
+  didDestroy() {
+    if (this.#context && captureStates.get(this.#context)?.delete(this.#windowId)) {
+      publishCaptureState(this.#context);
+    }
+  }
+
   receiveMessage(message) {
     const browser = browserForActor(this);
 
@@ -20,11 +39,20 @@ export class DesktopEmbedderWebRTCParent extends JSWindowActorParent {
       case "rtcpeer:CancelRequest":
         break;
       case "webrtc:Request": {
-        const principal = this.manager.topWindowContext.documentPrincipal;
+        const window = this.manager;
+        const topWindow = window.topWindowContext;
+        const isCurrent = () => window.isCurrentGlobal && topWindow.isCurrentGlobal &&
+          this.browsingContext.currentWindowGlobal === window &&
+          this.browsingContext.top.currentWindowGlobal === topWindow;
+        if (!isCurrent()) {
+          this.#respond(message.data, { allow: false });
+          return;
+        }
+        const principal = window.documentPrincipal;
         const request = Object.freeze({
           ...message.data,
-          origin: principal.origin,
-          frameOrigin: this.manager.documentPrincipal.origin,
+          origin: topWindow.documentPrincipal.originNoSuffix,
+          frameOrigin: principal.originNoSuffix,
         });
         if (
           typeof browser?.desktopEmbedderWebRTCPermissionPrompt !== "function"
@@ -35,24 +63,29 @@ export class DesktopEmbedderWebRTCParent extends JSWindowActorParent {
         browser.desktopEmbedderWebRTCPermissionPrompt(
           request,
           decision => this.#respond(message.data, decision),
-          principal
+          principal,
+          isCurrent,
         );
         break;
       }
       case "webrtc:CancelRequest":
         browser?.desktopEmbedderCancelWebRTCPermissionPrompt?.(message.data);
         break;
-      case "webrtc:UpdateIndicators":
-        browser?.desktopEmbedderMediaStateChanged?.(
-          Object.freeze({
-            camera: Boolean(message.data.camera),
-            microphone: Boolean(message.data.microphone),
-            screen: Boolean(
-              message.data.screen || message.data.window || message.data.browser
-            ),
-          })
-        );
+      case "webrtc:UpdateIndicators": {
+        this.#context = this.browsingContext.top;
+        this.#windowId = this.manager.innerWindowId;
+        let captures = captureStates.get(this.#context);
+        if (!captures) captureStates.set(this.#context, captures = new Map());
+        const state = {
+          camera: Boolean(message.data.camera),
+          microphone: Boolean(message.data.microphone),
+          screen: Boolean(message.data.screen || message.data.window || message.data.browser),
+        };
+        if (Object.values(state).some(Boolean)) captures.set(this.#windowId, state);
+        else captures.delete(this.#windowId);
+        publishCaptureState(this.#context);
         break;
+      }
     }
   }
 

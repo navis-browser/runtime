@@ -146,7 +146,7 @@ function sanitizeCommandValue(command, rawValue) {
     const key = boundedText(raw.key, 32);
     const value = raw.value;
     const booleanKeys = command === "settings:set-download"
-      ? ["askBeforeSaving", "deletePrivateOnExit", "openWhenComplete"] : ["historyButton"];
+      ? ["askBeforeSaving", "deletePrivateOnExit", "openWhenComplete"] : ["historyButton", "showCertificateOrganization"];
     const valid = booleanKeys.includes(key) ? typeof value === "boolean" :
       command === "settings:set-appearance" && ["theme", "accent", "bookmarkBar"].includes(key) && boundedText(value, 32) !== null;
     return { valid, value: { key, value } };
@@ -271,6 +271,10 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
   }
 
   handleEvent(event) {
+    if (event.type === "click" || event.type === "auxclick") {
+      this.#handleLinkActivation(event);
+      return;
+    }
     if (event.target !== this.contentWindow.document) {
       return;
     }
@@ -323,6 +327,38 @@ export class DesktopInternalPageChild extends JSWindowActorChild {
       return;
     }
     this.#request(page, command, stateEvent, sanitized.value);
+  }
+
+  #handleLinkActivation(event) {
+    const page = this.#currentPage();
+    if (!page || event.defaultPrevented ||
+        (event.type === "click" ? event.button !== 0 : event.button !== 1)) return;
+    const document = this.contentWindow.document;
+    const target = event.target?.closest ? event.target : event.target?.parentElement;
+    const link = target?.closest("a[href], area[href]");
+    if (link?.ownerDocument !== document || !/^navis:/i.test(link.href)) return;
+    const targetName = link.target.toLowerCase();
+
+    // Native content-triggered loads cannot carry authority for our dangerous
+    // protocol. Authenticate the source again in the parent and use the
+    // existing browser-owned Session navigation instead of forwarding that IPC.
+    let uri;
+    try { uri = Services.io.newURI(link.href); } catch {}
+    if (event.isTrusted && event.button === 0 && !event.ctrlKey && !event.metaKey &&
+        !event.shiftKey && !event.altKey && ["", "_self", "_parent", "_top"].includes(targetName) && uri?.hasRef &&
+        uri.specIgnoringRef === document.documentURIObject.specIgnoringRef) return;
+    event.preventDefault();
+    if (!event.isTrusted || event.altKey || link.hasAttribute("download") ||
+        link.href.length > 8192 || !resolveNavisInternalPageURI(uri)) return;
+    const newTab = event.button === 1 || event.ctrlKey || event.metaKey;
+    const disposition = newTab ? (event.shiftKey ? "foreground" : "background") :
+      event.shiftKey ? "window" :
+      targetName && !["_self", "_parent", "_top"].includes(targetName) ? "foreground" : "current";
+    this.sendQuery("DesktopInternalPage:Command", {
+      pageKey: page.key,
+      command: "internal:navigate",
+      value: { url: uri.spec, disposition },
+    }).catch(() => {});
   }
 
   #currentPage() {

@@ -3,33 +3,40 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 EXTRA_JS_MODULES += [
+    "CertificateSecurity.sys.mjs",
+    "CertificateSecurityData.sys.mjs",
     "DesktopAddressInput.sys.mjs",
     "DesktopCleanLinks.sys.mjs",
+    "DesktopDocuments.sys.mjs",
     "DesktopDownloadPreferences.sys.mjs",
     "DesktopEngine.sys.mjs",
     "DesktopExtensionMenus.sys.mjs",
     "DesktopExtensionTabs.sys.mjs",
     "DesktopInternalPages.sys.mjs",
     "DesktopLocale.sys.mjs",
+    "DesktopPermissionPolicy.sys.mjs",
+    "DesktopPrinting.sys.mjs",
     "DesktopProcessIsolation.sys.mjs",
     "DesktopProductPages.sys.mjs",
     "DesktopProfileManagement.sys.mjs",
     "DesktopProfileStore.sys.mjs",
     "DesktopTabMetrics.sys.mjs",
+    "NavisDocuments.sys.mjs",
+    "NavisPdfjsChild.sys.mjs",
     "NavisSearchPolicy.sys.mjs",
     "NavisSearchService.sys.mjs",
     "NavisSettingsPolicy.sys.mjs",
     "NavisSuggestionPolicy.sys.mjs",
+    "SitePermissionOrigins.sys.mjs",
 ]
 
-if CONFIG["MOZ_WEBEXTENSIONS_RUNTIME"]:
-    EXTRA_JS_MODULES += [
-        "DesktopExtensionActions.sys.mjs",
-        "DesktopExtensionManager.sys.mjs",
-        "DesktopExtensionOmnibox.sys.mjs",
-        "DesktopExtensionPermissionPrompts.sys.mjs",
-        "DesktopExtensionPopupHost.sys.mjs",
-    ]
+EXTRA_JS_MODULES += [
+    "DesktopExtensionActions.sys.mjs",
+    "DesktopExtensionManager.sys.mjs",
+    "DesktopExtensionOmnibox.sys.mjs",
+    "DesktopExtensionPermissionPrompts.sys.mjs",
+    "DesktopExtensionPopupHost.sys.mjs",
+]
 
 if CONFIG["MOZ_DESKTOP_EMBEDDER_DEVTOOLS"]:
     EXTRA_JS_MODULES += ["DesktopDevTools.sys.mjs"]
@@ -40,4 +47,6 @@ FINAL_TARGET_FILES.modules += [
     "ExtensionBrowsingData.sys.mjs",
 ]
 
-FINAL_TARGET_FILES.modules["navis-licenses"] += ["licenses/source-code.txt"]
+FINAL_TARGET_FILES.modules["navis-licenses"] += [
+    "licenses/source-code.txt",
+]

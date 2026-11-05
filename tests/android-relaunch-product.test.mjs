@@ -9,10 +9,7 @@ import vm from "node:vm";
 
 const moduleUrl = new URL("../gecko/mobile/shared/modules/navis/NavisAndroidProduct.sys.mjs", import.meta.url);
 const source = (await readFile(moduleUrl, "utf8"))
-  .replace(/import \{[\s\S]*?\} from "resource:\/\/gre\/modules\/navis\/DesktopCleanLinks\.sys\.mjs";/u, "")
-  // These product operations are outside the session-close/prefs fixture.
-  // Leaving their imports in a vm script is a fixture error, not a relaunch failure.
-  .replace(/^import \{[^}]+\}\s+from "resource:\/\/gre\/modules\/(?:navis\/(?:DesktopProductPages|NavisSettingsPolicy)|NavisAndroidSearch)\.sys\.mjs";/gmu, "")
+  .replace(/^import[\s\S]*?;$/gmu, "")
   .replace("export async function query(", "async function query(");
 
 function fixture() {

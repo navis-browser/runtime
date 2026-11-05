@@ -1,4 +1,4 @@
-# Navis 1.0 Win64 release graph. The reviewed source freeze, release options
+# Navis Win64 release graph. The reviewed source freeze, release options
 # and dedicated object directory define the graph. sccache accelerates
 # recompilation without making cached objects release evidence.
 export MOZ_REQUIRE_SIGNING=1
@@ -12,15 +12,16 @@ ac_add_options --disable-bits-download
 ac_add_options --disable-local-ml
 ac_add_options --disable-eme-api
 ac_add_options --disable-web-push
+ac_add_options --disable-web-device-apis
+ac_add_options --disable-web-identity
+ac_add_options --disable-web-payments
+ac_add_options --disable-webxr
 ac_add_options --disable-safe-browsing
 ac_add_options --enable-webdriver
-ac_add_options --disable-printing
 ac_add_options --disable-ctypes
 ac_add_options --enable-desktop-embedder
 ac_add_options --enable-desktop-embedder-devtools
-ac_add_options --enable-webextensions-runtime
 ac_add_options --disable-observability-runtime
-ac_add_options --disable-webrtc
 ac_add_options --disable-backgroundtasks
 ac_add_options --disable-cargo-incremental
 ac_add_options --with-ccache=sccache

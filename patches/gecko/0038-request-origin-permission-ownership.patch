@@ -1,0 +1,139 @@
+diff --git a/dom/permission/tests/mochitest.toml b/dom/permission/tests/mochitest.toml
+index b5f42a967b690c37eac7ff4643bee451f5ddf82d..5d870cc5ac9c9695d8f0a91cb10727f1850eed89 100644
+--- a/dom/permission/tests/mochitest.toml
++++ b/dom/permission/tests/mochitest.toml
+@@ -21,6 +21,8 @@ skip-if = [
+   "xorigin", # Hangs
+ ]
+ 
++["test_navis_request_origin.html"]
++
+ ["test_storage_access_notification.html"]
+ skip-if = [
+   "xorigin", # Hangs
+diff --git a/dom/permission/tests/test_navis_request_origin.html b/dom/permission/tests/test_navis_request_origin.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4d2a5ae39bd7d2348b6ada36dfd4559c3a97789
+--- /dev/null
++++ b/dom/permission/tests/test_navis_request_origin.html
+@@ -0,0 +1,43 @@
++<!doctype html>
++<meta charset="utf-8">
++<title>Navis request-origin permission ownership</title>
++<script src="/tests/SimpleTest/SimpleTest.js"></script>
++<link rel="stylesheet" href="/tests/SimpleTest/test.css">
++<script>
++SimpleTest.waitForExplicitFinish();
++
++async function run() {
++  const { AppConstants } = SpecialPowers.ChromeUtils.importESModule(
++    "resource://gre/modules/AppConstants.sys.mjs"
++  );
++  if (!AppConstants.MOZ_NAVIS_CORE) {
++    ok(true, "Request-origin permission ownership is a Navis product policy");
++    return;
++  }
++  const frameURL = "https://example.org/tests/dom/permission/tests/file_empty.html";
++  for (const [name, type] of [["geolocation", "geo"], ["camera", "camera"], ["microphone", "microphone"]]) {
++    for (const [top, child, expected] of [[1, 2, "denied"], [2, 1, "granted"], [1, 0, "prompt"]]) {
++      await SpecialPowers.pushPermissions([
++        { type, allow: top, context: document },
++        { type, allow: child, context: frameURL },
++      ]);
++      for (const allowed of [true, false]) {
++        const frame = document.createElement("iframe");
++        frame.allow = allowed ? name : `${name} 'none'`;
++        frame.src = frameURL;
++        const loaded = new Promise(resolve => frame.onload = resolve);
++        document.body.append(frame);
++        await loaded;
++        await SpecialPowers.spawn(frame, [name, allowed ? expected : "denied"], async (permission, state) => {
++          const status = await content.navigator.permissions.query({ name: permission });
++          is(status.state, state, "Only the requesting origin's grant applies, subject to Permissions Policy");
++        });
++        frame.remove();
++      }
++      await SpecialPowers.popPermissions();
++    }
++  }
++}
++
++run().catch(error => ok(false, String(error.stack || error))).finally(() => SimpleTest.finish());
++</script>
+diff --git a/extensions/permissions/PermissionDelegateHandler.cpp b/extensions/permissions/PermissionDelegateHandler.cpp
+--- a/extensions/permissions/PermissionDelegateHandler.cpp
++++ b/extensions/permissions/PermissionDelegateHandler.cpp
+@@ -23,14 +23,22 @@
+ typedef PermissionDelegateHandler::PermissionDelegatePolicy DelegatePolicy;
+ typedef PermissionDelegateHandler::PermissionDelegateInfo DelegateInfo;
+ 
++#ifdef MOZ_NAVIS_CORE
++static constexpr auto kSiteFeaturePolicy =
++    DelegatePolicy::eDelegateUseFeaturePolicyRequestOrigin;
++#else
++static constexpr auto kSiteFeaturePolicy =
++    DelegatePolicy::eDelegateUseFeaturePolicy;
++#endif
++
+ // Particular type of permissions to care about. We decide cases by case and
+ // give various types of controls over each of these.
+ static const DelegateInfo sPermissionsMap[] = {
+     // Permissions API map. All permission names have to be in lowercase.
+-    {"geo", u"geolocation", DelegatePolicy::eDelegateUseFeaturePolicy},
++    {"geo", u"geolocation", kSiteFeaturePolicy},
+     // The same with geo, but we support both to save some conversions between
+     // "geo" and "geolocation"
+-    {"geolocation", u"geolocation", DelegatePolicy::eDelegateUseFeaturePolicy},
++    {"geolocation", u"geolocation", kSiteFeaturePolicy},
+     {"desktop-notification", nullptr,
+      DelegatePolicy::ePersistDeniedCrossOrigin},
+     {"persistent-storage", nullptr, DelegatePolicy::ePersistDeniedCrossOrigin},
+@@ -40,8 +48,8 @@
+     {"midi-sysex", nullptr, DelegatePolicy::eDelegateUseIframeOrigin},
+     {"serial", nullptr, DelegatePolicy::eDelegateUseFeaturePolicy},
+     {"storage-access", nullptr, DelegatePolicy::eDelegateUseIframeOrigin},
+-    {"camera", u"camera", DelegatePolicy::eDelegateUseFeaturePolicy},
+-    {"microphone", u"microphone", DelegatePolicy::eDelegateUseFeaturePolicy},
++    {"camera", u"camera", kSiteFeaturePolicy},
++    {"microphone", u"microphone", kSiteFeaturePolicy},
+     {"screen", u"display-capture", DelegatePolicy::eDelegateUseFeaturePolicy},
+     {"xr", u"xr-spatial-tracking", DelegatePolicy::eDelegateUseFeaturePolicy},
+     {"loopback-network", u"loopback-network",
+@@ -169,7 +177,9 @@
+ 
+ bool PermissionDelegateHandler::HasFeaturePolicyAllowed(
+     const DelegateInfo* info) const {
+-  if (info->mPolicy != DelegatePolicy::eDelegateUseFeaturePolicy ||
++  if ((info->mPolicy != DelegatePolicy::eDelegateUseFeaturePolicy &&
++       info->mPolicy !=
++           DelegatePolicy::eDelegateUseFeaturePolicyRequestOrigin) ||
+       !info->mFeatureName) {
+     return true;
+   }
+@@ -222,8 +232,10 @@
+ 
+   nsresult (NS_STDCALL nsIPermissionManager::*testPermission)(
+       nsIPrincipal*, const nsACString&, uint32_t*) =
+-      aExactHostMatch ? &nsIPermissionManager::TestExactPermissionFromPrincipal
+-                      : &nsIPermissionManager::TestPermissionFromPrincipal;
++      (aExactHostMatch ||
++       info->mPolicy == DelegatePolicy::eDelegateUseFeaturePolicyRequestOrigin)
++          ? &nsIPermissionManager::TestExactPermissionFromPrincipal
++          : &nsIPermissionManager::TestPermissionFromPrincipal;
+ 
+   if (info->mPolicy == DelegatePolicy::ePersistDeniedCrossOrigin &&
+       !mDocument->IsTopLevelContentDocument() &&
+diff --git a/extensions/permissions/PermissionDelegateHandler.h b/extensions/permissions/PermissionDelegateHandler.h
+index 7a41f08d41517d9c3e873ca93ed277d7214f5d17..ea8090445dc3e0aea7d216d8645dbcf337958f82 100644
+--- a/extensions/permissions/PermissionDelegateHandler.h
++++ b/extensions/permissions/PermissionDelegateHandler.h
+@@ -103,6 +103,9 @@ class PermissionDelegateHandler final : public nsIPermissionDelegateHandler {
+      * "geolocation" */
+     eDelegateUseFeaturePolicy,
+ 
++    // Permissions Policy still applies; grants belong to the requesting origin.
++    eDelegateUseFeaturePolicyRequestOrigin,
++
+     /* Persistent denied permissions in cross origin iframe */
+     ePersistDeniedCrossOrigin,
+ 

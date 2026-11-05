@@ -104,7 +104,7 @@ index d553c5e96729f624cfaff7ec04803b7a0b370a85..f559ac0c7c4e37f0e00646830848fc9d
  }
  
 diff --git a/dom/system/linux/PortalLocationProvider.cpp b/dom/system/linux/PortalLocationProvider.cpp
-index 712f71bad29c35dba46cf1c130e61f8e8ddbf17b..86b497196f7dcc8abce04e472d2feda46b1acf8f 100644
+index 78c1b62439ba443a84a0db67bc3f995105c3392c..0b2749144ce8e24ba04c76ecee2892fd83cee5a1 100644
 --- a/dom/system/linux/PortalLocationProvider.cpp
 +++ b/dom/system/linux/PortalLocationProvider.cpp
 @@ -12,6 +12,7 @@
@@ -155,10 +155,10 @@ index 712f71bad29c35dba46cf1c130e61f8e8ddbf17b..86b497196f7dcc8abce04e472d2feda4
  
    glean::geolocation::geolocation_service
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 239164bb2c7953101ebbc3be5a819b27f8afa860..da98252cf7c71796bdb2dc7153d426ead93fd32b 100644
+index ce7b15fbe97bda9f2c39a9fadc22e059cc16f211..86e9038e588dfc5c8c6436c89ec14b66d3079d21 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
-@@ -7079,6 +7079,15 @@
+@@ -7061,6 +7061,15 @@
    value: 6000
    mirror: always
  

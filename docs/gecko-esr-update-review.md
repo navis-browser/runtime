@@ -33,6 +33,12 @@ The deterministic JSON dossier records:
 
 Paths not matching a focused route remain in `general-upstream`. They are not discarded or labeled irrelevant. A path may match more than one cross-cutting route, so route counts intentionally need not sum to the tree-path count.
 
+## Patch responsibility and organization
+
+Each semantic port describes one final responsibility, including its required build registration and correctness fixes. Fold follow-up fixes into that responsibility when dependencies permit. Shared declarations belong to their foundational adapter; platform startup hooks stay with the platform adapter that owns the files. Keep related cross-adapter invariants explicit rather than moving a hunk before its input exists.
+
+When regrouping or renumbering an unchanged series, update its contiguous order, hashes and all validator/test references. Independently replay both complete series against the same pin and compare the full resulting tree, including path presence, file contents and executable/symlink modes. Successful application alone does not prove equivalence. Keep the old-to-new mapping and replay results as review evidence outside the source distribution. Existing binaries retain their original provenance; source-equivalence evidence does not establish a behavioral change or replace its required native validation.
+
 ## Complete-history gate
 
 By default, the tool refuses to write a dossier unless Git can establish the history topology and cover every commit from the merge base to both endpoints. This matters for ESR release branches: neither release endpoint is necessarily an ancestor of the other. A correct comparison may contain both a base-only side and a target-only side.

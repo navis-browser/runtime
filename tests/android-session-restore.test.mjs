@@ -8,7 +8,7 @@ import vm from "node:vm";
 const host = await readFile(new URL("../gecko/mobile/shared/chrome/navis/host.js", import.meta.url), "utf8");
 const restoreSource = host.slice(host.indexOf("function beginSessionRestore("), host.indexOf("function createRemoteBrowser("));
 const collectSource = host.slice(host.indexOf("function collectSessionState("), host.indexOf("function dispatchSessionState("));
-const generations = host.slice(host.indexOf("let sessionRestoreGeneration ="), host.indexOf("let navigationDiagnosticPending ="));
+const generations = host.slice(host.indexOf("let sessionRestoreGeneration ="), host.indexOf("// Never retain URLs"));
 const commandGuard = host.slice(host.indexOf("  onEvent(event, data, callback) {") + "  onEvent(event, data, callback) {".length,
   host.indexOf("    switch (event) {"));
 const loadCase = host.slice(host.indexOf('case "NavisAndroid:Load":'), host.indexOf('case "NavisAndroid:LoadExtensionPopup":'));
@@ -54,7 +54,7 @@ function fixture() {
     },
     Services: { io: { newURI: uri => uri }, scriptSecurityManager: { getSystemPrincipal: () => "system" } },
     NavisAndroidPresentation: { cancelTraversal() {} },
-    reportNavigationDiagnostic() {},
+    reportNavigationFailure() {},
   };
   vm.runInNewContext(`${generations}\n${collectSource}\n${restoreSource}\nthis.restore = restoreSessionState;
     this.begin = beginSessionRestore; this.readResult = readSessionRestoreResult;

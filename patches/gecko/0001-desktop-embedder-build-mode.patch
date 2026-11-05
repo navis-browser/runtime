@@ -1,8 +1,8 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 0c4e9ab760bcdb28c7abc0d64a286854fc3416ea..e128ef7c99e0fb21a0557472dc61f28d12511184 100644
+index 7286a0abdf211fd42e0b034e052db3bf3c09e029..ce9c2f2dc2e7fcd917a41f8a1f820ca834997d69 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -2954,6 +2954,7 @@ dependencies = [
+@@ -2966,6 +2966,7 @@ dependencies = [
   "mozglue-static",
   "mozurl",
   "mp4parse_capi",
@@ -10,7 +10,7 @@ index 0c4e9ab760bcdb28c7abc0d64a286854fc3416ea..e128ef7c99e0fb21a0557472dc61f28d
   "neqo_glue",
   "netwerk_helper",
   "nserror",
-@@ -5327,6 +5328,17 @@ dependencies = [
+@@ -5367,6 +5368,17 @@ dependencies = [
   "unicode-ident",
  ]
  
@@ -29,10 +29,10 @@ index 0c4e9ab760bcdb28c7abc0d64a286854fc3416ea..e128ef7c99e0fb21a0557472dc61f28d
  name = "neqo-bin"
  version = "0.29.0"
 diff --git a/dom/base/ChromeUtils.cpp b/dom/base/ChromeUtils.cpp
-index 1b82275e24ebf34e0f7573cf7c2f3aa6b92bd446..7626bf60ae1dbf5955bfc1da91a23e5425f0107c 100644
+index ebf933cdc3424089f3dc43544b6bbc48a0e67a45..c0df1739db532771e2ab3ee6bd8a096c54a6525d 100644
 --- a/dom/base/ChromeUtils.cpp
 +++ b/dom/base/ChromeUtils.cpp
-@@ -27,7 +27,9 @@
+@@ -28,7 +28,9 @@
  #include "mozilla/CycleCollectedJSRuntime.h"
  #include "mozilla/ErrorNames.h"
  #include "mozilla/EventStateManager.h"
@@ -43,7 +43,7 @@ index 1b82275e24ebf34e0f7573cf7c2f3aa6b92bd446..7626bf60ae1dbf5955bfc1da91a23e54
  #include "mozilla/IntentionalCrash.h"
  #include "mozilla/KeySystemConfig.h"
  #include "mozilla/PerfStats.h"
-@@ -2656,6 +2658,7 @@ already_AddRefed<Promise> ChromeUtils::CollectScrollingData(
+@@ -2659,6 +2661,7 @@ already_AddRefed<Promise> ChromeUtils::CollectScrollingData(
    return promise.forget();
  }
  
@@ -51,7 +51,7 @@ index 1b82275e24ebf34e0f7573cf7c2f3aa6b92bd446..7626bf60ae1dbf5955bfc1da91a23e54
  /* static */
  void ChromeUtils::GetFormAutofillConfidences(
      GlobalObject& aGlobal, const Sequence<OwningNonNull<Element>>& aElements,
-@@ -2663,6 +2666,7 @@ void ChromeUtils::GetFormAutofillConfidences(
+@@ -2666,6 +2669,7 @@ void ChromeUtils::GetFormAutofillConfidences(
    FormAutofillNative::GetFormAutofillConfidences(aGlobal, aElements, aResults,
                                                   aRv);
  }
@@ -60,7 +60,7 @@ index 1b82275e24ebf34e0f7573cf7c2f3aa6b92bd446..7626bf60ae1dbf5955bfc1da91a23e54
  bool ChromeUtils::IsDarkBackground(GlobalObject&, Element& aElement) {
    nsIFrame* f = aElement.GetPrimaryFrame(FlushType::Frames);
 diff --git a/dom/base/ChromeUtils.h b/dom/base/ChromeUtils.h
-index 81ff5a8e7a9ff55e9e1e470c03e81b3b9f170fb1..7196b90d7e63bbad6aaa4df73f63e7d437d0f5a6 100644
+index faea0c60f19fafad0bf0312bf54ac04da17d9184..6e293cd27f60a0d614f31059eb283195b43e0398 100644
 --- a/dom/base/ChromeUtils.h
 +++ b/dom/base/ChromeUtils.h
 @@ -65,7 +65,9 @@ class ChromeUtils {
@@ -132,7 +132,7 @@ index 97c0cb0f57b32d3d60cf005be0e1499b8b574b97..52679b9b7a18bbac077500b8f19a41b2
      DOMInterfaces.update({
  
 diff --git a/dom/chrome-webidl/ChromeUtils.webidl b/dom/chrome-webidl/ChromeUtils.webidl
-index 269ddd89f6c63cfce506d5598b302249a2249965..51da857cb4731e6e2d6f3a0dc499d65266a14212 100644
+index b7824d3d331f81845838d213db2024087290531c..2a9e755efdd9967bbb16e57b9470570326d6cb5b 100644
 --- a/dom/chrome-webidl/ChromeUtils.webidl
 +++ b/dom/chrome-webidl/ChromeUtils.webidl
 @@ -64,10 +64,12 @@ dictionary InteractionData {
@@ -156,7 +156,7 @@ index 269ddd89f6c63cfce506d5598b302249a2249965..51da857cb4731e6e2d6f3a0dc499d652
  
    /**
     * Efficient way to know if DevTools are active in the current process.
-@@ -887,8 +890,10 @@ partial namespace ChromeUtils {
+@@ -895,8 +898,10 @@ partial namespace ChromeUtils {
    [NewObject]
    Promise<InteractionData> collectScrollingData();
  
@@ -167,7 +167,7 @@ index 269ddd89f6c63cfce506d5598b302249a2249965..51da857cb4731e6e2d6f3a0dc499d652
  
    /**
     * Returns whether the background of the element is dark.
-@@ -1252,6 +1257,7 @@ dictionary HeapSnapshotBoundaries {
+@@ -1267,6 +1272,7 @@ dictionary HeapSnapshotBoundaries {
    object           debugger;
    boolean          runtime;
  };
@@ -176,10 +176,10 @@ index 269ddd89f6c63cfce506d5598b302249a2249965..51da857cb4731e6e2d6f3a0dc499d652
  dictionary Base64URLEncodeOptions {
    /** Specifies whether the output should be padded with "=" characters. */
 diff --git a/dom/chrome-webidl/moz.build b/dom/chrome-webidl/moz.build
-index 511494c03f8430341ce5ba1487b08784fb933d4d..a38b5618fec4693aff011e5f3752d580588edc48 100644
+index 4a5c4fcb1c8c853eeaea413f864a81df786b981d..2d2e616e64655fd4080d7e9c73f28b587a7ae458 100644
 --- a/dom/chrome-webidl/moz.build
 +++ b/dom/chrome-webidl/moz.build
-@@ -55,12 +55,10 @@ WEBIDL_FILES = [
+@@ -58,12 +58,10 @@ WEBIDL_FILES = [
      "DebuggerUtils.webidl",
      "DocumentL10n.webidl",
      "DOMCollectedFrames.webidl",
@@ -192,7 +192,7 @@ index 511494c03f8430341ce5ba1487b08784fb933d4d..a38b5618fec4693aff011e5f3752d580
      "ImageText.webidl",
      "InspectorUtils.webidl",
      "IteratorResult.webidl",
-@@ -113,6 +111,12 @@ WEBIDL_FILES = [
+@@ -117,6 +115,12 @@ WEBIDL_FILES = [
      "XULTreeElement.webidl",
  ]
  
@@ -205,7 +205,7 @@ index 511494c03f8430341ce5ba1487b08784fb933d4d..a38b5618fec4693aff011e5f3752d580
  GENERATED_EVENTS_WEBIDL_FILES = [
      "CSSCustomPropertyRegisteredEvent.webidl",
      "PluginCrashedEvent.webidl",
-@@ -122,7 +126,7 @@ GENERATED_EVENTS_WEBIDL_FILES = [
+@@ -126,7 +130,7 @@ GENERATED_EVENTS_WEBIDL_FILES = [
      "StyleSheetRemovedEvent.webidl",
  ]
  
@@ -250,7 +250,7 @@ index 1de5f331b0a34705097af7a1a95ef7d674db2947..e55b7cb78e4f87cfc41bb4958c683c6d
    PCycleCollectWithLogsChild* AllocPCycleCollectWithLogsChild(
        const bool& aDumpAllTraces, const FileDescriptor& aGCLog,
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 906eb61fcf946bc5ec908d784eeedcbd079e3e62..18cf7df6280a8869200a5ff2ee56230c33b69686 100644
+index 01af26507e80c416378b10b84f6fa4772f75514c..c1331c230abf11a19eb78ed5e0251753bafa4b22 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -78,7 +78,9 @@
@@ -264,7 +264,7 @@ index 906eb61fcf946bc5ec908d784eeedcbd079e3e62..18cf7df6280a8869200a5ff2ee56230c
  #include "mozilla/dom/BlobURLProtocolHandler.h"
  #include "mozilla/dom/BrowserHost.h"
  #include "mozilla/dom/BrowsingContext.h"
-@@ -4578,6 +4580,7 @@ bool ContentParent::DeallocPHeapSnapshotTempFileHelperParent(
+@@ -4592,6 +4594,7 @@ bool ContentParent::DeallocPHeapSnapshotTempFileHelperParent(
    delete aHeapSnapshotHelper;
    return true;
  }
@@ -273,7 +273,7 @@ index 906eb61fcf946bc5ec908d784eeedcbd079e3e62..18cf7df6280a8869200a5ff2ee56230c
  bool ContentParent::SendRequestMemoryReport(
      const uint32_t& aGeneration, const bool& aAnonymize,
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index 8cca90086a0716813270cb2e28f766a03283a089..bbab9d0d8b81ebd7adf6d11cea8ffa512b8f91eb 100644
+index d42ead119b68040185f7b2407666f2f131779502..53ce9391a5c95b34c615e7f2a874868e098ed685 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
 @@ -528,6 +528,7 @@ class ContentParent final : public PContentParent,
@@ -284,7 +284,7 @@ index 8cca90086a0716813270cb2e28f766a03283a089..bbab9d0d8b81ebd7adf6d11cea8ffa51
  
    PRemoteSpellcheckEngineParent* AllocPRemoteSpellcheckEngineParent();
  
-@@ -920,6 +921,7 @@ class ContentParent final : public PContentParent,
+@@ -922,6 +923,7 @@ class ContentParent final : public PContentParent,
  
    bool DeallocPHeapSnapshotTempFileHelperParent(
        PHeapSnapshotTempFileHelperParent*);
@@ -293,7 +293,7 @@ index 8cca90086a0716813270cb2e28f766a03283a089..bbab9d0d8b81ebd7adf6d11cea8ffa51
    PCycleCollectWithLogsParent* AllocPCycleCollectWithLogsParent(
        const bool& aDumpAllTraces, const FileDescriptor& aGCLog,
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index 23fb6485163552f033054047833e2a3b2c32017f..37c1b31830681445d49581e55ab06365dec23be6 100644
+index 4f69b00fad7f7d6a08be0d73853a6713a4123e9b..3a8eed799e3f6cf5fcde837d02702eace3502b6c 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
 @@ -16,6 +16,7 @@ include protocol PExternalHelperApp;
@@ -304,7 +304,7 @@ index 23fb6485163552f033054047833e2a3b2c32017f..37c1b31830681445d49581e55ab06365
  include protocol PProcessHangMonitor;
  include protocol PImageBridge;
  include protocol PRemotePrintJob;
-@@ -511,6 +512,7 @@ sync protocol PContent
+@@ -512,6 +513,7 @@ sync protocol PContent
      manages PHal;
      manages PHandlerService;
      manages PHeapSnapshotTempFileHelper;
@@ -312,7 +312,7 @@ index 23fb6485163552f033054047833e2a3b2c32017f..37c1b31830681445d49581e55ab06365
      manages PRemotePrintJob;
      manages PMedia;
      manages PNecko;
-@@ -1154,6 +1156,7 @@ parent:
+@@ -1155,6 +1157,7 @@ parent:
      [Nested=inside_cpow] async PHal();
  
      async PHeapSnapshotTempFileHelper();
@@ -337,7 +337,7 @@ index 40382ea4999d40d6e3aa1a8fbe27ff2002bbd40a..ab8f4334662e393708af3bf8a0b68869
  
  FINAL_LIBRARY = "xul"
 diff --git a/dom/webidl/Window.webidl b/dom/webidl/Window.webidl
-index ae2d14e105bc70dc4a5c7f1fa3481c550a74dd4d..245f261ce8714cdd05122e21537317f4ec5d2140 100644
+index 97e8c32b700211c8e0d8fa70ea9e79e3870ddee0..41234f3e925c30eb454a8898ec3933a3ac810fc2 100644
 --- a/dom/webidl/Window.webidl
 +++ b/dom/webidl/Window.webidl
 @@ -225,8 +225,10 @@ interface nsIPrintSettings;
@@ -391,7 +391,7 @@ index 6919fcff1cd3010c7c05697515b2da6b1241bf2f..b1fcaa6af7dfd1f9aa788b2b3c66780b
          "gfxDWriteFontList.cpp",
      ]
 diff --git a/netwerk/protocol/http/HttpBaseChannel.cpp b/netwerk/protocol/http/HttpBaseChannel.cpp
-index 3d1cc43f0979356b072ee0537cb9304193bd4f46..86778476eea279d978ebcbaedf35205b83ca7c00 100644
+index 09afd3bbd74692637c7323d8c6e67fcc32f0786f..ee8f7a3edd8c7ab8b8a0d7f1b687fdd76f596ec9 100644
 --- a/netwerk/protocol/http/HttpBaseChannel.cpp
 +++ b/netwerk/protocol/http/HttpBaseChannel.cpp
 @@ -33,7 +33,9 @@
@@ -405,7 +405,7 @@ index 3d1cc43f0979356b072ee0537cb9304193bd4f46..86778476eea279d978ebcbaedf35205b
  #include "mozilla/dom/BrowsingContext.h"
  #include "mozilla/dom/CanonicalBrowsingContext.h"
  #include "mozilla/dom/Document.h"
-@@ -3485,7 +3487,9 @@ OpaqueResponse HttpBaseChannel::BlockOrFilterOpaqueResponse(
+@@ -3478,7 +3480,9 @@ OpaqueResponse HttpBaseChannel::BlockOrFilterOpaqueResponse(
      OpaqueResponseBlocker* aORB, const nsAString& aReason,
      const OpaqueResponseBlockedTelemetryReason aTelemetryReason,
      const char* aFormat, ...) {
@@ -707,76 +707,6 @@ index 1435813505f2b9ab06abb7fafb21f3968231cf93..a3ea15c42323d81afca6088e010705dd
  
  if CONFIG["MOZ_BACKGROUNDTASKS"]:
      DIRS += ["backgroundtasks"]
-diff --git a/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs b/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs
-index d51d13f8a86fcc1f42f343a78f5f3a83cd96c623..34063b33f877a8e1c043c68298f99ef7901d34b1 100644
---- a/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs
-+++ b/toolkit/components/telemetry/app/TelemetryEnvironment.sys.mjs
-@@ -1677,7 +1677,14 @@ EnvironmentCache.prototype = {
-       const WINDOWS_UBR_KEY_PATH =
-         "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
- 
--      let versionInfo = lazy.WindowsVersionInfo.get({ throwOnError: false });
-+      let versionInfo = {
-+        servicePackMajor: null,
-+        servicePackMinor: null,
-+        buildNumber: null,
-+      };
-+      if ("@mozilla.org/jsctypes;1" in Cc) {
-+        versionInfo = lazy.WindowsVersionInfo.get({ throwOnError: false });
-+      }
-       this._osData.servicePackMajor = versionInfo.servicePackMajor;
-       this._osData.servicePackMinor = versionInfo.servicePackMinor;
-       this._osData.windowsBuildNumber = versionInfo.buildNumber;
-diff --git a/toolkit/components/telemetry/pings/TelemetrySession.sys.mjs b/toolkit/components/telemetry/pings/TelemetrySession.sys.mjs
-index 34bec5a2c38b42ea42bce8f1fb1c2c7f38dc1810..286d7dc8c0d4297f686f66be606071ae1d5e5193 100644
---- a/toolkit/components/telemetry/pings/TelemetrySession.sys.mjs
-+++ b/toolkit/components/telemetry/pings/TelemetrySession.sys.mjs
-@@ -106,7 +106,7 @@ var processInfo = {
-   _GetCurrentProcess: null,
-   getCounters() {
-     let isWindows = "@mozilla.org/windows-registry-key;1" in Cc;
--    if (isWindows) {
-+    if (isWindows && "@mozilla.org/jsctypes;1" in Cc) {
-       return this.getCounters_Windows();
-     }
-     return null;
-diff --git a/toolkit/components/telemetry/pings/UntrustedModulesPing.sys.mjs b/toolkit/components/telemetry/pings/UntrustedModulesPing.sys.mjs
-index 9c373f495df7a0d8f683e5e8e17b5a318d80a5f8..abe647693d07083e97291df1336da36c9dafb3bd 100644
---- a/toolkit/components/telemetry/pings/UntrustedModulesPing.sys.mjs
-+++ b/toolkit/components/telemetry/pings/UntrustedModulesPing.sys.mjs
-@@ -14,6 +14,9 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
- 
- const lazy = {};
- 
-+const UPDATE_TIMER_MANAGER_CONTRACT =
-+  "@mozilla.org/updates/timer-manager;1";
-+
- ChromeUtils.defineESModuleGetters(lazy, {
-   TelemetryController: "resource://gre/modules/TelemetryController.sys.mjs",
-   TelemetryUtils: "resource://gre/modules/TelemetryUtils.sys.mjs",
-@@ -21,7 +24,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
- 
- XPCOMUtils.defineLazyServiceGetters(lazy, {
-   UpdateTimerManager: [
--    "@mozilla.org/updates/timer-manager;1",
-+    UPDATE_TIMER_MANAGER_CONTRACT,
-     Ci.nsIUpdateTimerManager,
-   ],
- });
-@@ -37,6 +40,13 @@ export var TelemetryUntrustedModulesPing = Object.freeze({
-   _log: Log.repository.getLoggerWithMessagePrefix(LOGGER_NAME, LOGGER_PREFIX),
- 
-   start() {
-+    // The update timer manager is optional in products that do not ship the
-+    // application updater. There is no periodic ping to schedule without it.
-+    if (!(UPDATE_TIMER_MANAGER_CONTRACT in Cc)) {
-+      this._log.debug("Update timer manager is unavailable; not scheduling");
-+      return;
-+    }
-+
-     lazy.UpdateTimerManager.registerTimer(
-       TIMER_NAME,
-       this,
 diff --git a/toolkit/content/customElements.js b/toolkit/content/customElements.js
 index 6d733d370998b9d217b3f921b22566e40944031b..0978643c1929cb4118c3840cf1e5f15f721b5d02 100644
 --- a/toolkit/content/customElements.js
@@ -812,10 +742,18 @@ index a3f1cc35736600e1f3723d403ad1851266d30eed..12c566969f4e1c6ed76e0c665df36826
      gkrust_features += [
          "gecko_debug",
 diff --git a/toolkit/library/rust/shared/Cargo.toml b/toolkit/library/rust/shared/Cargo.toml
-index dbcd527798f6951e440e27f687fe921b9eaebdef..7641698a75998c96138874aac47cce18370cb583 100644
+index cc4e5a66833d1db845ef664e46aeb04130382977..b58175834fb6d7844522124b38b43c6267f2901b 100644
 --- a/toolkit/library/rust/shared/Cargo.toml
 +++ b/toolkit/library/rust/shared/Cargo.toml
-@@ -133,11 +133,11 @@ gecko-trace = { path = "../../../components/gecko-trace" }
+@@ -35,6 +35,7 @@ authrs_bridge = { path = "../../../../dom/webauthn/authrs_bridge" }
+ gkrust_utils = { path = "../../../../xpcom/rust/gkrust_utils" }
+ gecko_logger = { path = "../../../../xpcom/rust/gecko_logger" }
+ gecko_tracing = { path = "../../../../xpcom/rust/gecko_tracing" }
++navis-core-ffi = { path = "../../../../navis-core/rust/ffi", optional = true }
+ rsdparsa_capi = { path = "../../../../dom/media/webrtc/sdp/rsdparsa_capi" }
+ # We have these to enforce common feature sets for said crates.
+ log = {version = "0.4", features = ["release_max_level_info"]}
+@@ -133,11 +134,11 @@ gecko-trace = { path = "../../../components/gecko-trace" }
  osclientcerts = { path = "../../../../security/manager/ssl/osclientcerts" }
  
  [target.'cfg(not(target_os = "android"))'.dependencies]
@@ -831,7 +769,7 @@ index dbcd527798f6951e440e27f687fe921b9eaebdef..7641698a75998c96138874aac47cce18
  
  [target.'cfg(target_os = "windows")'.dependencies]
  detect_win32k_conflicts = { path = "../../../xre/detect_win32k_conflicts" }
-@@ -146,6 +146,12 @@ shell_windows = { path = "../../../../browser/components/shell/rust/shell_window
+@@ -146,6 +147,12 @@ shell_windows = { path = "../../../../browser/components/shell/rust/shell_window
  
  [features]
  default = []
@@ -1001,7 +939,7 @@ index 50d537ee499a0ae935082fd26c8a822ac4b06d36..f82f7c7bb3a235ec81b4a00eaad0ecac
      "ColorPickerPanel.sys.mjs",
      "DateTimePickerPanel.sys.mjs",
 diff --git a/toolkit/moz.build b/toolkit/moz.build
-index 1d4006082b7573992b192eb566c6a1bb88c86ab4..16dabab27a7e354a836c91c70e190a7f76abdecd 100644
+index 7935cafbaac24c9d3ddc3722c5dd48616e6cd993..e210af9f5679e9e545f6a79776831c940ac00815 100644
 --- a/toolkit/moz.build
 +++ b/toolkit/moz.build
 @@ -17,7 +17,14 @@ DIRS += [
@@ -1020,7 +958,7 @@ index 1d4006082b7573992b192eb566c6a1bb88c86ab4..16dabab27a7e354a836c91c70e190a7f
      "profile",
      "themes",
  ]
-@@ -65,8 +72,9 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+@@ -66,8 +73,9 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
          "system/commonproxy",
          "system/windowsproxy",
          "system/windowsDHCPClient",

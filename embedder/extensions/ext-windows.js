@@ -81,16 +81,16 @@
 
   function assertCreateOptions(createData) {
     if (createData.tabId != null) {
-      throw new ExtensionError("Navis 1.0 does not adopt tabs between windows");
+      throw new ExtensionError("Navis does not adopt tabs between windows");
     }
     if (createData.type != null && createData.type !== "normal") {
-      throw new ExtensionError("Navis 1.0 creates normal browser windows only");
+      throw new ExtensionError("Navis creates normal browser windows only");
     }
     if (createData.cookieStoreId != null) {
-      throw new ExtensionError("Navis 1.0 has no extension container stores");
+      throw new ExtensionError("Navis has no extension container stores");
     }
     if (createData.titlePreface) {
-      throw new ExtensionError("Navis 1.0 does not expose title prefaces");
+      throw new ExtensionError("Navis does not expose title prefaces");
     }
     const hasGeometry = ["left", "top", "width", "height"].some(
       key => createData[key] != null
@@ -293,7 +293,7 @@
             }
             if (updateInfo.titlePreface) {
               throw new ExtensionError(
-                "Navis 1.0 does not expose title prefaces"
+                "Navis does not expose title prefaces"
               );
             }
             wrapped.updateGeometry(updateInfo);

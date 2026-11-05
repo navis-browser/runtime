@@ -11,7 +11,7 @@ import { rankLocalSuggestions } from "../embedder/modules/NavisSuggestionPolicy.
 // Execute the retained upstream JS, with only Gecko host primitives replaced.
 // Never start a product process, access a real Profile, or perform network I/O.
 const root = new URL("../", import.meta.url);
-const patch = readFileSync(new URL("patches/gecko/0037-navis-offline-search-service.patch", root), "utf8");
+const patch = readFileSync(new URL("patches/gecko/0035-navis-offline-search-service.patch", root), "utf8");
 function source(path) {
   let text = readFileSync(new URL(`gecko/${path}`, root), "utf8");
   const section = patch.split(`diff --git a/${path} b/${path}\n`)[1]?.split("diff --git ")[0];

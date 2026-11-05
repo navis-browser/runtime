@@ -1,3 +1,126 @@
+diff --git a/intl/l10n/rust/l10nregistry-ffi/src/registry.rs b/intl/l10n/rust/l10nregistry-ffi/src/registry.rs
+index 1a1082c75f1d1b1882f55e3ef7fc2d8614932576..4c7d45c6e95c59a2dac2b97747829ce5d448af4c 100644
+--- a/intl/l10n/rust/l10nregistry-ffi/src/registry.rs
++++ b/intl/l10n/rust/l10nregistry-ffi/src/registry.rs
+@@ -139,17 +139,35 @@ pub fn set_l10n_registry(new_sources: &ThinVec<L10nFileSourceDescriptor>) {
+         let mut add_sources = vec![];
+         for desc in new_sources {
+             if !old_sources.contains(&desc.name.to_string()) {
+-                add_sources.push(FileSource::new(
+-                    desc.name.to_string(),
+-                    Some(desc.metasource.to_string()),
+-                    desc.locales
+-                        .iter()
+-                        .map(|s| s.to_utf8().parse().unwrap())
+-                        .collect(),
+-                    desc.pre_path.to_string(),
+-                    Default::default(),
+-                    GeckoFileFetcher,
+-                ));
++                let locales = desc
++                    .locales
++                    .iter()
++                    .map(|s| s.to_utf8().parse().unwrap())
++                    .collect();
++                // Indexed sources must retain their scope in content. In
++                // particular, a brand-only fallback must not claim ordinary
++                // translated resources under the same base path.
++                let source = if desc.index.is_empty() {
++                    FileSource::new(
++                        desc.name.to_string(),
++                        Some(desc.metasource.to_string()),
++                        locales,
++                        desc.pre_path.to_string(),
++                        Default::default(),
++                        GeckoFileFetcher,
++                    )
++                } else {
++                    FileSource::new_with_index(
++                        desc.name.to_string(),
++                        Some(desc.metasource.to_string()),
++                        locales,
++                        desc.pre_path.to_string(),
++                        Default::default(),
++                        GeckoFileFetcher,
++                        desc.index.iter().map(|path| path.to_string()).collect(),
++                    )
++                };
++                add_sources.push(source);
+             }
+         }
+         reg.register_sources(add_sources).unwrap();
+diff --git a/intl/l10n/test/test_l10nregistry_ipc_index.js b/intl/l10n/test/test_l10nregistry_ipc_index.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..686fc3a0ef4bfcd9d10dcbeea81ba23ed85ab661
+--- /dev/null
++++ b/intl/l10n/test/test_l10nregistry_ipc_index.js
+@@ -0,0 +1,53 @@
++/* Any copyright is dedicated to the Public Domain.
++ * http://creativecommons.org/publicdomain/zero/1.0/ */
++
++add_task(async function indexed_source_scope_survives_ipc() {
++  const registry = L10nRegistry.getInstance();
++  const name = "test-indexed-l10n-ipc";
++  const prefix = "resource://gre/localization/en-US/";
++  const index = [prefix + "branding/brand.ftl"];
++  // Other packaged sources must not satisfy this test's resource requests.
++  const locale = "qaa";
++  Assert.ok(!registry.getAvailableLocales().includes(locale));
++  const source = new L10nFileSource(
++    name,
++    "test-indexed-l10n",
++    [locale],
++    prefix,
++    {},
++    index
++  );
++  registry.registerSources([source]);
++  registerCleanupFunction(() => registry.removeSources([name]));
++  Assert.deepEqual(source.index, index);
++  Assert.equal(source.hasFile(locale, "toolkit/pdfviewer/viewer.ftl"), "missing");
++  Assert.ok(
++    registry.generateBundlesSync([locale], ["toolkit/pdfviewer/viewer.ftl"]).next().done
++  );
++
++  // Evaluate in the real content process without loading test files there.
++  // This also works when the normal content filesystem sandbox is enabled.
++  const result = JSON.parse(await new Promise(resolve => sendCommand(`
++    (() => {
++      const registry = L10nRegistry.getInstance();
++      const runtime = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime);
++      return JSON.stringify({
++        processType: runtime.processType,
++        registered: registry.hasSource(${JSON.stringify(name)}),
++        missingPdf: registry.generateBundlesSync(
++          [${JSON.stringify(locale)}], ["toolkit/pdfviewer/viewer.ftl"]
++        ).next().done,
++        presentBrand: !registry.generateBundlesSync(
++          [${JSON.stringify(locale)}], ["branding/brand.ftl"]
++        ).next().done,
++      });
++    })()
++  `, resolve)));
++  Assert.equal(result.processType, Ci.nsIXULRuntime.PROCESS_TYPE_CONTENT,
++    "[child] Checks execute in a real content process");
++  Assert.ok(result.registered, "[child] The parent source is transmitted to content");
++  Assert.ok(result.missingPdf,
++    "[child] Brand-only fallback cannot claim document translations after IPC");
++  Assert.ok(result.presentBrand,
++    "[child] The indexed brand resource remains usable after IPC");
++});
+diff --git a/intl/l10n/test/xpcshell.toml b/intl/l10n/test/xpcshell.toml
+index 9d7aa8e404c75651b71a671d535f2833cf359dce..7b28d1b0754e2072c934487a29479130c924d8ff 100644
+--- a/intl/l10n/test/xpcshell.toml
++++ b/intl/l10n/test/xpcshell.toml
+@@ -7,6 +7,8 @@ head = ""
+ 
+ ["test_l10nregistry_fuzzed.js"]
+ 
++["test_l10nregistry_ipc_index.js"]
++
+ ["test_l10nregistry_observer.js"]
+ 
+ ["test_l10nregistry_sync.js"]
 diff --git a/mobile/android/branding/unofficial/content/jar.mn b/mobile/android/branding/unofficial/content/jar.mn
 index 9e23656457086b650692a8aea8e90c32785a4732..04df77e4a7fed2e26db8d45edb066c744de1ad29 100644
 --- a/mobile/android/branding/unofficial/content/jar.mn
@@ -86,10 +209,10 @@ index 1b8068f235e421e97fc316f218efc14e551a07a5..bd82aec9fdbbb7ccdda3421ad2875fb5
      LOCAL_INCLUDES += [
          "/extensions/auth",
 diff --git a/netwerk/protocol/http/nsHttpHandler.cpp b/netwerk/protocol/http/nsHttpHandler.cpp
-index d7c4ee4d66f11ec37fbb9a32a979def59ab5b229..3138c149bd6590bf1b4cbc7175805858de2c0390 100644
+index eccfe0a78087171e124754a6f5554cecfe4a44d7..170b915224f7e209e473c8a2e975c5b3239b1cb8 100644
 --- a/netwerk/protocol/http/nsHttpHandler.cpp
 +++ b/netwerk/protocol/http/nsHttpHandler.cpp
-@@ -1079,6 +1079,10 @@ void nsHttpHandler::BuildUserAgent() {
+@@ -1087,6 +1087,10 @@ void nsHttpHandler::BuildUserAgent() {
      mUserAgent += '/';
      mUserAgent += mAppVersion;
    }
@@ -180,10 +303,9 @@ index 8278148b88861be48fa10b39f4cd05f5ceaaf53d..fef6c791026cdf32f9d3398ad3f85832
            const info = { name, vendor, version, buildID: appBuildID };
            return Promise.resolve(info);
 diff --git a/toolkit/modules/AppConstants.sys.mjs b/toolkit/modules/AppConstants.sys.mjs
-index 307a8298cd5cbbafb1fb53eceb6ed149d025669f..4a44326521741890ef623d7801d476593fb239e7 100644
 --- a/toolkit/modules/AppConstants.sys.mjs
 +++ b/toolkit/modules/AppConstants.sys.mjs
-@@ -140,6 +140,13 @@ export var AppConstants = Object.freeze({
+@@ -140,6 +140,13 @@
  
    MOZ_BITS_DOWNLOAD: @MOZ_BITS_DOWNLOAD_BOOL@,
  
@@ -197,7 +319,7 @@ index 307a8298cd5cbbafb1fb53eceb6ed149d025669f..4a44326521741890ef623d7801d47659
    MOZ_DESKTOP_EMBEDDER:
  #ifdef MOZ_DESKTOP_EMBEDDER
    true,
-@@ -245,6 +252,8 @@ export var AppConstants = Object.freeze({
+@@ -238,6 +245,8 @@
    MOZ_APP_DISPLAYNAME_DO_NOT_USE: "@MOZ_APP_DISPLAYNAME@",
    MOZ_APP_VERSION: "@MOZ_APP_VERSION@",
    MOZ_APP_VERSION_DISPLAY: "@MOZ_APP_VERSION_DISPLAY@",
@@ -220,13 +342,13 @@ index d8784faf50935ef319ea155f48fe15959cb74efb..2d5d76704707c51b27d7b43ad21c752b
      "MOZ_BING_API_KEY",
      "MOZ_GOOGLE_SAFEBROWSING_API_KEY",
 diff --git a/toolkit/moz.configure b/toolkit/moz.configure
-index 5783f29491bc6986ee62750934632dd208703f2e..5093b1e444d6e6a6fa8f8d6f5969358bca8297e0 100644
 --- a/toolkit/moz.configure
 +++ b/toolkit/moz.configure
-@@ -52,6 +52,59 @@ option(
+@@ -51,6 +51,59 @@
+ )
  set_config("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
  set_define("MOZ_DESKTOP_EMBEDDER", True, when="--enable-desktop-embedder")
- 
++
 +option(
 +    "--with-navis-product-version-file-path",
 +    nargs=1,
@@ -279,7 +401,6 @@ index 5783f29491bc6986ee62750934632dd208703f2e..5093b1e444d6e6a6fa8f8d6f5969358b
 +set_config(
 +    "MOZ_NAVIS_PRODUCT_VERSION_DISPLAY", navis_product_versions.display_version
 +)
-+
+ 
  option(
      "--enable-desktop-embedder-devtools",
-     help="Build Gecko page developer tools for the desktop embedder",
